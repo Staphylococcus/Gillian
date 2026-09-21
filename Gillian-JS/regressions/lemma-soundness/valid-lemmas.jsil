@@ -1,0 +1,6 @@
+lemma Identity(x)
+[[ types(#x : Bool) ]] [[ types(#x : Bool) ]]
+[* *]
+lemma Caller(x)
+[[ types(#x : Bool) ]] [[ types(#x : Bool) ]]
+[* apply Identity(#x) *]

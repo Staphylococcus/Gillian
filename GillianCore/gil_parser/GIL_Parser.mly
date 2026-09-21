@@ -804,6 +804,8 @@ g_sspec_target:
   ss_variant = option(variant_target);
   ss_flag = g_spec_kind
   {
+    if Option.is_some ss_variant then
+      Printf.eprintf "Warning: procedure variants are not checked; verification remains partial correctness.\n";
     let ss_to_verify = Option.is_none trusted in
     let spec : Spec.st = { ss_pre; ss_posts; ss_variant; ss_flag; ss_to_verify; ss_label = lab_spec} in
     spec
@@ -1021,7 +1023,6 @@ g_pred_target:
 variant_target:
   VARIANT LBRACE; variant = expr_target; RBRACE
   {
-    Printf.eprintf "Warning: variants are not currently being used by Gillian, no termination is checked.\n";
     variant }
 
 

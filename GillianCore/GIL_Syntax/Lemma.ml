@@ -17,7 +17,8 @@ type t = TypeDef__.lemma = {
   lemma_proof : LCmd.t list option;
   (* (Optional) Proof body *)
   lemma_variant : Expr.t option;
-  (* The paramater to treat as the variant. Will trigger termination checks *)
+  (* Natural integer measure for checked self-recursive induction.
+     Mutual recursion and non-parameter measures remain unsupported. *)
   lemma_existentials : string list;
   lemma_location : Location.t option;
 }

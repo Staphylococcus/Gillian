@@ -1,0 +1,4 @@
+lemma FalsePost()
+[[ emp ]]
+[[ (1 == 2) ]]
+[* *]

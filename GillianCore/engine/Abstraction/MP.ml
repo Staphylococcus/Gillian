@@ -58,6 +58,8 @@ type 'annot prog = {
   specs : (string, spec) Hashtbl.t;
   lemmas : (string, lemma) Hashtbl.t;
   coverage : (string * int, int) Hashtbl.t;
+  proved_lemmas : SS.t;
+  lemma_induction : ProofDependencies.induction option;
   prog : ('annot, int) Prog.t;
 }
 
@@ -694,7 +696,10 @@ let build_mp (cases : (step list * label option * post option) list) : t =
     List.map (fun (steps, label, post) -> of_step_list ?label ?post steps) cases
   in
   match linear_mps with
-  | [] -> Finished None
+  (* No alternatives is false; one alternative with no steps is emp. In
+     particular, removing every contradictory postcondition must not turn a
+     failed proof obligation into a successful empty match. *)
+  | [] -> of_step_list [ (Asrt.Pure Expr.false_, []) ]
   | a :: r -> List.fold_left add_linear_mp a r
 
 let init
@@ -938,7 +943,15 @@ let init_prog ?preds_tbl (prog : ('a, int) Prog.t) : 'a prog =
     let coverage : (string * int, int) Hashtbl.t =
       Hashtbl.create Config.big_tbl_size
     in
-    { prog; specs; preds; lemmas; coverage }
+    {
+      prog;
+      specs;
+      preds;
+      lemmas;
+      coverage;
+      proved_lemmas = SS.empty;
+      lemma_induction = None;
+    }
   in
   match res with
   | Ok res -> res

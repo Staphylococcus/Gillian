@@ -1,0 +1,5 @@
+pure nounfold pred Counted(n : Int) : (n == 0i), (0i i< n) * Counted(n i- 1i);
+lemma ListInduction(xs) variant(l-len #xs)
+[[ types(#xs : List) ]]
+[[ Counted(l-len #xs) ]]
+[* if (!(#xs == {{ }})) then { apply ListInduction(cdr #xs) }; fold Counted(l-len #xs) *]

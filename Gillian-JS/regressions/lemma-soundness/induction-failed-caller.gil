@@ -1,0 +1,13 @@
+pure pred Domain(n : Int): (n == 0i), (0i i< n);
+lemma Count(n) variant(#n)
+[[ Domain(#n) ]]
+[[ (0i i< #n) ]]
+[* if (#n == 1i) then { apply Count(0i) } else { if (#n i> 1i) then { apply Count(#n i- 1i) } } *]
+
+spec answer()
+[[ emp ]] [[ (ret == 43i) ]] normal
+proc answer() {
+  apply Count(0i);
+  ret := 42i;
+  return
+};

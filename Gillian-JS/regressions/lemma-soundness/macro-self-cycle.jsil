@@ -1,0 +1,4 @@
+macro Again(): Again()
+lemma Hidden()
+[[ emp ]] [[ emp ]]
+[* Again() *]

@@ -1,0 +1,11 @@
+lemma ForceTrue(x) variant(1)
+[[ types(#x : Bool) ]]
+[[ (#x == true) ]]
+[* apply ForceTrue(#x) *]
+
+spec answer()
+[[ emp ]] [[ (ret == 42) ]] normal
+proc answer() {
+  ret := 42;
+  return
+};

@@ -1,0 +1,18 @@
+pure nounfold pred Counted(n : Int) : (n == 0i), (0i i< n) * Counted(n i- 1i);
+lemma Count(n) variant(#n)
+[[ types(#n : Int) * (0i i<= #n) ]]
+[[ Counted(#n) ]]
+[* if (#n i> 0i) then { apply Count(#n i- 1i) }; fold Counted(#n) *]
+
+lemma ACaller(n)
+[[ types(#n : Int) * (0i i<= #n) ]]
+[[ Counted(#n) ]]
+[* apply Count(#n) *]
+
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() {
+  apply ACaller(2i);
+  ret := 42i;
+  return
+};

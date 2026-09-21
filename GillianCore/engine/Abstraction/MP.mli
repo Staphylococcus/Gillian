@@ -36,6 +36,8 @@ type 'annot prog = {
   specs : (string, spec) Hashtbl.t;
   lemmas : (string, lemma) Hashtbl.t;
   coverage : (string * int, int) Hashtbl.t;
+  proved_lemmas : Containers.SS.t;
+  lemma_induction : ProofDependencies.induction option;
   prog : ('annot, int) Prog.t;
 }
 

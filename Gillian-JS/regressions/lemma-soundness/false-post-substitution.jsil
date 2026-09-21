@@ -1,0 +1,3 @@
+lemma FalsePost(x)
+[[ (#x == true) ]] [[ (#x == false) ]]
+[* *]

@@ -1,0 +1,4 @@
+macro Again(x): apply Hidden(x)
+lemma Hidden(x) variant(1)
+[[ types(#x : Bool) ]] [[ (#x == true) ]]
+[* if (#x = true) then { } else { Again(#x) } *]

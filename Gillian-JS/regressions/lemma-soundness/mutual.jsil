@@ -1,0 +1,6 @@
+lemma First(x) variant(1)
+[[ types(#x : Bool) ]] [[ (#x == true) ]]
+[* apply Second(#x) *]
+lemma Second(x) variant(1)
+[[ types(#x : Bool) ]] [[ (#x == true) ]]
+[* apply First(#x) *]

@@ -1,0 +1,4 @@
+lemma ForceTrue(x) variant(1)
+[[ types(#x : Bool) ]]
+[[ (#x == true) ]]
+[* *]

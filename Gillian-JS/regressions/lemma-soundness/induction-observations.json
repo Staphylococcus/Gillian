@@ -1,0 +1,907 @@
+{
+  "kind": "checked-self-recursive-lemma-induction",
+  "certificationReady": false,
+  "baseCommit": "920ffbde01e92f38fa462017742dddcc71cccf6e",
+  "uncommittedSourceChanges": true,
+  "image": "sha256:cf1c78e15d8184a8bacb65bc0e604b4395558999d218c93d6a84b965f3c37b51",
+  "binarySha256": "61cd21b2f1401f3f85424a645ada23fd7cea572150321b44ca38213132454a92",
+  "sourceHashes": {
+    "Gillian-JS/lib/JSIL/Lemma.ml": "c7de4c2809535634768e907e6dd0ffce8cb1480b83762f665638688f9ca7d259",
+    "GillianCore/GIL_Syntax/Lemma.ml": "d60810b7ead1b23537bc293300b42a6227f21e9ba032e2fdd101d53eac9bdbe5",
+    "GillianCore/engine/Abstraction/MP.ml": "56207f9cec84606dbb483ecf84410a13291d10209424035e4419a951aed3caba",
+    "GillianCore/engine/Abstraction/MP.mli": "846dbd568b7f2052a87666227571ff661af55dbbe86f2edc89ac131c49587982",
+    "GillianCore/engine/Abstraction/PState.ml": "7805c237567392941226b817753ac29cf17062fa7c2e8b4901f0eb2965686acb",
+    "GillianCore/engine/Abstraction/Verifier.ml": "20330587a7c458bc767ebd698b586a35c67010d4bba69978339912e55a38234a",
+    "GillianCore/engine/Abstraction/ProofDependencies.ml": "53ac4f2d8e2ec1f9774915e4dac343b7cbc531e1adb1ccd5c5ec01cc50440f21",
+    "GillianCore/gil_parser/GIL_Parser.mly": "9fe6bd66ff771b16c868d173d4b821b8b80f17c696aa6146a5b7b280ca42c3f2"
+  },
+  "fixtureHashes": {
+    "chain-no-progress.js": "fc3c482129de326bb56cc54e462051e0bb2fcc8ac1ee07ef9bcae9c88c782f7a",
+    "chain.js": "989bacb1fcf22072f87838073dba6931205f342611b190e8194d9d181fc47354",
+    "circular-caller.js": "95164754f2a25f17ffe2a04ee4b80ba64518ff569ecb275ba222ae577ab154c8",
+    "circular-lemma.jsil": "343465e59717879e1344ea481ad6ca4d81964bb1c31f50de2d4a289fba345fdf",
+    "countdown.gil": "c54626f575116984f5cd998df8e38609c4867313b6584689fb0aabfff7259f01",
+    "false-post-lemma.jsil": "6fe25c19b47003676e56ab75f0d4aa7876ddeab7e3eb195bfea5b4f6f5b336c1",
+    "false-post-substitution.jsil": "993a32de976a57d243b167fc2188d7228d606c7b6d81d4590bb579b9dba1d622",
+    "induction-caller.gil": "01afdbfd46f3bcbff0ee5315860710dca454577e549e69cac860b2b112d00249",
+    "induction-constant.gil": "ab88322f0f8e56f28b8b6d92ff3c78f32ad4be4c4ad14ce7a6118958a1dce49c",
+    "induction-failed-caller.gil": "d3731583f404a226aa34407434bbe9ceac269b8aba9c1515695ab3984651a6b9",
+    "induction-false-base.gil": "d3a9cd499c39eb3e079c05411d15e6775c67dbc3055d343976cfd48e4f373311",
+    "induction-false-split-base.gil": "c911e13dc20189b3813d2435e7e8081a8fee9449235466c9cf8ebcf0c86912df",
+    "induction-ghost-rank.gil": "24e9123cf9ea752086140d53f1fc475e65257f4c523a93a8f436ed65901bac3f",
+    "induction-increase.gil": "fc40b69b960c7cd17b5854999051ad0c1f813bf0b4e71f95f2040cb36c06c0ea",
+    "induction-list-no-progress.gil": "0c27740c1310c4ca763fa24914fee29237e0bf5019b7b1106f47dcdf29d9b9c9",
+    "induction-list.gil": "6d2bddc9723bf7b806f530e3a084b5a11b6b07f5d8678c114988cf6ef237171a",
+    "induction-macro-loop.gil": "e4834fec8d10e39535bd7dde2c70e2b0b3568e8db9f284b2c57b9cb2b540ce69",
+    "induction-macro-no-progress.gil": "1f2dd8c37b26e8ca5938400b2302aa94492461372f1665e3896d301d386a83d3",
+    "induction-macro.gil": "f4611e01fd680d962ee5a3b2ec4329a547177f42dff7882f05c9c34a01adaec4",
+    "induction-missing-hypothesis.gil": "4a28e2f840c1201508df73938b5447825bad39dd23ac8b997b652b8f5fdc8c8c",
+    "induction-negative-call.gil": "c32302522ea2759dcb955b4b348a53f94831d7fdb84031574328de11cf90833a",
+    "induction-negative.gil": "5f447be6db6e2ee2680f8c890150934bc908e42fa2fbc8c8adaa7a2cbb49c30e",
+    "induction-no-progress.gil": "f0438394d520a7a0be0ee37ce236b6f73488570463c9e52bf0d606f568013a81",
+    "induction-noninteger.gil": "e407a8521fadcf6d24628043e3e6050389d952d03c36fa0734997f4a8fd70225",
+    "induction-pvar.gil": "74974de7c900e045a17add8cab4034e99a9aff2a335042b53bb5a7a81e101e7f",
+    "induction-repeat-calls.gil": "52ba9d5b50c0ac546d1ee982eb2cca0658fa7224874875e2d3a9b2a5db6cead8",
+    "induction-unbounded-below.gil": "8fddb91e03249fa8e1522e4bb394bc82a45bc8864f7a1b24cdaf07a3faab10da",
+    "induction.gil": "48e6ea1a4a61bddd86911efb1b2738c54f643688ac40e044b187be4c4f073d3c",
+    "invalid-lemma.jsil": "bfb7aa4fc84ffe90ea1ec9289f44851a5fd4b0c8e28610234a49f73476158cd5",
+    "loop.js": "e48f775f79356c68e3bcde5a6efb465d304311c00281d358878612d0600785a8",
+    "macro-cycle.jsil": "90166f036d7b4a11cab053ffcd6337c8777c10f4fe19c57cf606e65729950d46",
+    "macro-self-cycle.jsil": "70ad9f18471bbdd8596874d2ff882579f39db0bdda881d78f01d44d2c28f1ed9",
+    "mixed-posts.jsil": "4dc540a5a9a3de8ac7fbebf9f90ad57e5e503fd40e6ab126cd535fa220aa896e",
+    "mutual.jsil": "82f53ce243335484e8341f19c5b2c0e7292e4d96ee2e6256d7065fe43ccae1ae",
+    "recursive.js": "8ca991636ae770b60a2213b93c16d5af30e3306436001cbd65849434f8331729",
+    "return.js": "d262887417e089ba7d69806eaae855d48e32458c5c6574edea8a02c9ca27f0db",
+    "self-no-variant.jsil": "a0fe9d3ca5092e380ca2673ad8f811ddb332ec31d18aad6fd61974f4bcdeb375",
+    "unrelated-cycle.jsil": "8d7df4469e7331808ef5a0bd6aa35156d49d1fd93261eb8d3f8f7d1ac188220e",
+    "valid-lemmas.jsil": "f88379e46f8b96ca49d01d6498fda2657c9129bc9f72ece432db0b7990043202",
+    "wrong-return.js": "0f4d2ea9468068dd2b71c479cdc8635ca803637c56b5990f02c32faec46d7bb2"
+  },
+  "runnerSha256": "dc8cb3164bf3dea390ca7bd00400718902d174a0ac0f3b571a150ddbc18f5ebc",
+  "acceptance": {
+    "total": 43,
+    "passed": 43
+  },
+  "scope": "Checked argument-based natural integer measures for self-recursive lemmas. Mutual recursion and macro-only cycles unsupported; recursive summaries require every selected proof case to pass. Ordinary function verification remains partial correctness, and axiomatic/unselected acyclic dependencies remain assumptions.",
+  "results": [
+    {
+      "file": "return.js",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/return.js",
+        "--logging=normal",
+        "--procs-only"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "d262887417e089ba7d69806eaae855d48e32458c5c6574edea8a02c9ca27f0db",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.022965\nVerifying one spec of procedure answer... s Success\nAll specs succeeded: 0.032828\n"
+    },
+    {
+      "file": "wrong-return.js",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/wrong-return.js",
+        "--logging=normal",
+        "--procs-only"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "Couldn't satisfy postcondition",
+      "sourceSha256": "0f4d2ea9468068dd2b71c479cdc8635ca803637c56b5990f02c32faec46d7bb2",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.020064\nVerifying one spec of procedure answer... f Failure\nThere were failures: 0.029558\nAnalysis failures!\n1. Couldn't satisfy postcondition\n\n"
+    },
+    {
+      "file": "valid-lemmas.jsil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/valid-lemmas.jsil",
+        "--logging=normal",
+        "--jsil"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "f88379e46f8b96ca49d01d6498fda2657c9129bc9f72ece432db0b7990043202",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 2 symbolic tests in total\nRunning symbolic tests: 0.000897\nVerifying lemma Identity... s Success\nVerifying lemma Caller... s Success\nAll specs succeeded: 0.005264\n"
+    },
+    {
+      "file": "mixed-posts.jsil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/mixed-posts.jsil",
+        "--logging=normal",
+        "--jsil"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "4dc540a5a9a3de8ac7fbebf9f90ad57e5e503fd40e6ab126cd535fa220aa896e",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.000715\nVerifying lemma Mixed... s Success\nAll specs succeeded: 0.000833\n"
+    },
+    {
+      "file": "invalid-lemma.jsil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/invalid-lemma.jsil",
+        "--logging=normal",
+        "--jsil"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "Couldn't satisfy postcondition",
+      "sourceSha256": "bfb7aa4fc84ffe90ea1ec9289f44851a5fd4b0c8e28610234a49f73476158cd5",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.000768\nVerifying lemma ForceTrue... f Failure\nThere were failures: 0.006594\nAnalysis failures!\n1. Couldn't satisfy postcondition\n\n"
+    },
+    {
+      "file": "false-post-lemma.jsil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/false-post-lemma.jsil",
+        "--logging=normal",
+        "--jsil"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "Couldn't satisfy postcondition",
+      "sourceSha256": "6fe25c19b47003676e56ab75f0d4aa7876ddeab7e3eb195bfea5b4f6f5b336c1",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.000736\nVerifying lemma FalsePost... f Failure\nThere were failures: 0.000896\nAnalysis failures!\n1. Couldn't satisfy postcondition\n\n"
+    },
+    {
+      "file": "false-post-substitution.jsil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/false-post-substitution.jsil",
+        "--logging=normal",
+        "--jsil"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "Couldn't satisfy postcondition",
+      "sourceSha256": "993a32de976a57d243b167fc2188d7228d606c7b6d81d4590bb579b9dba1d622",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.000872\nVerifying lemma FalsePost... f Failure\nThere were failures: 0.000943\nAnalysis failures!\n1. Couldn't satisfy postcondition\n\n"
+    },
+    {
+      "file": "circular-lemma.jsil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/circular-lemma.jsil",
+        "--logging=normal",
+        "--jsil"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "entry variant is not a natural integer",
+      "sourceSha256": "343465e59717879e1344ea481ad6ca4d81964bb1c31f50de2d4a289fba345fdf",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.000951\nThere were failures: 0.001164\nAnalysis failures!\n1. Lemma ForceTrue entry variant is not a natural integer\n\n"
+    },
+    {
+      "file": "self-no-variant.jsil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/self-no-variant.jsil",
+        "--logging=normal",
+        "--jsil"
+      ],
+      "expectedExit": 124,
+      "expectedMessage": "Unsupported recursive lemma proof dependency",
+      "sourceSha256": "a0fe9d3ca5092e380ca2673ad8f811ddb332ec31d18aad6fd61974f4bcdeb375",
+      "passed": true,
+      "exitCode": 124,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nOriginal Backtrace:\nRaised at Engine__ProofDependencies.unsupported in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", lines 35-38, characters 2-72\nCalled from Engine__ProofDependencies.recursive_lemmas.(fun) in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", line 94, characters 19-59\nCalled from Stdlib__List.fold_left in file \"list.ml\", line 123, characters 24-34\nCalled from Engine__Verifier.Make.get_tests_to_verify.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 876, characters 16-72\nCalled from Stdlib__List.concat_map in file \"list.ml\", line 286, characters 32-37\nCalled from Engine__Verifier.Make.get_tests_to_verify in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 873-887, characters 10-28\nCalled from Engine__Verifier.Make.verify_procs in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 923, characters 6-75\nCalled from Engine__Verifier.Make.verify_prog.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 1092, characters 14-75\nCalled from Logging.Phase.with_phase in file \"GillianCore/logging/logging.ml\", line 123, characters 13-19\n\nUnsupported recursive lemma proof dependency: ForceTrue needs a variant.\n"
+    },
+    {
+      "file": "mutual.jsil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/mutual.jsil",
+        "--logging=normal",
+        "--jsil"
+      ],
+      "expectedExit": 124,
+      "expectedMessage": "Unsupported recursive lemma proof dependency",
+      "sourceSha256": "82f53ce243335484e8341f19c5b2c0e7292e4d96ee2e6256d7065fe43ccae1ae",
+      "passed": true,
+      "exitCode": 124,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nOriginal Backtrace:\nRaised at Engine__ProofDependencies.unsupported in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", lines 35-38, characters 2-72\nCalled from Stdlib__List.fold_left in file \"list.ml\", line 123, characters 24-34\nCalled from Engine__Verifier.Make.get_tests_to_verify.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 876, characters 16-72\nCalled from Stdlib__List.concat_map in file \"list.ml\", line 286, characters 32-37\nCalled from Engine__Verifier.Make.get_tests_to_verify in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 873-887, characters 10-28\nCalled from Engine__Verifier.Make.verify_procs in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 923, characters 6-75\nCalled from Engine__Verifier.Make.verify_prog.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 1092, characters 14-75\nCalled from Logging.Phase.with_phase in file \"GillianCore/logging/logging.ml\", line 123, characters 13-19\n\nUnsupported recursive lemma proof dependency: mutually recursive lemmas need a joint induction rule.\n"
+    },
+    {
+      "file": "macro-cycle.jsil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/macro-cycle.jsil",
+        "--logging=normal",
+        "--jsil"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "entry variant is not a natural integer",
+      "sourceSha256": "90166f036d7b4a11cab053ffcd6337c8777c10f4fe19c57cf606e65729950d46",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.000959\nThere were failures: 0.000974\nAnalysis failures!\n1. Lemma Hidden entry variant is not a natural integer\n\n"
+    },
+    {
+      "file": "macro-self-cycle.jsil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/macro-self-cycle.jsil",
+        "--logging=normal",
+        "--jsil"
+      ],
+      "expectedExit": 124,
+      "expectedMessage": "Unsupported recursive lemma proof dependency",
+      "sourceSha256": "70ad9f18471bbdd8596874d2ff882579f39db0bdda881d78f01d44d2c28f1ed9",
+      "passed": true,
+      "exitCode": 124,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nOriginal Backtrace:\nRaised at Engine__ProofDependencies.unsupported in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", lines 35-38, characters 2-72\nCalled from Engine__ProofDependencies.recursive_lemmas in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", line 81, characters 4-41\nCalled from Engine__Verifier.Make.get_tests_to_verify.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 876, characters 16-72\nCalled from Stdlib__List.concat_map in file \"list.ml\", line 286, characters 32-37\nCalled from Engine__Verifier.Make.get_tests_to_verify in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 873-887, characters 10-28\nCalled from Engine__Verifier.Make.verify_procs in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 923, characters 6-75\nCalled from Engine__Verifier.Make.verify_prog.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 1092, characters 14-75\nCalled from Logging.Phase.with_phase in file \"GillianCore/logging/logging.ml\", line 123, characters 13-19\n\nUnsupported recursive lemma proof dependency: cyclic macro expansion.\n"
+    },
+    {
+      "file": "circular-caller.js",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/circular-caller.js",
+        "--logging=normal",
+        "--proc=answer",
+        "--lemma=ForceTrue"
+      ],
+      "expectedExit": 124,
+      "expectedMessage": "Unsupported recursive lemma proof dependency",
+      "sourceSha256": "95164754f2a25f17ffe2a04ee4b80ba64518ff569ecb275ba222ae577ab154c8",
+      "passed": true,
+      "exitCode": 124,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 2 symbolic tests in total\nRunning symbolic tests: 0.021559\nVerifying one spec of procedure answer... Original Backtrace:\nRaised at Engine__ProofDependencies.unsupported in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", lines 35-38, characters 2-72\nCalled from Stdlib__Set.Make.iter in file \"set.ml\", line 379, characters 35-38\nCalled from Engine__PState.Make.evaluate_slcmd in file \"GillianCore/engine/Abstraction/PState.ml\", lines 1085-1086, characters 10-59\nCalled from Engine__G_interpreter.Make.Evaluate_cmd.Do_eval.eval_logic in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 1206, characters 30-66\nCalled from Engine__G_interpreter.Make.Evaluate_cmd.Do_eval.f in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 1621, characters 12-28\nCalled from Engine__G_interpreter.Make.protected_evaluate_cmd.(fun) in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", lines 1797-1798, characters 10-77\nCalled from Stdlib__List.concat_map in file \"list.ml\", line 286, characters 32-37\nCalled from Engine__G_interpreter.Make.Evaluate_cmd_step.Handle_conf.cont in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", lines 2114-2115, characters 10-76\nCalled from Stdlib__Fun.protect in file \"fun.ml\", line 34, characters 8-15\nRe-raised at Stdlib__Fun.protect in file \"fun.ml\", line 39, characters 6-52\nCalled from Engine__G_interpreter.Make.evaluate_cmd_iter in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 2292, characters 53-67\nCalled from Engine__G_interpreter.Make.evaluate_proc in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\" (inlined), line 2380, characters 4-31\nCalled from Engine__Verifier.Make.verify.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 660-662, characters 10-44\nCalled from Stdlib__Fun.protect in file \"fun.ml\", line 34, characters 8-15\nRe-raised at Stdlib__Fun.protect in file \"fun.ml\", line 39, characters 6-52\nCalled from Engine__Verifier.Make.verify_procs.aux.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 945, characters 45-63\nCalled from Stdlib__List.fold_left in file \"list.ml\", line 123, characters 24-34\nCalled from Engine__Verifier.Make.verify_procs.aux in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 942-947, characters 14-29\nCalled from Engine__Verifier.Make.verify_procs in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 960, characters 6-30\nCalled from Engine__Verifier.Make.verify_prog.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 1092, characters 14-75\nCalled from Logging.Phase.with_phase in file \"GillianCore/logging/logging.ml\", line 123, characters 13-19\n\nUnsupported recursive lemma proof dependency: ForceTrue has not been proved in this verification run. Select its proof as well.\n"
+    },
+    {
+      "file": "circular-caller.js",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/circular-caller.js",
+        "--logging=normal",
+        "--procs-only"
+      ],
+      "expectedExit": 124,
+      "expectedMessage": "Unsupported recursive lemma proof dependency",
+      "sourceSha256": "95164754f2a25f17ffe2a04ee4b80ba64518ff569ecb275ba222ae577ab154c8",
+      "passed": true,
+      "exitCode": 124,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.021889\nVerifying one spec of procedure answer... Original Backtrace:\nRaised at Engine__ProofDependencies.unsupported in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", lines 35-38, characters 2-72\nCalled from Stdlib__Set.Make.iter in file \"set.ml\", line 379, characters 35-38\nCalled from Engine__PState.Make.evaluate_slcmd in file \"GillianCore/engine/Abstraction/PState.ml\", lines 1085-1086, characters 10-59\nCalled from Engine__G_interpreter.Make.Evaluate_cmd.Do_eval.eval_logic in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 1206, characters 30-66\nCalled from Engine__G_interpreter.Make.Evaluate_cmd.Do_eval.f in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 1621, characters 12-28\nCalled from Engine__G_interpreter.Make.protected_evaluate_cmd.(fun) in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", lines 1797-1798, characters 10-77\nCalled from Stdlib__List.concat_map in file \"list.ml\", line 286, characters 32-37\nCalled from Engine__G_interpreter.Make.Evaluate_cmd_step.Handle_conf.cont in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", lines 2114-2115, characters 10-76\nCalled from Stdlib__Fun.protect in file \"fun.ml\", line 34, characters 8-15\nRe-raised at Stdlib__Fun.protect in file \"fun.ml\", line 39, characters 6-52\nCalled from Engine__G_interpreter.Make.evaluate_cmd_iter in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 2292, characters 53-67\nCalled from Engine__G_interpreter.Make.evaluate_proc in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\" (inlined), line 2380, characters 4-31\nCalled from Engine__Verifier.Make.verify.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 660-662, characters 10-44\nCalled from Stdlib__Fun.protect in file \"fun.ml\", line 34, characters 8-15\nRe-raised at Stdlib__Fun.protect in file \"fun.ml\", line 39, characters 6-52\nCalled from Engine__Verifier.Make.verify_procs.aux.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 945, characters 45-63\nCalled from Stdlib__List.fold_left in file \"list.ml\", line 123, characters 24-34\nCalled from Engine__Verifier.Make.verify_procs.aux in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 942-947, characters 14-29\nCalled from Engine__Verifier.Make.verify_procs in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 960, characters 6-30\nCalled from Engine__Verifier.Make.verify_prog.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 1092, characters 14-75\nCalled from Logging.Phase.with_phase in file \"GillianCore/logging/logging.ml\", line 123, characters 13-19\n\nUnsupported recursive lemma proof dependency: ForceTrue has not been proved in this verification run. Select its proof as well.\n"
+    },
+    {
+      "file": "unrelated-cycle.jsil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/unrelated-cycle.jsil",
+        "--logging=normal",
+        "--jsil",
+        "--proc=answer"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "8d7df4469e7331808ef5a0bd6aa35156d49d1fd93261eb8d3f8f7d1ac188220e",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.000628\nVerifying one spec of procedure answer... s Success\nAll specs succeeded: 0.004845\n"
+    },
+    {
+      "file": "countdown.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/countdown.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "c54626f575116984f5cd998df8e38609c4867313b6584689fb0aabfff7259f01",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.008272\nVerifying lemma Countdown... s s Success\nAll specs succeeded: 0.018121\n"
+    },
+    {
+      "file": "induction.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "48e6ea1a4a61bddd86911efb1b2738c54f643688ac40e044b187be4c4f073d3c",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006335\nVerifying lemma Count... s s Success\nAll specs succeeded: 0.018639\n"
+    },
+    {
+      "file": "induction-missing-hypothesis.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-missing-hypothesis.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "Assertion failed",
+      "sourceSha256": "4a28e2f840c1201508df73938b5447825bad39dd23ac8b997b652b8f5fdc8c8c",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006656\nVerifying lemma Count... Failure\nThere were failures: 0.011557\nAnalysis failures!\n1. Assertion failed for #n: (0i i< #n)\n2. Assertion failed for #n: (#n == 0i)\n\n"
+    },
+    {
+      "file": "induction-repeat-calls.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-repeat-calls.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "52ba9d5b50c0ac546d1ee982eb2cca0658fa7224874875e2d3a9b2a5db6cead8",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006434\nVerifying lemma Count... s s Success\nAll specs succeeded: 0.015418\n"
+    },
+    {
+      "file": "induction-failed-caller.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-failed-caller.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 124,
+      "expectedMessage": "Unsupported recursive lemma proof dependency",
+      "sourceSha256": "d3731583f404a226aa34407434bbe9ceac269b8aba9c1515695ab3984651a6b9",
+      "passed": true,
+      "exitCode": 124,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 3 symbolic tests in total\nRunning symbolic tests: 0.006481\nVerifying lemma Count... s Success\nVerifying lemma Count... f Failure\nVerifying one spec of procedure answer... Original Backtrace:\nRaised at Engine__ProofDependencies.unsupported in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", lines 35-38, characters 2-72\nCalled from Stdlib__Set.Make.iter in file \"set.ml\", line 379, characters 35-38\nCalled from Engine__PState.Make.evaluate_slcmd in file \"GillianCore/engine/Abstraction/PState.ml\", lines 1085-1086, characters 10-59\nCalled from Engine__G_interpreter.Make.Evaluate_cmd.Do_eval.eval_logic in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 1206, characters 30-66\nCalled from Engine__G_interpreter.Make.Evaluate_cmd.Do_eval.f in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 1621, characters 12-28\nCalled from Engine__G_interpreter.Make.protected_evaluate_cmd.(fun) in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", lines 1797-1798, characters 10-77\nCalled from Stdlib__List.concat_map in file \"list.ml\", line 286, characters 32-37\nCalled from Engine__G_interpreter.Make.Evaluate_cmd_step.Handle_conf.cont in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", lines 2114-2115, characters 10-76\nCalled from Stdlib__Fun.protect in file \"fun.ml\", line 34, characters 8-15\nRe-raised at Stdlib__Fun.protect in file \"fun.ml\", line 39, characters 6-52\nCalled from Engine__G_interpreter.Make.evaluate_cmd_iter in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 2292, characters 53-67\nCalled from Engine__G_interpreter.Make.evaluate_proc in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\" (inlined), line 2380, characters 4-31\nCalled from Engine__Verifier.Make.verify.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 660-662, characters 10-44\nCalled from Stdlib__Fun.protect in file \"fun.ml\", line 34, characters 8-15\nRe-raised at Stdlib__Fun.protect in file \"fun.ml\", line 39, characters 6-52\nCalled from Engine__Verifier.Make.verify_procs.aux.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 945, characters 45-63\nCalled from Stdlib__List.fold_left in file \"list.ml\", line 123, characters 24-34\nCalled from Engine__Verifier.Make.verify_procs.aux in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 942-947, characters 14-29\nCalled from Engine__Verifier.Make.verify_procs in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 960, characters 6-30\nCalled from Engine__Verifier.Make.verify_prog.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 1092, characters 14-75\nCalled from Logging.Phase.with_phase in file \"GillianCore/logging/logging.ml\", line 123, characters 13-19\n\nUnsupported recursive lemma proof dependency: Count has not been proved in this verification run. Select its proof as well.\n"
+    },
+    {
+      "file": "induction-pvar.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-pvar.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "74974de7c900e045a17add8cab4034e99a9aff2a335042b53bb5a7a81e101e7f",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.007084\nVerifying lemma Count... s s Success\nAll specs succeeded: 0.018072\n"
+    },
+    {
+      "file": "induction-list.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-list.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "6d2bddc9723bf7b806f530e3a084b5a11b6b07f5d8678c114988cf6ef237171a",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.001069\nVerifying lemma ListInduction... s s Success\nAll specs succeeded: 0.020908\n"
+    },
+    {
+      "file": "induction-list-no-progress.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-list-no-progress.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "variant is not a strictly smaller natural integer",
+      "sourceSha256": "0c27740c1310c4ca763fa24914fee29237e0bf5019b7b1106f47dcdf29d9b9c9",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.001126\nVerifying lemma ListInduction... Failure\nThere were failures: 0.011622\nAnalysis failures!\n1. Lemma ListInduction variant is not a strictly smaller natural integer: (l-len #xs) < (l-len #xs)\n\n"
+    },
+    {
+      "file": "induction-no-progress.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-no-progress.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "variant is not a strictly smaller natural integer",
+      "sourceSha256": "f0438394d520a7a0be0ee37ce236b6f73488570463c9e52bf0d606f568013a81",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006193\nVerifying lemma Count... Failure\nThere were failures: 0.012506\nAnalysis failures!\n1. Lemma Count variant is not a strictly smaller natural integer: #n < #n\n\n"
+    },
+    {
+      "file": "induction-increase.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-increase.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "variant is not a strictly smaller natural integer",
+      "sourceSha256": "fc40b69b960c7cd17b5854999051ad0c1f813bf0b4e71f95f2040cb36c06c0ea",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006087\nVerifying lemma Count... Failure\nThere were failures: 0.012358\nAnalysis failures!\n1. Lemma Count variant is not a strictly smaller natural integer: (1i i+ #n) < #n\n\n"
+    },
+    {
+      "file": "induction-constant.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-constant.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "variant is not a strictly smaller natural integer",
+      "sourceSha256": "ab88322f0f8e56f28b8b6d92ff3c78f32ad4be4c4ad14ce7a6118958a1dce49c",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006575\nVerifying lemma Count... Failure\nThere were failures: 0.014964\nAnalysis failures!\n1. Lemma Count variant is not a strictly smaller natural integer: 1i < 1i\n\n"
+    },
+    {
+      "file": "induction-negative.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-negative.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "entry variant is not a natural integer",
+      "sourceSha256": "5f447be6db6e2ee2680f8c890150934bc908e42fa2fbc8c8adaa7a2cbb49c30e",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006502\nThere were failures: 0.006550\nAnalysis failures!\n1. Lemma Count entry variant is not a natural integer\n\n"
+    },
+    {
+      "file": "induction-noninteger.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-noninteger.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "entry variant is not a natural integer",
+      "sourceSha256": "e407a8521fadcf6d24628043e3e6050389d952d03c36fa0734997f4a8fd70225",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006946\nThere were failures: 0.006962\nAnalysis failures!\n1. Lemma Count entry variant is not a natural integer\n\n"
+    },
+    {
+      "file": "induction-unbounded-below.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-unbounded-below.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "entry variant is not a natural integer",
+      "sourceSha256": "8fddb91e03249fa8e1522e4bb394bc82a45bc8864f7a1b24cdaf07a3faab10da",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.001021\nThere were failures: 0.006747\nAnalysis failures!\n1. Lemma Count entry variant is not a natural integer\n\n"
+    },
+    {
+      "file": "induction-negative-call.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-negative-call.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "variant is not a strictly smaller natural integer",
+      "sourceSha256": "c32302522ea2759dcb955b4b348a53f94831d7fdb84031574328de11cf90833a",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.007034\nVerifying lemma Count... Failure\nThere were failures: 0.007152\nAnalysis failures!\n1. Lemma Count variant is not a strictly smaller natural integer: -1i < #n\n\n"
+    },
+    {
+      "file": "induction-ghost-rank.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-ghost-rank.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 124,
+      "expectedMessage": "Unsupported recursive lemma proof dependency",
+      "sourceSha256": "24e9123cf9ea752086140d53f1fc475e65257f4c523a93a8f436ed65901bac3f",
+      "passed": true,
+      "exitCode": 124,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nOriginal Backtrace:\nRaised at Engine__ProofDependencies.unsupported in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", lines 35-38, characters 2-72\nCalled from Engine__ProofDependencies.variant in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", lines 55-56, characters 8-77\nCalled from Engine__ProofDependencies.recursive_lemmas.(fun) in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", line 94, characters 19-59\nCalled from Stdlib__List.fold_left in file \"list.ml\", line 123, characters 24-34\nCalled from Engine__Verifier.Make.get_tests_to_verify.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 876, characters 16-72\nCalled from Stdlib__List.concat_map in file \"list.ml\", line 286, characters 32-37\nCalled from Engine__Verifier.Make.get_tests_to_verify in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 873-887, characters 10-28\nCalled from Engine__Verifier.Make.verify_procs in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 923, characters 6-75\nCalled from Engine__Verifier.Make.verify_prog.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 1092, characters 14-75\nCalled from Logging.Phase.with_phase in file \"GillianCore/logging/logging.ml\", line 123, characters 13-19\n\nUnsupported recursive lemma proof dependency: Count variant must depend only on its parameters.\n"
+    },
+    {
+      "file": "induction-false-base.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-false-base.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "Couldn't satisfy postcondition",
+      "sourceSha256": "d3a9cd499c39eb3e079c05411d15e6775c67dbc3055d343976cfd48e4f373311",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006752\nVerifying lemma Count... s f Failure\nThere were failures: 0.014484\nAnalysis failures!\n1. Couldn't satisfy postcondition [/work/Gillian-JS/regressions/lemma-soundness/induction-false-base.gil 3:4-14]\n\n"
+    },
+    {
+      "file": "induction-false-split-base.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-false-split-base.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "Couldn't satisfy postcondition",
+      "sourceSha256": "c911e13dc20189b3813d2435e7e8081a8fee9449235466c9cf8ebcf0c86912df",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 2 symbolic tests in total\nRunning symbolic tests: 0.006929\nVerifying lemma Count... s Success\nVerifying lemma Count... f Failure\nThere were failures: 0.025011\nAnalysis failures!\n1. Couldn't satisfy postcondition [/work/Gillian-JS/regressions/lemma-soundness/induction-false-split-base.gil 4:4-14]\n\n"
+    },
+    {
+      "file": "induction-macro.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-macro.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "f4611e01fd680d962ee5a3b2ec4329a547177f42dff7882f05c9c34a01adaec4",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006645\nVerifying lemma Count... s s Success\nAll specs succeeded: 0.015758\n"
+    },
+    {
+      "file": "induction-macro-no-progress.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-macro-no-progress.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 1,
+      "expectedMessage": "variant is not a strictly smaller natural integer",
+      "sourceSha256": "1f2dd8c37b26e8ca5938400b2302aa94492461372f1665e3896d301d386a83d3",
+      "passed": true,
+      "exitCode": 1,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006489\nVerifying lemma Count... Failure\nThere were failures: 0.011626\nAnalysis failures!\n1. Lemma Count variant is not a strictly smaller natural integer: #n < #n\n\n"
+    },
+    {
+      "file": "induction-macro-loop.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-macro-loop.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 124,
+      "expectedMessage": "Unsupported recursive lemma proof dependency",
+      "sourceSha256": "e4834fec8d10e39535bd7dde2c70e2b0b3568e8db9f284b2c57b9cb2b540ce69",
+      "passed": true,
+      "exitCode": 124,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nOriginal Backtrace:\nRaised at Engine__ProofDependencies.unsupported in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", lines 35-38, characters 2-72\nCalled from Engine__ProofDependencies.recursive_lemmas in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", line 81, characters 4-41\nCalled from Engine__Verifier.Make.get_tests_to_verify.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 876, characters 16-72\nCalled from Stdlib__List.concat_map in file \"list.ml\", line 286, characters 32-37\nCalled from Engine__Verifier.Make.get_tests_to_verify in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 873-887, characters 10-28\nCalled from Engine__Verifier.Make.verify_procs in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 923, characters 6-75\nCalled from Engine__Verifier.Make.verify_prog.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 1092, characters 14-75\nCalled from Logging.Phase.with_phase in file \"GillianCore/logging/logging.ml\", line 123, characters 13-19\n\nUnsupported recursive lemma proof dependency: cyclic macro expansion.\n"
+    },
+    {
+      "file": "induction-caller.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-caller.gil",
+        "--logging=normal",
+        "-a"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "01afdbfd46f3bcbff0ee5315860710dca454577e549e69cac860b2b112d00249",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 3 symbolic tests in total\nRunning symbolic tests: 0.007015\nVerifying lemma Count... s s Success\nVerifying lemma ACaller... s Success\nVerifying one spec of procedure answer... s Success\nAll specs succeeded: 0.016661\n"
+    },
+    {
+      "file": "induction-caller.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-caller.gil",
+        "--logging=normal",
+        "-a",
+        "--procs-only"
+      ],
+      "expectedExit": 124,
+      "expectedMessage": "Unsupported recursive lemma proof dependency",
+      "sourceSha256": "01afdbfd46f3bcbff0ee5315860710dca454577e549e69cac860b2b112d00249",
+      "passed": true,
+      "exitCode": 124,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.000616\nVerifying one spec of procedure answer... Original Backtrace:\nRaised at Engine__ProofDependencies.unsupported in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", lines 35-38, characters 2-72\nCalled from Stdlib__Set.Make.iter in file \"set.ml\", line 379, characters 35-38\nCalled from Engine__PState.Make.evaluate_slcmd in file \"GillianCore/engine/Abstraction/PState.ml\", lines 1085-1086, characters 10-59\nCalled from Engine__G_interpreter.Make.Evaluate_cmd.Do_eval.eval_logic in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 1206, characters 30-66\nCalled from Engine__G_interpreter.Make.Evaluate_cmd.Do_eval.f in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 1621, characters 12-28\nCalled from Engine__G_interpreter.Make.protected_evaluate_cmd.(fun) in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", lines 1797-1798, characters 10-77\nCalled from Stdlib__List.concat_map in file \"list.ml\", line 286, characters 32-37\nCalled from Engine__G_interpreter.Make.Evaluate_cmd_step.Handle_conf.cont in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", lines 2114-2115, characters 10-76\nCalled from Stdlib__Fun.protect in file \"fun.ml\", line 34, characters 8-15\nRe-raised at Stdlib__Fun.protect in file \"fun.ml\", line 39, characters 6-52\nCalled from Engine__G_interpreter.Make.evaluate_cmd_iter in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\", line 2292, characters 53-67\nCalled from Engine__G_interpreter.Make.evaluate_proc in file \"GillianCore/engine/general_semantics/general/g_interpreter.ml\" (inlined), line 2380, characters 4-31\nCalled from Engine__Verifier.Make.verify.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 660-662, characters 10-44\nCalled from Stdlib__Fun.protect in file \"fun.ml\", line 34, characters 8-15\nRe-raised at Stdlib__Fun.protect in file \"fun.ml\", line 39, characters 6-52\nCalled from Engine__Verifier.Make.verify_procs.aux.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 945, characters 45-63\nCalled from Stdlib__List.fold_left in file \"list.ml\", line 123, characters 24-34\nCalled from Engine__Verifier.Make.verify_procs.aux in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 942-947, characters 14-29\nCalled from Engine__Verifier.Make.verify_procs in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 960, characters 6-30\nCalled from Engine__Verifier.Make.verify_prog.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 1092, characters 14-75\nCalled from Logging.Phase.with_phase in file \"GillianCore/logging/logging.ml\", line 123, characters 13-19\n\nUnsupported recursive lemma proof dependency: Count has not been proved in this verification run. Select its proof as well.\n"
+    },
+    {
+      "file": "induction-caller.gil",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/induction-caller.gil",
+        "--logging=normal",
+        "-a",
+        "--lemma=ACaller"
+      ],
+      "expectedExit": 124,
+      "expectedMessage": "Unsupported recursive lemma proof dependency",
+      "sourceSha256": "01afdbfd46f3bcbff0ee5315860710dca454577e549e69cac860b2b112d00249",
+      "passed": true,
+      "exitCode": 124,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.006176\nOriginal Backtrace:\nRaised at Engine__ProofDependencies.unsupported in file \"GillianCore/engine/Abstraction/ProofDependencies.ml\", lines 35-38, characters 2-72\nCalled from Stdlib__Set.Make.iter in file \"set.ml\", line 379, characters 35-38\nCalled from Engine__Verifier.Make.verify.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 705-706, characters 12-65\nCalled from Stdlib__Fun.protect in file \"fun.ml\", line 34, characters 8-15\nRe-raised at Stdlib__Fun.protect in file \"fun.ml\", line 39, characters 6-52\nCalled from Engine__Verifier.Make.verify_procs.aux.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 945, characters 45-63\nCalled from Stdlib__List.fold_left in file \"list.ml\", line 123, characters 24-34\nCalled from Engine__Verifier.Make.verify_procs.aux in file \"GillianCore/engine/Abstraction/Verifier.ml\", lines 942-947, characters 14-29\nCalled from Engine__Verifier.Make.verify_procs in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 960, characters 6-30\nCalled from Engine__Verifier.Make.verify_prog.(fun) in file \"GillianCore/engine/Abstraction/Verifier.ml\", line 1092, characters 14-75\nCalled from Logging.Phase.with_phase in file \"GillianCore/logging/logging.ml\", line 123, characters 13-19\n\nUnsupported recursive lemma proof dependency: Count has not been proved in this verification run. Select its proof as well.\n"
+    },
+    {
+      "file": "chain.js",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/chain.js",
+        "--logging=normal",
+        "--procs-only"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "989bacb1fcf22072f87838073dba6931205f342611b190e8194d9d181fc47354",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.026669\nVerifying one spec of procedure scan... s s s Success\nAll specs succeeded: 0.091627\n"
+    },
+    {
+      "file": "chain-no-progress.js",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/chain-no-progress.js",
+        "--logging=normal",
+        "--procs-only"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "fc3c482129de326bb56cc54e462051e0bb2fcc8ac1ee07ef9bcae9c88c782f7a",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.026341\nVerifying one spec of procedure scan... s s Success\nAll specs succeeded: 0.072406\n"
+    },
+    {
+      "file": "recursive.js",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/recursive.js",
+        "--logging=normal",
+        "--procs-only"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "8ca991636ae770b60a2213b93c16d5af30e3306436001cbd65849434f8331729",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.028720\nVerifying one spec of procedure forever... s Success\nAll specs succeeded: 0.055068\n"
+    },
+    {
+      "file": "loop.js",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/lemma-soundness/loop.js",
+        "--logging=normal",
+        "--procs-only"
+      ],
+      "expectedExit": 0,
+      "expectedMessage": "All specs succeeded",
+      "sourceSha256": "e48f775f79356c68e3bcde5a6efb465d304311c00281d358878612d0600785a8",
+      "passed": true,
+      "exitCode": 0,
+      "output": "Parsing and compiling...\nPreprocessing...\nObtaining specs to verify...\nObtaining lemmas to verify...\nObtained 1 symbolic tests in total\nRunning symbolic tests: 0.016259\nVerifying one spec of procedure forever... Vanished\nAll specs succeeded: 0.028194\n"
+    }
+  ],
+  "numericRegressions": [
+    {
+      "case": "number-rounding",
+      "command": [
+        "/tmp/gillian-candidate",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-rounding.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "e26f0e3c1970242afc3e42af41bebcbe196f3e84d6412f9a74b9f68852081936",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    },
+    {
+      "case": "number-symbolic-monotonic",
+      "command": [
+        "/tmp/gillian-candidate",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-symbolic-monotonic.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "700b8787e15e73d02a2238034c2ebdb4fc298e17dbc08bce3f5c053075fb203f",
+      "expectedSuccess": false,
+      "exitCode": 1,
+      "incomplete": false,
+      "pathCount": 2,
+      "failedPaths": 1,
+      "passed": true
+    },
+    {
+      "case": "deductive-number-monotonic",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/numeric-soundness/deductive-number-monotonic.js",
+        "--logging=normal",
+        "--proc",
+        "increment"
+      ],
+      "sourceSha256": "14e45fc3d4bf4e962096d01a74b96a4cf164021aa65c6c8bd666d9cd7900f621",
+      "expectedSuccess": false,
+      "exitCode": 1,
+      "incomplete": false,
+      "passed": true
+    },
+    {
+      "case": "deductive-number-step-two",
+      "command": [
+        "/tmp/gillian-candidate",
+        "verify",
+        "/work/Gillian-JS/regressions/numeric-soundness/deductive-number-step-two.js",
+        "--logging=normal",
+        "--proc",
+        "incrementTwo"
+      ],
+      "sourceSha256": "cd98b7ed68c854e67f8f76e1238b48a63a5c1522fdad491bd700efb1b70cb7da",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "passed": true
+    },
+    {
+      "case": "number-overflow-nan",
+      "command": [
+        "/tmp/gillian-candidate",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-overflow-nan.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "98b2bbd186dbaa47379eae246a2917c9be90633edc8381e4db6f466d809791ad",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    },
+    {
+      "case": "number-signed-zero",
+      "command": [
+        "/tmp/gillian-candidate",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-signed-zero.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "ef9e98087e479583016afbbc8d896ced8ce8582664d83b0769dfcd5233c1d1dd",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    },
+    {
+      "case": "number-signed-zero-fail",
+      "command": [
+        "/tmp/gillian-candidate",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-signed-zero-fail.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "c754951f30889984b1f4a29dd59baf3fc8e42416f4146e6ab0b71d721de44416",
+      "expectedSuccess": false,
+      "exitCode": 1,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 1,
+      "passed": true
+    },
+    {
+      "case": "heap-alias",
+      "command": [
+        "/tmp/gillian-candidate",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/heap-alias.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "c5004c5b5e90270af68f9e131fcc29140fd018895131fc3e3c49f36fcd5b2f94",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    }
+  ],
+  "unitTests": {
+    "command": "opam exec -- dune runtest --profile release Gillian-JS/test GillianCore",
+    "passed": 16,
+    "output": "Testing Property order.\nThis run has ID `73BB57DC-BEB6-4879-9C81-AD7B15F7DEC0`.\n ...                order          0   keys.\n[OK]                order          0   keys.\n ...                order          1   symbolic transition.\n[OK]                order          1   symbolic transition.\nThe full test results are available in `/work/_build/default/Gillian-JS/test/_build/_tests/73BB57DC-BEB6-4879-9C81-AD7B15F7DEC0`.\nTest Successful in 0.000s. 2 tests run.\nTesting JavaScript UTF-16.\nThis run has ID `C6A0E8F1-2629-4FC0-931A-414B9ABDB44E`.\n ...                decode          0   code units.\n[OK]                decode          0   code units.\n ...                decode          1   malformed.\n[OK]                decode          1   malformed.\n ...                decode          2   canonical.\n[OK]                decode          2   canonical.\nThe full test results are available in `/work/_build/default/Gillian-JS/test/_build/_tests/C6A0E8F1-2629-4FC0-931A-414B9ABDB44E`.\nTest Successful in 0.000s. 3 tests run.\nTesting Gillian.\nThis run has ID `74AF38C5-6845-42C5-9F5A-8101DF321252`.\n ...                Gil_syntax.Reducers          0   literal_base_elements.\n[OK]                Gil_syntax.Reducers          0   literal_base_elements.\n ...                Gil_syntax.Reducers          1   expr_base_elements.\n[OK]                Gil_syntax.Reducers          1   expr_base_elements.\n ...                Binary64                     0   rounding.\n[OK]                Binary64                     0   rounding.\n ...                Binary64                     1   special values.\n[OK]                Binary64                     1   special values.\n ...                Binary64                     2   untyped equality and typed caching.\n[OK]                Binary64                     2   untyped equality and typed caching.\n ...                Binary64                     3   arithmetic differential matrix.\n[OK]                Binary64                     3   arithmetic differential matrix.\n ...                Binary64                     4   reductions.\n[OK]                Binary64                     4   reductions.\n ...                Binary64                     5   numeric conversions.\n[OK]                Binary64                     5   numeric conversions.\n ...                Binary64                     6   signed zero identity and caching.\n[OK]                Binary64                     6   signed zero identity and caching.\n ...                Binary64                     7   counterexample model.\n[OK]                Binary64                     7   counterexample model.\n ...                Strings                      0   GIL literal escaping.\n[OK]                Strings                      0   GIL literal escaping.\nThe full test results are available in `/work/_build/default/GillianCore/test/_build/_tests/74AF38C5-6845-42C5-9F5A-8101DF321252`.\nTest Successful in 1.000s. 11 tests run.\n"
+  }
+}

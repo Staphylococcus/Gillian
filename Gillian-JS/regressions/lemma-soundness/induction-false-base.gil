@@ -1,0 +1,4 @@
+lemma Count(n) variant(#n)
+[[ types(#n : Int) * (0i i<= #n) ]]
+[[ (0i i< #n) ]]
+[* if (#n i> 0i) then { apply Count(#n i- 1i) } *]

@@ -107,6 +107,7 @@ struct
     post_mp : MP.t;
     post_loc : Location.t option;
     flag : Flag.t option;
+    lemma_rank : Expr.t option;
     spec_vars : Expr.Set.t; [@to_yojson yojson_of_expr_set]
   }
   [@@deriving to_yojson]
@@ -127,6 +128,7 @@ struct
     SAInterpreter.reset_call_graph ()
 
   let testify
+      ?lemma_rank
       ~(init_data : SPState.init_data)
       (func_or_lemma_name : string)
       (preds : (string, MP.pred) Hashtbl.t)
@@ -141,6 +143,15 @@ struct
       (to_verify : bool) :
       (t option * (Asrt.t located * Asrt.t located list) option) list =
     let test_of_normalised_state id' (ss_pre, subst) =
+      (* Freeze the entry measure using the same normalization as the
+         precondition, before clearing the lemma's parameter store. *)
+      let lemma_rank =
+        Option.map
+          (fun rank ->
+            let rank = SSubst.subst_in_expr subst ~partial:true rank in
+            SPState.eval_expr ss_pre rank)
+          lemma_rank
+      in
       (* Step 2 - spec_vars = lvars(pre)\dom(subst) -U- alocs(range(subst)) *)
       let lvars =
         SS.fold
@@ -279,6 +290,7 @@ struct
                 pre_state = ss_pre;
                 post_mp;
                 flag;
+                lemma_rank;
                 spec_vars;
                 post_loc;
               }
@@ -387,6 +399,7 @@ struct
       (tests, new_spec)
 
   let testify_lemma
+      ?lemma_rank
       ~init_data
       (preds : MP.preds_tbl_t)
       (pred_ins : (string, int list) Hashtbl.t)
@@ -395,8 +408,9 @@ struct
       List.concat_map
         (fun Lemma.{ lemma_hyp; lemma_concs; lemma_spec_variant = _ } ->
           let to_verify = Option.is_some lemma.lemma_proof in
-          testify ~init_data lemma.lemma_name preds pred_ins lemma.lemma_name
-            lemma.lemma_params 0 lemma_hyp lemma_concs None None to_verify)
+          testify ?lemma_rank ~init_data lemma.lemma_name preds pred_ins
+            lemma.lemma_name lemma.lemma_params 0 lemma_hyp lemma_concs None
+            None to_verify)
         lemma.lemma_specs
     in
     let tests, specs =
@@ -660,6 +674,36 @@ struct
                 (Fmt.str "Lemma %s WITHOUT proof" test.name)
             else Ok () (* It's already correct *)
         | Some proof -> (
+            let recursive =
+              ProofDependencies.recursive_lemmas prog.prog test.name
+            in
+            let open Syntaxes.Result in
+            let* prog, state =
+              if not (SS.mem test.name recursive) then Ok (prog, state)
+              else
+                match test.lemma_rank with
+                | Some rank
+                  when SPState.get_type state rank = Some Type.IntType
+                       && SPState.assert_a state
+                            [ ProofDependencies.nonnegative rank ] ->
+                    (* Logical variables in the captured measure must survive
+                       simplification throughout the proof. *)
+                    let state = SPState.add_spec_vars state (Expr.lvars rank) in
+                    let lemma_induction =
+                      Some
+                        ProofDependencies.
+                          { name = test.name; entry_rank = rank }
+                    in
+                    Ok ({ prog with lemma_induction }, state)
+                | _ ->
+                    let msg =
+                      "Lemma " ^ test.name
+                      ^ " entry variant is not a natural integer"
+                    in
+                    Error (Gillian_result.Error.make_analysis_failures msg)
+            in
+            ProofDependencies.check_lemma ~proved:prog.proved_lemmas
+              ~induction:prog.lemma_induction prog.prog test.name;
             let msg = "Verifying lemma " ^ test.name ^ "... " in
             L.normal (fun fmt -> fmt "%s" msg);
             Fmt.pr "%s@?" msg;
@@ -827,9 +871,16 @@ struct
         in
         let tests' : t list =
           List.concat_map
-            (fun lemma ->
+            (fun (lemma : Lemma.t) ->
+              let recursive =
+                ProofDependencies.recursive_lemmas prog lemma.lemma_name
+              in
+              let lemma_rank =
+                if SS.mem lemma.lemma_name recursive then lemma.lemma_variant
+                else None
+              in
               let tests, new_lemma =
-                testify_lemma ~init_data preds pred_ins lemma
+                testify_lemma ?lemma_rank ~init_data preds pred_ins lemma
               in
               Hashtbl.replace prog.lemmas lemma.lemma_name new_lemma;
               tests)
@@ -875,14 +926,38 @@ struct
     let cur_time = Unix.gettimeofday () in
     Printf.printf "Running symbolic tests: %f\n" (cur_time -. !start_time);
     let result =
-      let rec aux = function
-        | [], acc -> acc
-        | _, acc when not (Gillian_result.should_continue acc) -> acc
-        | test :: tests, acc ->
-            let res = verify prog' test in
-            aux (tests, Gillian_result.merge acc res)
+      let lemma_names = ProofDependencies.order_lemmas prog lnames_to_verify in
+      let groups =
+        List.map
+          (fun name -> List.filter (fun test -> test.name = name) tests')
+          lemma_names
+        @ List.map (fun test -> [ test ]) tests
       in
-      aux (tests' @ tests, Ok ())
+      let rec aux prog groups acc =
+        match groups with
+        | [] -> acc
+        | _ when not (Gillian_result.should_continue acc) -> acc
+        | group :: groups ->
+            let res =
+              List.fold_left
+                (fun acc test ->
+                  if Gillian_result.should_continue acc then
+                    Gillian_result.merge acc (verify prog test)
+                  else acc)
+                (Ok ()) group
+            in
+            let prog =
+              match group with
+              | { name; flag = None; _ } :: _ when Result.is_ok res ->
+                  {
+                    prog with
+                    MP.proved_lemmas = SS.add name prog.proved_lemmas;
+                  }
+              | _ -> prog
+            in
+            aux prog groups (Gillian_result.merge acc res)
+      in
+      aux prog' groups (Ok ())
     in
     let end_time = Unix.gettimeofday () in
     let cur_verified = SS.union pnames_to_verify lnames_to_verify in

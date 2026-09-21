@@ -1082,6 +1082,8 @@ module Make (State : SState.S) :
       | Consume (asrt, binders) -> consume ~prog astate asrt binders
       | Produce asrt -> produce astate asrt
       | ApplyLem (lname, args, binders) ->
+          ProofDependencies.check_lemma ~proved:prog.proved_lemmas
+            ~induction:prog.lemma_induction prog.prog lname;
           if not (List.for_all Names.is_lvar_name binders) then
             failwith "Binding of pure variables in lemma application.";
           let lemma =
@@ -1090,6 +1092,36 @@ module Make (State : SState.S) :
             | Ok lemma -> lemma
           in
           let v_args : vt list = List.map eval_expr args in
+          (* Check before consuming the precondition or producing any conclusion:
+             the induction hypothesis is available only at smaller arguments. *)
+          let** () =
+            match prog.lemma_induction with
+            | Some ctx when ctx.name = lname ->
+                if List.length v_args <> List.length lemma.data.lemma_params
+                then
+                  Res_list.error_with
+                    (StateErr.EOther "Lemma variant argument count mismatch")
+                else
+                  let rank =
+                    ProofDependencies.instantiate_variant lemma.data v_args
+                  in
+                  if
+                    get_type astate rank = Some Type.IntType
+                    && assert_a astate
+                         [
+                           ProofDependencies.nonnegative rank;
+                           ProofDependencies.decreases rank ctx.entry_rank;
+                         ]
+                  then Res_list.return ()
+                  else
+                    Res_list.error_with
+                      (StateErr.EOther
+                         (Fmt.str
+                            "Lemma %s variant is not a strictly smaller \
+                             natural integer: %a < %a"
+                            lname Expr.pp rank Expr.pp ctx.entry_rank))
+            | _ -> Res_list.return ()
+          in
           (* Printf.printf "apply lemma. binders: %s. existentials: %s\n\n"
              (String.concat ", " binders) (String.concat ", " lemma.lemma.existentials); *)
           let existential_bindings =
