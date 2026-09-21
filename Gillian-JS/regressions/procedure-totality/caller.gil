@@ -1,0 +1,18 @@
+spec count(n)
+[[ (n == #n) * types(#n : Int) * (0i i<= #n) ]]
+[[ (ret == 0i) ]] variant(n) normal
+proc count(n) {
+  goto [n i> 0i] step done;
+step: ret := "count"(n i- 1i);
+  return;
+done: ret := 0i;
+  return
+};
+
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() {
+  x := "count"(4i);
+  ret := 42i;
+  return
+};

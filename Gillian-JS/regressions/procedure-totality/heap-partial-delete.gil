@@ -1,0 +1,8 @@
+spec answer(obj)
+[[ (obj == #obj) * <Cell>(#obj, "value"; 42i) ]]
+[[ (ret == 42i) ]] normal
+proc answer(obj) {
+  unused := [DeleteObject](obj);
+  ret := 42i;
+  return
+};

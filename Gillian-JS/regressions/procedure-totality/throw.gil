@@ -1,0 +1,6 @@
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] error
+proc answer() {
+  ret := 42i;
+  throw
+};

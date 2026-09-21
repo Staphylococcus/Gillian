@@ -1,0 +1,5 @@
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() {
+  ret := 42i
+};

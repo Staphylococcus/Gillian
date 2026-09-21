@@ -1,0 +1,8 @@
+spec read(obj)
+[[ (obj == #obj) * types(#obj : Obj) ]]
+[[ (ret == 42i) ]] normal
+proc read(obj) {
+  cell := [GetCell](obj, "missing");
+  ret := 42i;
+  return
+};

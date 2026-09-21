@@ -1,0 +1,17 @@
+spec answer(value)
+[[ (value == #value) * types(#value : Bool) ]]
+[[ (ret == #value) ]] normal
+proc answer(value) {
+  fresh := [Alloc](empty, null);
+  obj := l-nth(fresh, 0i);
+  missing := [GetCell](obj, "value");
+  unused := [SetCell](obj, "value", value);
+  cell := [GetCell](obj, "value");
+  metadata := [GetMetadata](obj);
+  assert (l-nth(metadata, 1i) == null);
+  keys := [GetAllProps](obj);
+  assert (l-nth(keys, 1i) == {{ "value" }});
+  unused := [DeleteObject](obj);
+  ret := 42i;
+  return
+};

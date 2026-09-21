@@ -326,11 +326,12 @@ let unfold_spec
         (fun (post, _) -> Simplifications.admissible_assertion post)
         posts
     in
-    if posts = [] then
-      Fmt.failwith
-        "Unfolding: Postcondition of %s seems invalid, it has been reduced to \
-         no postcondition"
-        spec.spec_name;
+    (* No surviving alternative means false. Preserve that obligation for the
+       verifier instead of turning a contradictory postcondition into a crash. *)
+    let posts =
+      if posts = [] then [ ([ Asrt.Pure Expr.false_ ], spec.spec_location) ]
+      else posts
+    in
     List.map
       (fun pre -> Spec.{ sspec with ss_pre = pre; ss_posts = posts })
       pres

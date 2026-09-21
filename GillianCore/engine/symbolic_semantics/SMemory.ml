@@ -24,6 +24,14 @@ module type S = sig
   val execute_action :
     string -> t -> Gpc.t -> vt list -> (t * vt list, err_t) Symex.result
 
+  (** [is_action_total name arity] admits a primitive to total verification. The
+      target must justify that the concrete operation completes on every state
+      represented by a successful symbolic execution, without callbacks or
+      unproved procedure calls. This does not waive memory safety checks or
+      permit the symbolic executor to omit feasible outcomes. Unknown actions
+      and unsupported arities must return [false]. *)
+  val is_action_total : string -> int -> bool
+
   (* Consumers have the same signature as action executors,
      but take a core-predicate name as parameter instead of action name.
      Theoretically, errors for consumers are different: they're logical errors or missing errors,
@@ -95,6 +103,7 @@ module Dummy : S with type init_data = unit = struct
   let get_init_data () = ()
   let clear () = ()
   let execute_action _ _ _ _ = failwith "Please implement SMemory"
+  let is_action_total _ _ = false
   let consume _ _ _ _ = failwith "Please implement SMemory"
   let produce _ _ _ _ = failwith "Please implement SMemory"
   let is_overlapping_asrt _ = failwith "Please implement SMemory"

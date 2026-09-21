@@ -1,0 +1,7 @@
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() {
+  x := apply({{ "answer" }});
+  ret := 42i;
+  return
+};

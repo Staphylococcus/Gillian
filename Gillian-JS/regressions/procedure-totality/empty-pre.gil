@@ -1,0 +1,6 @@
+spec answer()
+[[ (0i == 1i) ]] [[ (ret == 42i) ]] normal
+proc answer() {
+  ret := 42i;
+  return
+};

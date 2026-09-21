@@ -38,6 +38,8 @@ type 'annot prog = {
   coverage : (string * int, int) Hashtbl.t;
   proved_lemmas : Containers.SS.t;
   lemma_induction : ProofDependencies.induction option;
+  totality : Totality.context option;
+  proved_total_procs : SS.t;
   prog : ('annot, int) Prog.t;
 }
 

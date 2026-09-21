@@ -494,7 +494,13 @@ module M = struct
             let _, pos_fv_list =
               SFVL.partition (fun _ fv -> fv = Lit Nono) fv_list
             in
-            Ok [ (heap, [ loc; EList (SFVL.ordered_field_names pos_fv_list) ], [], []) ]
+            Ok
+              [
+                ( heap,
+                  [ loc; EList (SFVL.ordered_field_names pos_fv_list) ],
+                  [],
+                  [] );
+              ]
           else raise (Failure "DEATH. TODO. get_full_domain. incomplete domain")
     in
 
@@ -514,6 +520,67 @@ module M = struct
     in
     Option.fold ~some:f ~none:() (get_loc_name pfs gamma loc);
     Ok [ (heap, [], [], []) ]
+
+  (* Program actions and logical producers share this legacy implementation.
+     Total execution must not borrow the producer's ability to invent a missing
+     location/cell, or remove an object whose remaining fields could be framed.
+     The modern wrapper calls this only for program actions, never for consume
+     or produce. Unsupported footprints remain incomplete proofs. *)
+  let check_total_action action heap pfs gamma args =
+    let unsupported reason =
+      raise
+        (Gillian_result.Exc.Gillian_error
+           (OperationError
+              ("Unsupported totality proof: " ^ action ^ " " ^ reason)))
+    in
+    let entails f =
+      FOSolver.check_entailment Containers.SS.empty pfs [ f ] gamma
+    in
+    let object_at loc =
+      Option.bind (get_loc_name pfs gamma loc) (SHeap.get heap)
+    in
+    let string_key prop =
+      if
+        not
+          (entails
+             (Expr.BinOp (UnOp (TypeOf, prop), Equal, Lit (Type StringType))))
+      then unsupported "requires a string property key."
+    in
+    if action = JSILNames.alloc then
+      match args with
+      | Expr.Lit Empty :: _ -> ()
+      | _ -> unsupported "requires fresh allocation in the current fragment."
+    else if action = JSILNames.getCell then
+      match args with
+      | [ _; prop ] -> string_key prop
+      | _ -> unsupported "has invalid arguments."
+    else if action = JSILNames.setCell || action = JSILNames.delCell then
+      match args with
+      | loc :: prop :: _ ->
+          string_key prop;
+          let owns_cell =
+            match object_at loc with
+            | Some ((fields, _), _) ->
+                (* The legacy setter/deleter uses syntactic keys. Accepting
+                   merely equal aliases here could update a different entry. *)
+                Option.is_some (SFVL.get prop fields)
+            | None -> false
+          in
+          if not owns_cell then unsupported "requires an exposed property cell."
+      | _ -> unsupported "has invalid arguments."
+    else if action = JSILNames.delObj then
+      match args with
+      | [ loc ] ->
+          let owns_object =
+            match object_at loc with
+            | Some ((fields, Some dom), Some _) ->
+                entails
+                  (Expr.BinOp (dom, Equal, ESet (SFVL.field_names fields)))
+            | _ -> false
+          in
+          if not owns_object then
+            unsupported "requires a complete object footprint."
+      | _ -> unsupported "has invalid arguments."
 
   let execute_action
       ?matching:_

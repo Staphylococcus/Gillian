@@ -1,0 +1,7 @@
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() {
+  x := [Alloc](empty);
+  ret := 42i;
+  return
+};

@@ -107,7 +107,7 @@ struct
     post_mp : MP.t;
     post_loc : Location.t option;
     flag : Flag.t option;
-    lemma_rank : Expr.t option;
+    entry_rank : Expr.t option;
     spec_vars : Expr.Set.t; [@to_yojson yojson_of_expr_set]
   }
   [@@deriving to_yojson]
@@ -128,7 +128,7 @@ struct
     SAInterpreter.reset_call_graph ()
 
   let testify
-      ?lemma_rank
+      ?entry_rank
       ~(init_data : SPState.init_data)
       (func_or_lemma_name : string)
       (preds : (string, MP.pred) Hashtbl.t)
@@ -145,12 +145,12 @@ struct
     let test_of_normalised_state id' (ss_pre, subst) =
       (* Freeze the entry measure using the same normalization as the
          precondition, before clearing the lemma's parameter store. *)
-      let lemma_rank =
+      let entry_rank =
         Option.map
           (fun rank ->
             let rank = SSubst.subst_in_expr subst ~partial:true rank in
             SPState.eval_expr ss_pre rank)
-          lemma_rank
+          entry_rank
       in
       (* Step 2 - spec_vars = lvars(pre)\dom(subst) -U- alocs(range(subst)) *)
       let lvars =
@@ -290,7 +290,7 @@ struct
                 pre_state = ss_pre;
                 post_mp;
                 flag;
-                lemma_rank;
+                entry_rank;
                 spec_vars;
                 post_loc;
               }
@@ -304,7 +304,14 @@ struct
         Normaliser.normalise_assertion ~init_data ~pred_defs:preds
           ~pvars:(SS.of_list params) (fst pre)
       with
+      | Error _ when !Config.Verification.total ->
+          Totality.unsupported
+            (name
+           ^ " precondition could not be normalized; proof coverage is \
+              incomplete.")
       | Error _ -> [ (None, None) ]
+      | Ok [] when !Config.Verification.total ->
+          Totality.unsupported (name ^ " has no normalized precondition cases.")
       | Ok normalised_assertions ->
           let result =
             List.mapi test_of_normalised_state normalised_assertions
@@ -331,7 +338,10 @@ struct
       (sspec : Spec.st) : (t option * Spec.st option) list =
     let ( let+ ) x f = List.map f x in
     let+ stest, sspec' =
-      testify ~init_data spec_name preds pred_ins name params id sspec.ss_pre
+      testify
+        ?entry_rank:
+          (if !Config.Verification.total then sspec.ss_variant else None)
+        ~init_data spec_name preds pred_ins name params id sspec.ss_pre
         sspec.ss_posts (Some sspec.ss_flag)
         (Spec.label_vars_to_set sspec.ss_label)
         sspec.ss_to_verify
@@ -399,7 +409,7 @@ struct
       (tests, new_spec)
 
   let testify_lemma
-      ?lemma_rank
+      ?entry_rank
       ~init_data
       (preds : MP.preds_tbl_t)
       (pred_ins : (string, int list) Hashtbl.t)
@@ -408,7 +418,7 @@ struct
       List.concat_map
         (fun Lemma.{ lemma_hyp; lemma_concs; lemma_spec_variant = _ } ->
           let to_verify = Option.is_some lemma.lemma_proof in
-          testify ?lemma_rank ~init_data lemma.lemma_name preds pred_ins
+          testify ?entry_rank ~init_data lemma.lemma_name preds pred_ins
             lemma.lemma_name lemma.lemma_params 0 lemma_hyp lemma_concs None
             None to_verify)
         lemma.lemma_specs
@@ -599,7 +609,10 @@ struct
       (test : t)
       (flag : Flag.t)
       (rets : SAInterpreter.result_t list) : unit Gillian_result.t =
-    if rets = [] then (
+    if rets = [] && !Config.Verification.total then
+      Gillian_result.operation_error
+        "Incomplete totality proof: no completed procedure outcomes"
+    else if rets = [] then (
       print_vanish ();
       Ok ())
     else
@@ -656,6 +669,37 @@ struct
     match test.flag with
     | Some flag ->
         let prog = verify_up_to_procs prog test in
+        let open Syntaxes.Result in
+        let* prog, state =
+          if not !Config.Verification.total then Ok (prog, state)
+          else
+            let spec = Totality.spec (Prog.get_proc_exn prog.prog test.name) in
+            let variant = Totality.variant spec in
+            let rank = test.entry_rank in
+            if
+              Option.fold ~none:true
+                ~some:(fun rank ->
+                  SPState.get_type state rank = Some Type.IntType
+                  && SPState.assert_a state
+                       [ ProofDependencies.nonnegative rank ])
+                rank
+            then
+              let state =
+                Option.fold ~none:state
+                  ~some:(fun rank ->
+                    SPState.add_spec_vars state (Expr.lvars rank))
+                  rank
+              in
+              let totality =
+                Some { Totality.name = test.name; variant; entry_rank = rank }
+              in
+              Ok ({ prog with totality }, state)
+            else
+              Error
+                (Gillian_result.Error.make_analysis_failures
+                   ("Procedure " ^ test.name
+                  ^ " entry variant is not a natural integer"))
+        in
         let rets =
           SAInterpreter.evaluate_proc
             (fun x -> x)
@@ -681,7 +725,7 @@ struct
             let* prog, state =
               if not (SS.mem test.name recursive) then Ok (prog, state)
               else
-                match test.lemma_rank with
+                match test.entry_rank with
                 | Some rank
                   when SPState.get_type state rank = Some Type.IntType
                        && SPState.assert_a state
@@ -875,12 +919,12 @@ struct
               let recursive =
                 ProofDependencies.recursive_lemmas prog lemma.lemma_name
               in
-              let lemma_rank =
+              let entry_rank =
                 if SS.mem lemma.lemma_name recursive then lemma.lemma_variant
                 else None
               in
               let tests, new_lemma =
-                testify_lemma ?lemma_rank ~init_data preds pred_ins lemma
+                testify_lemma ?entry_rank ~init_data preds pred_ins lemma
               in
               Hashtbl.replace prog.lemmas lemma.lemma_name new_lemma;
               tests)
@@ -919,6 +963,13 @@ struct
       (prog : prog_t)
       (pnames_to_verify : SS.t)
       (lnames_to_verify : SS.t) : unit Gillian_result.t =
+    let total_order =
+      if !Config.Verification.total then
+        Some
+          (Totality.order_procs ~is_action_total:SState.is_action_total prog
+             pnames_to_verify)
+      else None
+    in
     let prog', tests', tests =
       get_tests_to_verify ~init_data prog pnames_to_verify lnames_to_verify
     in
@@ -931,7 +982,17 @@ struct
         List.map
           (fun name -> List.filter (fun test -> test.name = name) tests')
           lemma_names
-        @ List.map (fun test -> [ test ]) tests
+        @
+        match total_order with
+        | None -> List.map (fun test -> [ test ]) tests
+        | Some names ->
+            List.map
+              (fun name ->
+                let cases = List.filter (fun test -> test.name = name) tests in
+                if cases = [] then
+                  Totality.unsupported (name ^ " has no totality proof cases.");
+                cases)
+              names
       in
       let rec aux prog groups acc =
         match groups with
@@ -953,6 +1014,12 @@ struct
                     prog with
                     MP.proved_lemmas = SS.add name prog.proved_lemmas;
                   }
+              | { name; flag = Some _; _ } :: _
+                when !Config.Verification.total && Result.is_ok res ->
+                  {
+                    prog with
+                    MP.proved_total_procs = SS.add name prog.proved_total_procs;
+                  }
               | _ -> prog
             in
             aux prog groups (Gillian_result.merge acc res)
@@ -965,7 +1032,10 @@ struct
       Result.is_ok result && check_previously_verified prev_results cur_verified
     in
     let msg : string =
-      if success then "All specs succeeded:" else "There were failures:"
+      if success && !Config.Verification.total then
+        "All total procedure specs succeeded:"
+      else if success then "All specs succeeded:"
+      else "There were failures:"
     in
     let msg : string = Printf.sprintf "%s %f%!" msg (end_time -. !start_time) in
     Printf.printf "%s\n" msg;
@@ -1027,6 +1097,9 @@ struct
     L.Phase.with_normal ~title:"Program verification" @@ fun () ->
     let open ResultsDir in
     let open ChangeTracker in
+    if incremental && !Config.Verification.total then
+      Totality.unsupported
+        "incremental verification cannot reuse partial-correctness results.";
     if incremental && prev_results_exist () then (
       (* Only verify changed procedures and lemmas *)
       let cur_source_files =

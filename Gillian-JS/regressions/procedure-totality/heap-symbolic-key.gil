@@ -1,0 +1,10 @@
+spec read(obj, key)
+[[ (obj == #obj) * (key == #key) * types(#key : Str) *
+   <Cell>(#obj, "a"; 1i) * <Cell>(#obj, "b"; 2i) *
+   <Props>(#obj; -{ "a", "b" }-) ]]
+[[ ((ret == 1i) or (ret == 2i) or (ret == none)) ]] normal
+proc read(obj, key) {
+  cell := [GetCell](obj, key);
+  ret := l-nth(cell, 2i);
+  return
+};

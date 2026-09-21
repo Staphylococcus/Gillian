@@ -1,0 +1,9 @@
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() {
+  fresh := [Alloc](empty, null);
+  obj := l-nth(fresh, 0i);
+  cell := [GetCell](obj, 42i);
+  ret := 42i;
+  return
+};

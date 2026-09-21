@@ -66,6 +66,8 @@ module Lift (MSM : S) :
      and type init_data = MSM.init_data = struct
   include MSM
 
+  let is_action_total _ _ = false
+
   let assertions ?to_keep t =
     Engine.Reduction.reduce_assertion (assertions ?to_keep t)
 

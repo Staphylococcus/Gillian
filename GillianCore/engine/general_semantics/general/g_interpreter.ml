@@ -889,6 +889,33 @@ struct
           let caller = Call_stack.get_cur_proc_id cs in
           let () = Call_graph.add_proc_call call_graph caller pid in
           let args = build_args v_args params in
+          (match prog.totality with
+          | None -> ()
+          | Some ctx when pid = ctx.name ->
+              let rank, entry =
+                Totality.call_rank ctx params (List.map Val.to_expr args)
+              in
+              let value = State.eval_expr state rank in
+              if
+                State.get_type state value <> Some Type.IntType
+                || not
+                     (State.assert_a state
+                        [
+                          ProofDependencies.nonnegative rank;
+                          ProofDependencies.decreases rank entry;
+                        ])
+              then
+                raise
+                  (Gillian_result.Exc.analysis_failure
+                     (Fmt.str
+                        "Procedure %s variant is not a strictly smaller \
+                         natural integer: %a < %a"
+                        pid Expr.pp rank Expr.pp entry))
+          | Some _ ->
+              if not (SS.mem pid prog.proved_total_procs) then
+                Totality.unsupported
+                  (pid
+                 ^ " has not passed every totality proof case in this run."));
 
           let is_internal_proc proc_name =
             (Prog.get_proc_exn prog.prog proc_name).proc_internal
@@ -1016,6 +1043,7 @@ struct
       (* Action *)
       let eval_laction x a es eval_state =
         let {
+          prog;
           annot;
           i;
           cs;
@@ -1045,6 +1073,9 @@ struct
         let open Utils.Syntaxes.List in
         let v_es = List.map eval_expr es in
         let oks, errors = State.execute_action a state v_es |> split_results in
+        if Option.is_some prog.totality && oks = [] && errors = [] then
+          Totality.unsupported
+            ("primitive action " ^ a ^ " produced no outcomes");
         let oks =
           match oks with
           | [] -> []
@@ -1111,6 +1142,10 @@ struct
                   else State.try_recovering state recovery_vals
                 in
                 match recovery_states with
+                | Ok [] when Option.is_some prog.totality ->
+                    Totality.unsupported
+                      ("primitive action " ^ a
+                     ^ " recovery produced no outcomes")
                 | Ok recovery_states ->
                     let num_states = List.length recovery_states in
                     let b_counter =
@@ -2134,6 +2169,9 @@ struct
           cconf
         in
         let proc_name, annot_cmd = get_cmd prog cs i in
+        if !Config.Verification.total then
+          Totality.unsupported
+            "exploration budget exhausted; totality proof is incomplete.";
         if !Config.current_exec_mode <> Exec_mode.BiAbduction then
           L.normal (fun m -> m "WARNING: MAX BRANCHING STOP: %d.\n" b_counter);
         L.set_previous prev_cmd_report_id;
@@ -2272,6 +2310,9 @@ struct
           | Some (ConfCont c) -> Handle_conf.max_branch c eval_step_state
           | Some (ConfErr c) -> Handle_conf.err c eval_step_state
           | Some (ConfFinish c) -> Handle_conf.finish c eval_step_state
+          | Some (ConfSusp _) when !Config.Verification.total ->
+              Totality.unsupported
+                "suspended procedure call; totality proof is incomplete."
           | Some (ConfSusp c) when retry -> Handle_conf.susp c eval_step_state
           | Some _ ->
               continue_or_pause rest_confs

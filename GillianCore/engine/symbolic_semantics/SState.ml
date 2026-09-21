@@ -32,6 +32,7 @@ module type S = sig
   val get_typ_env : t -> Type_env.t
   val get_pfs : t -> PFS.t
   val sure_is_nonempty : t -> bool
+  val is_action_total : string -> int -> bool
   val consume_core_pred : string -> t -> vt list -> action_ret
   val produce_core_pred : string -> t -> vt list -> t list
 
@@ -99,6 +100,7 @@ module Make (SMemory : SMemory.S) :
       spec_vars SStore.pp store pp_heap heap PFS.pp pfs Type_env.pp gamma
 
   let sure_is_nonempty { heap; _ } = SMemory.sure_is_nonempty heap
+  let is_action_total = SMemory.is_action_total
 
   let pp_by_need pvars cmd_lvars cmd_locs fmt state =
     let { heap = memory; store; pfs; gamma; spec_vars } = state in

@@ -17,6 +17,13 @@ module Make
     let doc = "Do not verify the proofs of lemmas." in
     Arg.(value & flag & info [ "no-lemma-proof" ] ~doc)
 
+  let total =
+    let doc =
+      "Require total correctness in the supported GIL fragment: direct calls, \
+       acyclic control flow and natural-ranked self recursion."
+    in
+    Arg.(value & flag & info [ "total" ] ~doc)
+
   let procs_only =
     let doc = "Only verify procs." in
     Arg.(value & flag & info [ "procs-only" ] ~doc)
@@ -134,10 +141,12 @@ module Make
       procs_to_verify
       lemmas_to_verify
       procs_only
+      total
       () =
     (* Attention: if you plan to add UX verification, you must be careful about predicates.
        In our current formalism, they must be stricly exact. *)
     let () = Fmt_tty.setup_std_outputs () in
+    let () = Config.Verification.total := total in
     let () = Config.stats := stats in
     let () = Config.lemma_proof := not no_lemma_proof in
     let () = Config.current_exec_mode := Verification in
@@ -161,7 +170,7 @@ module Make
     Term.(
       const verify_once $ files $ already_compiled $ output_gil $ no_unfold
       $ stats $ no_lemma_proof $ manual $ incremental $ proc_arg $ lemma_arg
-      $ procs_only)
+      $ procs_only $ total)
 
   let verify_info =
     let doc = "Verifies a file of the target language" in

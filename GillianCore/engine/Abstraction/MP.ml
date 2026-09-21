@@ -60,6 +60,8 @@ type 'annot prog = {
   coverage : (string * int, int) Hashtbl.t;
   proved_lemmas : SS.t;
   lemma_induction : ProofDependencies.induction option;
+  totality : Totality.context option;
+  proved_total_procs : SS.t;
   prog : ('annot, int) Prog.t;
 }
 
@@ -951,6 +953,8 @@ let init_prog ?preds_tbl (prog : ('a, int) Prog.t) : 'a prog =
       coverage;
       proved_lemmas = SS.empty;
       lemma_induction = None;
+      totality = None;
+      proved_total_procs = SS.empty;
     }
   in
   match res with

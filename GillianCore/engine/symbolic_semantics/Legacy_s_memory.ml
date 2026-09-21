@@ -103,6 +103,10 @@ end
 module Modernize (Old_memory : S) = struct
   include Old_memory
 
+  (* Legacy models have not supplied a primitive termination argument. Targets
+     can explicitly override this after reviewing their native operations. *)
+  let is_action_total _ _ = false
+
   let execute_action action_name heap (pc : Gpc.t) args =
     let open Syntaxes.List in
     match

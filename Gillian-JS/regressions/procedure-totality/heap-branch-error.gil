@@ -1,0 +1,10 @@
+spec read(obj, flag)
+[[ (obj == #obj) * types(#obj : Obj) *
+   (flag == #flag) * types(#flag : Bool) ]]
+[[ (ret == 42i) ]] normal
+proc read(obj, flag) {
+  goto [flag] done missing;
+missing: cell := [GetCell](obj, "missing");
+done: ret := 42i;
+  return
+};
