@@ -144,38 +144,25 @@ let type_ t = Lit (Type t)
 let type_eq e t = BinOp (typeof e, Equal, type_ t)
 
 module Infix = struct
+  (* Binary64 arithmetic is not associative and does not admit cancellation.
+     Fold concrete operands only, using the same operations as CExprEval. *)
   let ( +. ) a b =
     match (a, b) with
-    | Lit (Num 0.), x | x, Lit (Num 0.) -> x
     | Lit (Num x), Lit (Num y) -> Lit (Num (x +. y))
-    | BinOp (x, FPlus, Lit (Num y)), Lit (Num z)
-    | BinOp (Lit (Num y), FPlus, x), Lit (Num z)
-    | Lit (Num z), BinOp (x, FPlus, Lit (Num y))
-    | Lit (Num z), BinOp (Lit (Num y), FPlus, x) ->
-        BinOp (x, FPlus, Lit (Num (y +. z)))
     | _ -> BinOp (a, FPlus, b)
 
   let ( -. ) a b =
     match (a, b) with
-    | x, Lit (Num 0.) -> x
-    | Lit (Num 0.), x -> UnOp (FUnaryMinus, x)
     | Lit (Num x), Lit (Num y) -> Lit (Num (x -. y))
-    | BinOp (x, FPlus, y), z when equal y z -> x
-    | BinOp (x, FPlus, y), z when equal x z -> y
     | _ -> BinOp (a, FMinus, b)
 
   let ( *. ) a b =
     match (a, b) with
-    | Lit (Num 0.), _ | _, Lit (Num 0.) -> Lit (Num 0.)
-    | Lit (Num 1.), x | x, Lit (Num 1.) -> x
     | Lit (Num x), Lit (Num y) -> Lit (Num (x *. y))
     | _ -> BinOp (a, FTimes, b)
 
   let ( /. ) a b =
     match (a, b) with
-    | x, Lit (Num 1.) -> x
-    | BinOp (x, FTimes, y), z when equal y z -> x
-    | BinOp (x, FTimes, y), z when equal x z -> y
     | Lit (Num x), Lit (Num y) -> Lit (Num (x /. y))
     | _ -> BinOp (a, FDiv, b)
 
@@ -249,8 +236,8 @@ module Infix = struct
 
   let ( == ) a b =
     match (a, b) with
+    | Lit (Num a), Lit (Num b) -> bool (Stdlib.( = ) a b)
     | Lit la, Lit lb -> bool (Literal.equal la lb)
-    | a, b when equal a b -> Lit (Bool true)
     | _ -> BinOp (a, Equal, b)
 
   let lt = Stdlib.( < )
@@ -568,9 +555,7 @@ let push_in_negations, negate =
     | BinOp (a1, Or, a2) -> BinOp (f_on a1, And, f_on a2)
     | BinOp (a1, Impl, a2) -> BinOp (f_off a1, And, f_on a2)
     | BinOp (e1, ILessThan, e2) -> BinOp (e2, ILessThanEqual, e1)
-    | BinOp (e1, FLessThan, e2) -> BinOp (e2, FLessThanEqual, e1)
     | BinOp (e1, ILessThanEqual, e2) -> BinOp (e2, ILessThan, e1)
-    | BinOp (e1, FLessThanEqual, e2) -> BinOp (e2, FLessThan, e1)
     | Lit (Bool b) -> Lit (Bool (not b))
     | UnOp (Not, a) -> f_off a
     | Exists (bt, a) -> ForAll (bt, f_on a)

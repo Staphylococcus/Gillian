@@ -7,7 +7,12 @@ type t = TypeDef__.literal =
   | Constant of Constant.t  (** GIL constants ({!type:GIL_constant}) *)
   | Bool of bool  (** GIL booleans: [true] and [false] *)
   | Int of Z.t  (** GIL integers *)
-  | Num of float  (** GIL floats - double-precision 64-bit IEEE 754 *)
+  | Num of
+      (float
+      [@compare
+        fun a b -> Int64.compare (Int64.bits_of_float a) (Int64.bits_of_float b)])
+      (** GIL floats - double-precision 64-bit IEEE 754. Structural identity
+          distinguishes signed zeros; GIL Equal uses numeric equality. *)
   | String of string  (** GIL strings *)
   | Loc of string  (** GIL object locations *)
   | Type of Type.t  (** GIL types ({!type:Type.t}) *)
@@ -21,7 +26,8 @@ let rec equal la lb =
   | Constant cl, Constant cr -> Constant.equal cr cl
   | Bool bl, Bool br -> Bool.equal bl br
   | Int zl, Int zr -> Z.equal zl zr
-  | Num za, Num zb -> Int.equal (Stdlib.compare za zb) 0
+  | Num za, Num zb ->
+      Int64.equal (Int64.bits_of_float za) (Int64.bits_of_float zb)
   | String sl, String sr | Loc sl, Loc sr -> String.equal sl sr
   | Type tl, Type tr -> Type.equal tl tr
   | LList ll, LList lr -> List.for_all2 equal ll lr

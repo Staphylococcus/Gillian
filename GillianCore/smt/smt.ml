@@ -28,6 +28,25 @@ let pp_sexp = Sexplib.Sexp.pp_hum
 let ( <| ) constr e = app constr [ e ]
 let ( $$ ) constr l = app constr l
 
+(* GIL Num is IEEE-754 binary64, not an SMT mathematical real. *)
+let t_number : sexp =
+  List [ atom "_"; atom "FloatingPoint"; atom "11"; atom "53" ]
+
+let to_number args =
+  app (List [ atom "_"; atom "to_fp"; atom "11"; atom "53" ]) args
+
+let rne = atom "RNE"
+
+let number_literal n =
+  to_number [ atom (Printf.sprintf "#x%016Lx" (Int64.bits_of_float n)) ]
+
+let fp_un op a = app_ op [ a ]
+let fp_bin op a b = app_ op [ a; b ]
+let fp_arith op a b = app_ op [ rne; a; b ]
+
+let fp_finite a =
+  bool_not (bool_or (fp_un "fp.isNaN" a) (fp_un "fp.isInfinite" a))
+
 module Variant = struct
   module type S = sig
     val name : string
@@ -261,12 +280,20 @@ let sexps_to_yojson sexps =
 
 let pp_typenv = Fmt.(Dump.hashtbl string (Fmt.of_to_string Type.str))
 
-let encoding_cache :
-    (Expr.Set.t, sexp list * (int, definition) Hashtbl.t) Hashtbl.t =
-  Hashtbl.create Config.big_tbl_size
+(* Polymorphic equality merges +0 and -0. Cache keys must use structural
+   expression identity, since division can distinguish their signs. *)
+module Formula_cache = Hashtbl.Make (struct
+  type t = Expr.Set.t * (string * Type.t) list
 
-let sat_cache : (Expr.Set.t, sexp option) Hashtbl.t =
-  Hashtbl.create Config.big_tbl_size
+  let equal (a, ga) (b, gb) = Expr.Set.equal a b && ga = gb
+  let hash (fs, gamma) = Hashtbl.hash (Expr.Set.elements fs, gamma)
+end)
+
+let encoding_cache = Formula_cache.create Config.big_tbl_size
+let sat_cache = Formula_cache.create Config.big_tbl_size
+
+let formula_key fs gamma =
+  (fs, Hashtbl.to_seq gamma |> List.of_seq |> List.sort Stdlib.compare)
 
 let declare_const const typ = atom "declare-const" $$ [ atom const; typ ]
 
@@ -417,7 +444,7 @@ module Lit_operations = struct
   module Empty = (val nul "Empty" : Nullary)
   module Bool = (val un "Bool" "bValue" t_bool : Unary)
   module Int = (val un "Int" "iValue" t_int : Unary)
-  module Num = (val un "Num" "nValue" t_real : Unary)
+  module Num = (val un "Num" "nValue" t_number : Unary)
   module String = (val un "String" "sValue" t_int : Unary)
   module Loc = (val un "Loc" "locValue" t_int : Unary)
   module Type = (val un "Type" "tValue" t_gil_type : Unary)
@@ -463,7 +490,7 @@ let native_sort_of_type =
       require_definition def_gil_literal;
       t_gil_literal_list
   | BooleanType -> t_bool
-  | NumberType -> t_real
+  | NumberType -> t_number
   | UndefinedType | NoneType | EmptyType | NullType ->
       require_definition def_gil_literal;
       t_gil_literal
@@ -564,16 +591,16 @@ module Ext_lit_operations = struct
 end
 
 module Axiomatised_operations = struct
-  let slen, def_slen = mk_fun_decl "s-len" [ t_int ] t_real
+  let slen, def_slen = mk_fun_decl "s-len" [ t_int ] t_number
 
   let llen, def_llen =
     mk_fun_decl ~depends_on:[ def_gil_literal ] "l-len" [ t_gil_literal_list ]
       t_int
 
-  let num2str, def_num2str = mk_fun_decl "num2str" [ t_real ] t_int
-  let str2num, def_str2num = mk_fun_decl "str2num" [ t_int ] t_real
-  let num2int, def_num2int = mk_fun_decl "num2int" [ t_real ] t_real
-  let snth, def_snth = mk_fun_decl "s-nth" [ t_int; t_real ] t_int
+  let num2str, def_num2str = mk_fun_decl "num2str" [ t_number ] t_int
+  let str2num, def_str2num = mk_fun_decl "str2num" [ t_int ] t_number
+  let num2int, def_num2int = mk_fun_decl "num2int" [ t_number ] t_number
+  let snth, def_snth = mk_fun_decl "s-nth" [ t_int; t_number ] t_int
 
   let lrev, def_lrev =
     mk_fun_decl ~depends_on:[ def_gil_literal ] "l-rev" [ t_gil_literal_list ]
@@ -900,7 +927,7 @@ let rec encode_lit (lit : Literal.t) : Encoding.t =
         | _ -> none_encoding)
     | Bool b -> bool_k b >- BooleanType
     | Int i -> int_zk i >- IntType
-    | Num n -> real_k (Q.of_float n) >- NumberType
+    | Num n -> number_literal n >- NumberType
     | String s -> encode_string s >- StringType
     | Loc l -> encode_string l >- ObjectType
     | Type t -> encode_type t >- TypeType
@@ -912,6 +939,20 @@ let rec encode_lit (lit : Literal.t) : Encoding.t =
     | Constant _ -> raise (Exceptions.Unsupported "Z3 encoding: constants")
   with Failure msg -> exceptf "DEATH: encode_lit %a. %s" Literal.pp lit msg
 
+let wrapped_equality a b =
+  let open Lit_operations in
+  ite
+    (bool_and (Num.recognize a) (Num.recognize b))
+    (fp_bin "fp.eq" (Num.access a) (Num.access b))
+    (eq a b)
+
+let extended_equality a b =
+  let open Ext_lit_operations in
+  ite
+    (bool_and (Gil_sing_elem.recognize a) (Gil_sing_elem.recognize b))
+    (wrapped_equality (Gil_sing_elem.access a) (Gil_sing_elem.access b))
+    (eq a b)
+
 let encode_equality (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t =
   let open Encoding in
   let>- _ = p1 in
@@ -919,23 +960,26 @@ let encode_equality (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t =
   match (p1.kind, p2.kind) with
   | Native t1, Native t2 when Type.equal t1 t2 ->
       let expr =
-        match Type.equal t1 BooleanType with
-        | true when is_true p1.expr -> p2.expr
-        | true when is_true p2.expr -> p1.expr
+        match t1 with
+        | NumberType -> fp_bin "fp.eq" p1.expr p2.expr
+        | BooleanType when is_true p1.expr -> p2.expr
+        | BooleanType when is_true p2.expr -> p1.expr
         | _ -> eq p1.expr p2.expr
       in
       expr >- BooleanType
-  | Simple_wrapped, Simple_wrapped | Extended_wrapped, Extended_wrapped ->
-      eq p1.expr p2.expr >- BooleanType
+  | Simple_wrapped, Simple_wrapped ->
+      wrapped_equality p1.expr p2.expr >- BooleanType
+  | Extended_wrapped, Extended_wrapped ->
+      extended_equality p1.expr p2.expr >- BooleanType
   | Native _, Native _ -> exceptf "incompatible equality, type error!"
   | Simple_wrapped, Native _ | Native _, Simple_wrapped ->
       let>- p1 = simple_wrap p1 in
       let>- p2 = simple_wrap p2 in
-      eq p1.expr p2.expr >- BooleanType
+      wrapped_equality p1.expr p2.expr >- BooleanType
   | Extended_wrapped, _ | _, Extended_wrapped ->
       let>- p1 = extend_wrap p1 in
       let>- p2 = extend_wrap p2 in
-      eq p1.expr p2.expr >- BooleanType
+      extended_equality p1.expr p2.expr >- BooleanType
 
 let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
     =
@@ -979,29 +1023,27 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
   | FPlus ->
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in
-      num_add p1.expr p2.expr >- NumberType
+      fp_arith "fp.add" p1.expr p2.expr >- NumberType
   | FMinus ->
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in
-      num_sub p1.expr p2.expr >- NumberType
+      fp_arith "fp.sub" p1.expr p2.expr >- NumberType
   | FTimes ->
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in
-      num_mul p1.expr p2.expr >- NumberType
-  (* Numbers are encoded as reals, so float division must use SMT-LIB real
-     division ["/" *)
+      fp_arith "fp.mul" p1.expr p2.expr >- NumberType
   | FDiv ->
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in
-      app_ "/" [ p1.expr; p2.expr ] >- NumberType
+      fp_arith "fp.div" p1.expr p2.expr >- NumberType
   | FLessThan ->
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in
-      num_lt p1.expr p2.expr >- NumberType
+      fp_bin "fp.lt" p1.expr p2.expr >- BooleanType
   | FLessThanEqual ->
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in
-      num_leq p1.expr p2.expr >- NumberType
+      fp_bin "fp.leq" p1.expr p2.expr >- BooleanType
   | Equal -> encode_equality p1 p2
   | Or ->
       let>- p1 = get_bool p1 in
@@ -1078,7 +1120,7 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       num_neg le.expr >- IntType
   | FUnaryMinus ->
       let>- le = get_num le in
-      num_neg le.expr >- NumberType
+      fp_un "fp.neg" le.expr >- NumberType
   | LstLen ->
       (* If we only use an LVar as an argument to llen, then encode it as an uninterpreted function. *)
       let>- le = get_list le in
@@ -1116,25 +1158,41 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       let>- list = get_list le in
       seq_nth list.expr (int_k 0) |> simply_wrapped
   | TypeOf -> typeof_expression le >- TypeType
-  | ToUint32Op ->
-      let>- le = get_num le in
-      le.expr |> real_to_int |> int_to_real >- NumberType
   | LstRev ->
       require_definition def_lrev;
       let>- le = get_list le in
       Axiomatised_operations.lrev <| le.expr >- ListType
   | NumToInt ->
+      (* This partial conversion faults on NaN/infinity in CExprEval. Until
+         symbolic execution supplies a finiteness obligation, fail closed
+         instead of using fp.to_real's unspecified non-finite result. *)
+      (match e with
+      | Expr.Lit (Num n) when Float.is_finite n -> ()
+      | _ -> exceptf "SMT encoding: NumToInt requires a finite concrete operand");
       let>- le = get_num le in
-      le.expr |> real_to_int >- IntType
+      let value = fp_un "fp.to_real" le.expr in
+      ite
+        (num_lt value (real_k Q.zero))
+        (num_neg (real_to_int (num_neg value)))
+        (real_to_int value)
+      >- IntType
   | IntToNum ->
       let>- le = get_int le in
-      le.expr |> int_to_real >- NumberType
+      to_number [ rne; int_to_real le.expr ] >- NumberType
   | IsInt ->
       let>- le = get_num le in
-      encode_equality (le.expr |> real_to_int |> int_to_real >- NumberType) le
+      bool_and (fp_finite le.expr)
+        (fp_bin "fp.eq" le.expr
+           (app_ "fp.roundToIntegral" [ atom "RTZ"; le.expr ]))
+      >- BooleanType
+  | M_isNaN ->
+      let>- le = get_num le in
+      fp_un "fp.isNaN" le.expr >- BooleanType
+  | M_abs ->
+      let>- le = get_num le in
+      fp_un "fp.abs" le.expr >- NumberType
+  | ToUint32Op
   | BitwiseNot
-  | M_isNaN
-  | M_abs
   | M_acos
   | M_asin
   | M_atan
@@ -1504,12 +1562,13 @@ let encode_assertions_needs_handler (fs : Expr.Set.t) (gamma : typenv) :
    hit -- it cannot be recomputed from the encoded terms without re-encoding. *)
 let encode_assertions (fs : Expr.Set.t) (gamma : typenv) :
     sexp list * (int, definition) Hashtbl.t =
-  let- () = Hashtbl.find_opt encoding_cache fs in
+  let key = formula_key fs gamma in
+  let- () = Formula_cache.find_opt encoding_cache key in
   let result =
     with_necessary_definitions @@ fun () ->
     encode_assertions_needs_handler fs gamma
   in
-  let () = Hashtbl.replace encoding_cache fs result in
+  let () = Formula_cache.replace encoding_cache key result in
   result
 
 module Dump = struct
@@ -1619,7 +1678,8 @@ let exec_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
     raise Gillian_result.Exc.(internal_error ~additional_data "SMT failure")
 
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
-  match Hashtbl.find_opt sat_cache fs with
+  let key = formula_key fs gamma in
+  match Formula_cache.find_opt sat_cache key with
   | Some result ->
       let () =
         L.verbose (fun m ->
@@ -1634,7 +1694,7 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
             let f = Expr.conjunct (Expr.Set.elements fs) in
             m "Adding to cache : @[%a@]" Expr.pp f)
       in
-      let () = Hashtbl.replace sat_cache fs ret in
+      let () = Formula_cache.replace sat_cache key ret in
       ret
 
 let is_sat (fs : Expr.Set.t) (gamma : typenv) : bool =
@@ -1656,7 +1716,37 @@ let lift_model
   in
 
   let recover_number (n : sexp) : float option =
-    try Some (to_q n |> Q.to_float) with UnexpectedSolverResponse _ -> None
+    let bits (value : sexp) =
+      match value with
+      | Atom s when String.starts_with ~prefix:"#b" s ->
+          Z.of_string ("0b" ^ String.sub s 2 (String.length s - 2))
+      | Atom s when String.starts_with ~prefix:"#x" s ->
+          Z.of_string ("0x" ^ String.sub s 2 (String.length s - 2))
+      | _ -> raise Exit
+    in
+    try
+      match n with
+      | List [ Atom "fp"; fp_sign; exponent; significand ] ->
+          let raw =
+            Z.(
+              logor
+                (shift_left (bits fp_sign) 63)
+                (logor (shift_left (bits exponent) 52) (bits significand)))
+          in
+          let raw =
+            if Z.testbit raw 63 then Z.sub raw (Z.shift_left Z.one 64) else raw
+          in
+          Some (Int64.float_of_bits (Z.to_int64 raw))
+      | List [ Atom "_"; Atom value; Atom "11"; Atom "53" ] -> (
+          match value with
+          | "+zero" -> Some 0.
+          | "-zero" -> Some (-0.)
+          | "+oo" -> Some infinity
+          | "-oo" -> Some neg_infinity
+          | "NaN" -> Some nan
+          | _ -> None)
+      | _ -> None
+    with Exit | Invalid_argument _ | Z.Overflow -> None
   in
 
   let recover_int (n : sexp) : Z.t option =

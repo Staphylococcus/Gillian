@@ -1,0 +1,126 @@
+{
+  "image": "ghcr.io/gillianplatform/gillian@sha256:5e140006304a42f6afa1b19a694d0a309d997d002fbdfba12d7bdfd2934e4270",
+  "upstream": "3a1915d6ca74360e74ddd9cccf522e2427f1c70c",
+  "node": "v24.13.0",
+  "platform": "linux/x64 (container linux/amd64)",
+  "generatedAt": "2026-09-21T09:55:57.985Z",
+  "concrete": {
+    "numberRounding": true,
+    "numericMonotonicityWitness": {
+      "n": 9007199254740992,
+      "actual": false
+    }
+  },
+  "results": [
+    {
+      "id": "number-rounding",
+      "scope": "IEEE-754 control: JavaScript rounds 2^53 + 1 back to 2^53.",
+      "mode": "wpst",
+      "fullInit": false,
+      "unroll": 100,
+      "timeoutSeconds": 45,
+      "sourceSha256": "e26f0e3c1970242afc3e42af41bebcbe196f3e84d6412f9a74b9f68852081936",
+      "exitCode": 0,
+      "signal": null,
+      "elapsedMs": 1868,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "errorReturns": 0,
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "Lit",
+              [
+                "Empty"
+              ]
+            ],
+            "final_state": null,
+            "last_report": 8409,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 6,
+                "pos_column": 16
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ]
+      ],
+      "observation": "reported-success"
+    },
+    {
+      "id": "number-symbolic-monotonic",
+      "scope": "Negative soundness control: n+1>n is false in JavaScript at 2^53, despite being true over mathematical reals.",
+      "mode": "wpst",
+      "fullInit": false,
+      "unroll": 100,
+      "timeoutSeconds": 45,
+      "sourceSha256": "700b8787e15e73d02a2238034c2ebdb4fc298e17dbc08bce3f5c053075fb203f",
+      "exitCode": 0,
+      "signal": null,
+      "elapsedMs": 1728,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "errorReturns": 0,
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "Lit",
+              [
+                "Empty"
+              ]
+            ],
+            "final_state": null,
+            "last_report": 8007,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 5,
+                "pos_column": 16
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ]
+      ],
+      "observation": "reported-success"
+    },
+    {
+      "id": "deductive-number-monotonic",
+      "scope": "Negative soundness control in verify mode: a postcondition false for JavaScript n=2^53.",
+      "mode": "verify",
+      "fullInit": false,
+      "unroll": 100,
+      "timeoutSeconds": 60,
+      "sourceSha256": "14e45fc3d4bf4e962096d01a74b96a4cf164021aa65c6c8bd666d9cd7900f621",
+      "exitCode": 0,
+      "signal": null,
+      "elapsedMs": 162,
+      "pathCount": null,
+      "failedPaths": 0,
+      "errorReturns": 0,
+      "cutoff": false,
+      "paths": null,
+      "observation": "reported-success"
+    }
+  ]
+}

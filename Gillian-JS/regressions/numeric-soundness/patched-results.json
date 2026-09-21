@@ -1,0 +1,230 @@
+{
+  "generatedAt": "2026-09-21T10:27:25.615479+00:00",
+  "baseCommit": "3a1915d6ca74360e74ddd9cccf522e2427f1c70c",
+  "branch": "codex/js-number-soundness",
+  "state": "uncommitted local patch",
+  "platform": "Linux amd64",
+  "toolchain": {
+    "ocaml": "5.3.0",
+    "z3": "4.13.3",
+    "node": "v24.13.0",
+    "container": "gillian-numeric-dev:local"
+  },
+  "sourceSha256": {
+    "Gillian-JS/regressions/numeric-soundness/run.py": "4c08f051d3c1533566b4ceb459b65b0ed1ad45f36e4cd12818b6b39350598181",
+    "GillianCore/GIL_Syntax/Expr.ml": "275ab359fb734aaf2d779c3feebcd1dcb1a781767239b50969be076db7e83700",
+    "GillianCore/GIL_Syntax/Literal.ml": "513fbe5727452bc2a5edf9829d54b72e64f33a193e662fc868ef8d405eba5374",
+    "GillianCore/GIL_Syntax/TypeDef__.ml": "38345a457043d82a87e907d78bbc2bd330dcc28f07548e4bac16c2c900a5e932",
+    "GillianCore/engine/FOLogic/PFS.ml": "3aad0272756ff0216aa81e1e2f54eb1a207b6691e8a1982937388f4fc67a4b4d",
+    "GillianCore/engine/FOLogic/Reduction.ml": "2408169757679ab06a88d10b679b19c599c4d15a776d79db7e0ba853a278f53c",
+    "GillianCore/engine/FOLogic/Simplifications.ml": "ec2f0c353d8be38b0e2897dc42dfd5a082a64a5722ae20bd8ef8e3b9b4567e87",
+    "GillianCore/smt/smt.ml": "9e6c2766174eeec6d83d53f4d640beb94056ac7c3aa882a1dde2b83767559db7",
+    "GillianCore/test/dune": "85a966de1e170ce8be4900d5be5c52d5d924ce895cc3b1b7e73b8f96807208f5",
+    "GillianCore/test/numeric.ml": "18ddc929ea51f48811c9a336d3d187b88147e4f0edcd648d03b8f208cdf6316e",
+    "GillianCore/test/run_tests.ml": "b0fbd265cdea3e6864d7b6d36c4f058caad0aa366ac0e3c043d55161138d0d34"
+  },
+  "binarySha256": "968b67e5b891360316d3e945b90703cabcb88c55b762dcce3fe2763d8fe79cbc",
+  "coreTests": {
+    "command": "dune runtest GillianCore",
+    "passed": 10,
+    "failed": 0,
+    "directArithmeticPairs": 484
+  },
+  "concreteJavaScriptControls": {
+    "passed": 8,
+    "failed": 0
+  },
+  "unmodifiedSourceControl": {
+    "commit": "3a1915d6ca74360e74ddd9cccf522e2427f1c70c",
+    "mode": "verify",
+    "fixture": "deductive-number-monotonic.js",
+    "exitCode": 0,
+    "observation": "incorrectly accepted the false postcondition"
+  },
+  "cases": [
+    {
+      "case": "number-rounding",
+      "command": [
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-rounding.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "e26f0e3c1970242afc3e42af41bebcbe196f3e84d6412f9a74b9f68852081936",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    },
+    {
+      "case": "number-symbolic-monotonic",
+      "command": [
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-symbolic-monotonic.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "700b8787e15e73d02a2238034c2ebdb4fc298e17dbc08bce3f5c053075fb203f",
+      "expectedSuccess": false,
+      "exitCode": 1,
+      "incomplete": false,
+      "pathCount": 2,
+      "failedPaths": 1,
+      "passed": true
+    },
+    {
+      "case": "deductive-number-monotonic",
+      "command": [
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "verify",
+        "/work/Gillian-JS/regressions/numeric-soundness/deductive-number-monotonic.js",
+        "--logging=normal",
+        "--proc",
+        "increment"
+      ],
+      "sourceSha256": "14e45fc3d4bf4e962096d01a74b96a4cf164021aa65c6c8bd666d9cd7900f621",
+      "expectedSuccess": false,
+      "exitCode": 1,
+      "incomplete": false,
+      "passed": true
+    },
+    {
+      "case": "deductive-number-step-two",
+      "command": [
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "verify",
+        "/work/Gillian-JS/regressions/numeric-soundness/deductive-number-step-two.js",
+        "--logging=normal",
+        "--proc",
+        "incrementTwo"
+      ],
+      "sourceSha256": "cd98b7ed68c854e67f8f76e1238b48a63a5c1522fdad491bd700efb1b70cb7da",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "passed": true
+    },
+    {
+      "case": "number-overflow-nan",
+      "command": [
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-overflow-nan.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "98b2bbd186dbaa47379eae246a2917c9be90633edc8381e4db6f466d809791ad",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    },
+    {
+      "case": "number-signed-zero",
+      "command": [
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-signed-zero.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "ef9e98087e479583016afbbc8d896ced8ce8582664d83b0769dfcd5233c1d1dd",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    },
+    {
+      "case": "number-signed-zero-fail",
+      "command": [
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-signed-zero-fail.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "c754951f30889984b1f4a29dd59baf3fc8e42416f4146e6ab0b71d721de44416",
+      "expectedSuccess": false,
+      "exitCode": 1,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 1,
+      "passed": true
+    },
+    {
+      "case": "heap-alias",
+      "command": [
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/heap-alias.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "c5004c5b5e90270af68f9e131fcc29140fd018895131fc3e3c49f36fcd5b2f94",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    }
+  ],
+  "pending": [
+    "Unrestricted verify fails preprocessing ArrayOfArraysOfUInt8ArraysContentsAppend after Z3 returns unknown for mixed integer/binary64 conversion.",
+    "Symbolic NumToInt and symbolic ToUint32Op fail closed; wider numeric/runtime coverage and soundness audit remain pending."
+  ]
+}

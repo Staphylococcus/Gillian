@@ -19,8 +19,28 @@ type simpl_val_type = {
 }
 
 (* Simplification cache *)
-let simplification_cache : (simpl_key_type, simpl_val_type) Hashtbl.t =
-  Hashtbl.create 1
+module Simplification_cache = Hashtbl.Make (struct
+  type t = simpl_key_type
+
+  let equal a b =
+    a.kill_new_lvars = b.kill_new_lvars
+    && a.gamma_list = b.gamma_list
+    && List.equal Expr.equal a.pfs_list b.pfs_list
+    && SS.equal a.existentials b.existentials
+    && a.matching = b.matching
+    && a.save_spec_vars = b.save_spec_vars
+
+  let hash key =
+    Hashtbl.hash
+      ( key.kill_new_lvars,
+        key.gamma_list,
+        key.pfs_list,
+        SS.elements key.existentials,
+        key.matching,
+        key.save_spec_vars )
+end)
+
+let simplification_cache = Simplification_cache.create 1
 
 (* Reduction of assertions *)
 
@@ -51,12 +71,13 @@ let clean_up_stuff (left : PFS.t) (right : PFS.t) =
   let sleft = PFS.to_set left in
   let pf_sym pfa pfb =
     match ((pfa, pfb) : Expr.t * Expr.t) with
-    | BinOp (a, Equal, b), BinOp (c, Equal, d) when a = d && b = c -> true
+    | BinOp (a, Equal, b), BinOp (c, Equal, d)
+      when Expr.equal a d && Expr.equal b c -> true
     | UnOp (Not, BinOp (a, Equal, b)), UnOp (Not, BinOp (c, Equal, d))
-      when a = d && b = c -> true
+      when Expr.equal a d && Expr.equal b c -> true
     | _ -> false
   in
-  let eq_or_sym pfa pfb = pfa = pfb || pf_sym pfa pfb in
+  let eq_or_sym pfa pfb = Expr.equal pfa pfb || pf_sym pfa pfb in
   let keep pf = not (Expr.Set.exists (eq_or_sym pf) sleft) in
   let cond pf =
     let npf =
@@ -327,11 +348,11 @@ let simplify_pfs_and_gamma
       save_spec_vars (* rpfs_lvars = (PFS.lvars rpfs) *);
     }
   in
-  match Hashtbl.mem simplification_cache key with
+  match Simplification_cache.mem simplification_cache key with
   | true ->
       (* update_statistics "Simpl: cached" 0.; *)
       let { simpl_gamma; simpl_pfs; simpl_existentials; subst } =
-        Hashtbl.find simplification_cache key
+        Simplification_cache.find simplification_cache key
       in
       Type_env.reset gamma simpl_gamma;
       PFS.set lpfs simpl_pfs;
@@ -527,6 +548,17 @@ let simplify_pfs_and_gamma
                      (Type.str te1)
                      ((Fmt.to_to_string Expr.pp) le2)
                      (Type.str te2))
+            | _, _
+              when ((te1 = Some NumberType || te1 = None)
+                   && (te2 = Some NumberType || te2 = None))
+                   &&
+                   match (le1, le2) with
+                   | LVar _, Lit (Num n) | Lit (Num n), LVar _ ->
+                       n = 0. || Float.is_nan n
+                   | _ -> true ->
+                (* IEEE equality neither distinguishes signed zeros nor admits
+                   reflexivity at NaN. Leave these constraints to the solver. *)
+                `Replace whole
             | _, _ -> (
                 match (le1, le2) with
                 | UnOp (LstLen, LVar x), UnOp (LstLen, LVar y) when x <> y ->
@@ -681,25 +713,6 @@ let simplify_pfs_and_gamma
                     | Some tv ->
                         if t <> tv then stop_explain "Type mismatch"
                         else `Filter)
-                (* Int breakdown *)
-                | ( Lit (Num n),
-                    BinOp (l, FPlus, BinOp (Lit (Num 256.), FTimes, r)) )
-                  when PFS.mem pfs (BinOp (Lit (Num 0.), FLessThanEqual, l))
-                       && PFS.mem pfs (BinOp (Lit (Num 0.), FLessThanEqual, r))
-                       && PFS.mem pfs (BinOp (l, FLessThan, Lit (Num 256.)))
-                       && PFS.mem pfs (BinOp (r, FLessThan, Lit (Num 256.))) ->
-                    let n = int_of_float n in
-                    let eq_l =
-                      Expr.BinOp (l, Equal, Lit (Num (float_of_int (n mod 256))))
-                    in
-                    let eq_r =
-                      Expr.BinOp (r, Equal, Lit (Num (float_of_int (n / 256))))
-                    in
-                    L.verbose (fun fmt ->
-                        fmt "Breakdown:\n\tn : %d\n\tl : %a\n\tr : %a" n Expr.pp
-                          eq_l Expr.pp eq_r);
-                    extend_with eq_l;
-                    `Replace eq_r
                 | _, _ -> `Replace whole))
         (* All other cases *)
         | _ -> `Replace whole
@@ -932,7 +945,8 @@ let simplify_pfs_and_gamma
           subst = SESubst.copy result;
         }
       in
-      Hashtbl.replace simplification_cache key cached_simplification;
+      Simplification_cache.replace simplification_cache key
+        cached_simplification;
 
       (* Utils.Statistics.update_statistics "FOS: SimplifyPFSandGamma"
          (Unix.gettimeofday () -. t); *)

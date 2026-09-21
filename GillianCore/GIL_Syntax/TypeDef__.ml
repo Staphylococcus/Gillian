@@ -46,7 +46,10 @@ and literal =
         | `String s -> (
             try Ok (Z.of_string s) with Invalid_argument m -> Error m)
         | _ -> Error "Invalid yojson for Z"])
-  | Num of float
+  | Num of
+      (float
+      [@equal
+        fun a b -> Int64.equal (Int64.bits_of_float a) (Int64.bits_of_float b)])
   | String of string
   | Loc of string
   | Type of typ
