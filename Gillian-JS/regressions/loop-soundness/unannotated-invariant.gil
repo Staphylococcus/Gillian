@@ -1,0 +1,7 @@
+spec check()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc check() {
+  invariant ((0i == 1i));
+  ret := 0i;
+  return
+};

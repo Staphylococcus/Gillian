@@ -365,6 +365,30 @@ struct
   (** Syntax error, carrying a string description *)
   exception Syntax_error of string
 
+  (* A loop proof may close a path only after its obligation succeeds. In
+     particular, do not discard errors returned alongside successful branches. *)
+  let check_loop_results operation state results =
+    if results = [] then
+      raise
+        (Gillian_result.Exc.Gillian_error
+           (OperationError
+              ("Incomplete loop proof: " ^ operation ^ " produced no outcomes")));
+    let successes, errors =
+      List.partition_map
+        (function
+          | Ok result -> Either.Left result
+          | Error err -> Either.Right err)
+        results
+    in
+    match errors with
+    | [] -> successes
+    | _ ->
+        raise
+          (Interpreter_error
+             ( EState (StateErr.EOther ("Loop " ^ operation ^ " failed"))
+               :: List.map (fun err -> Exec_err.EState err) errors,
+               state ))
+
   let call_graph = Call_graph.make ~init_capacity:128 ()
   let reset_call_graph () = Call_graph.reset call_graph
 
@@ -1211,31 +1235,34 @@ struct
                 ~prev_idx:i ~loop_ids ~next_idx:(i + 1) ~branch_count:b_counter
                 ();
             ]
+        | SL (Invariant _) when loop_ids = [] ->
+            raise
+              (Gillian_result.Exc.Gillian_error
+                 (OperationError "Loop invariant requires loop metadata"))
         (* Invariant being revisited *)
         | SL (Invariant (a, binders)) when prev_loop_ids = loop_ids ->
-            (* let () = Fmt.pr "\nRe-establishing invariant... @?" in *)
-            let _ = State.match_invariant prog true state a binders in
-            let () = L.verbose (fun fmt -> fmt "Invariant re-established.") in
-            (* let () = Fmt.pr "\nInvariant re-established. @?" in *)
+            if not (List.mem_assoc (List.hd loop_ids) iframes) then
+              raise
+                (Gillian_result.Exc.Gillian_error
+                   (OperationError "Loop invariant has no established frame"));
+            let _ =
+              State.match_invariant prog true state a binders
+              |> check_loop_results "invariant preservation" state
+            in
+            L.verbose (fun fmt -> fmt "Invariant re-established.");
             []
         | SL (Invariant (a, binders)) ->
             assert (loop_action = FrameOff (List.hd loop_ids));
-            (* let () = Fmt.pr "\nEstablishing invariant... @?" in *)
             let frames_and_states =
               State.match_invariant prog false state a binders
+              |> check_loop_results "invariant establishment" state
             in
-            (* let () = Fmt.pr "\nSuccessfully established invariant. @?" in *)
             List.map
-              (fun ret ->
-                match ret with
-                | Ok (frame, state) ->
-                    let iframes = (List.hd loop_ids, frame) :: iframes in
-                    make_confcont ~state ~callstack:cs ~invariant_frames:iframes
-                      ~prev_idx:i ~loop_ids ~next_idx:(i + 1)
-                      ~branch_count:b_counter ()
-                | Error err ->
-                    eval_state_to_err ~error_state:state ~errors:[ EState err ]
-                      eval_state)
+              (fun (frame, state) ->
+                let iframes = (List.hd loop_ids, frame) :: iframes in
+                make_confcont ~state ~callstack:cs ~invariant_frames:iframes
+                  ~prev_idx:i ~loop_ids ~next_idx:(i + 1)
+                  ~branch_count:b_counter ())
               frames_and_states
         | _ ->
             let all_results = evaluate_lcmd prog lcmd ~annot state in
@@ -1500,12 +1527,9 @@ struct
               in
               let open Syntaxes.List in
               let+ state =
-                (* Framing on should never fail.. *)
                 if Exec_mode.is_verification_exec !Config.current_exec_mode then
                   State.frame_on state iframes to_frame_on
-                  |> List.filter_map (function
-                       | Ok x -> Some x
-                       | _ -> None)
+                  |> check_loop_results "frame restoration on return" state
                 else [ state ]
               in
               let state' = State.set_store state old_store in
@@ -1567,12 +1591,9 @@ struct
             in
             let ( let+ ) x f = List.map f x in
             let+ state =
-              (* Framing on should never fail *)
               if Exec_mode.is_verification_exec !Config.current_exec_mode then
                 State.frame_on state iframes to_frame_on
-                |> List.filter_map (function
-                     | Ok x -> Some x
-                     | _ -> None)
+                |> check_loop_results "frame restoration on throw" state
               else [ state ]
             in
             let state' = State.set_store state old_store in
@@ -1703,18 +1724,12 @@ struct
       | FrameOn ids ->
           L.verbose (fun fmt ->
               fmt "INFO: Going to frame on %a" pp_str_list ids);
-          (* Framing on should never fail *)
           let states =
             State.frame_on state iframes ids
-            |> List.filter_map (function
-                 | Ok x -> Some x
-                 | _ -> None)
+            |> check_loop_results "frame restoration on exit" state
           in
           let n = List.length states in
-          if n == 0 then
-            L.normal (fun fmt ->
-                fmt "WARNING: FRAMING ON RESULTED IN 0 STATES !")
-          else if n > 1 then
+          if n > 1 then
             L.verbose (fun fmt ->
                 fmt
                   "WARNING: FRAMING ON AFTER EXITING LOOP BRANCHED INTO %i \

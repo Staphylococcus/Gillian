@@ -699,7 +699,7 @@ module Make (State : SState.S) :
                  Fmt.(option ~none:(any "CANNOT CREATE MODEL") SVal.SESubst.pp)
                  failing_model)
           in
-          Error (StateErr.EPure fail_pfs)
+          Error err
     in
     (* Successful matching *)
     (* TODO: Should the frame state have the subst produced? *)
