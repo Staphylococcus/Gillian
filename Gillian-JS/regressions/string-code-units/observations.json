@@ -1,0 +1,1303 @@
+{
+  "kind": "gillian-json-prerequisite-character-codes",
+  "generatedAt": "2026-09-21T15:06:49.972Z",
+  "source": {
+    "baseCommit": "77921941163cf6d26935a581b136386cb14c871c",
+    "state": "Local worktree changes, not committed or published when tested",
+    "modifiedFiles": [
+      {
+        "path": "Gillian-JS/lib/Compiler/JS2JSIL_Compiler.ml",
+        "sha256": "946e500ffbcff3dd09a7b74a52484b6009d0cc5fcc32473224872ca4e2d9feca"
+      },
+      {
+        "path": "Gillian-JS/lib/Semantics/External.ml",
+        "sha256": "f04e1e64053193aad0e35989cb3d0b7c0a19ca07b9ef4539ce645b530cea45a8"
+      },
+      {
+        "path": "Gillian-JS/lib/Semantics/dune",
+        "sha256": "c7f73a071d62e5093a02e11510473f11fef28dc0eb4528da78b41410e7a22892"
+      },
+      {
+        "path": "Gillian-JS/lib/Semantics/semantics.ml",
+        "sha256": "13d62807f6c2a8711ec3f7ba35bd30688bc5707ee89c3e8b84236276294e7881"
+      },
+      {
+        "path": "Gillian-JS/runtime/JS2JSIL/InitFantine.jsil",
+        "sha256": "4e3e82a1025c8c072a0f184edd724396d04a3a8b6b7f0c4017ce203913a0ee2e"
+      },
+      {
+        "path": "Gillian-JS/runtime/JS2JSIL/String.jsil",
+        "sha256": "b3c2d2b7a968046c1d1cb0b3b150b7c15bcaca5a643ad3c3df74bdce185f5ba9"
+      },
+      {
+        "path": "GillianCore/GIL_Syntax/Literal.ml",
+        "sha256": "749fc3d60d875d7a2cfa3205199e8dd3d5dad7074f4059ed045d339ccf831389"
+      },
+      {
+        "path": "GillianCore/test/run_tests.ml",
+        "sha256": "3a20490a18f091e8f926335359859effc4162c91577a40f1e95149823d3dceb5"
+      },
+      {
+        "path": "dune-project",
+        "sha256": "763621eeac70e3962bc052a9f3d09df31309536fa413cdb7ad814ae7dd5c0d98"
+      },
+      {
+        "path": "gillian-js.opam",
+        "sha256": "6660ddd97c60bbe54cc2ac4854c873c5a351c0746031bffc26b98269189ec9cd"
+      },
+      {
+        "path": "Gillian-JS/lib/Semantics/Utf16.ml",
+        "sha256": "c89ba6d75886df8678d60da2eaa32be6184ced671a949b85575fa9c8cc83ec0f"
+      },
+      {
+        "path": "Gillian-JS/lib/Semantics/Utf16.mli",
+        "sha256": "acc88c54df3cc294be992dc04025a8a806b4b7204b00f92bef113062b45c7dcc"
+      },
+      {
+        "path": "Gillian-JS/test/dune",
+        "sha256": "d21d5c1ba29c9556dd13c86486803e8c39a131422cbf691f1d452fbd696360bb"
+      },
+      {
+        "path": "Gillian-JS/test/utf16_tests.ml",
+        "sha256": "56fc0caf94cef20989686f5473cc053f2952f0bd67f8c5f145fca4e4f0bb821b"
+      },
+      {
+        "path": "GillianCore/test/strings.ml",
+        "sha256": "f2638a3089acef1bfb3a8d697443bb20759ef2f0f3b2d0520248ff701fcd8801"
+      }
+    ]
+  },
+  "build": {
+    "environmentImage": "sha256:fca677f76942880c5829a05ac83622497d0fc9e8842815d03c3ca38e650bb35e",
+    "executableSha256": "b3dbf7d485bc2ce7e293f01f3119b9b705a86a022cfcfb85de407fa7f298d32b"
+  },
+  "certificationReady": false,
+  "validation": {
+    "coreTests": 11,
+    "parserTests": 70,
+    "utf16Tests": 2,
+    "singleCodeUnitsCovered": 65536,
+    "nativeAssertions": 36
+  },
+  "priorImageLiteralControl": {
+    "image": "fold-gillian:77921941163c",
+    "expected": "assertion failure",
+    "exitCode": 1,
+    "logSha256": "ac581cd882565e9f0273d85845d891e3c87aee9429522b827bf524116d0c27ab"
+  },
+  "characterCodes": [
+    {
+      "case": "concrete",
+      "expectation": "normal",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/string-code-units/concrete.js",
+        "--logging=normal",
+        "--no-heap",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "34197d31025c8858df74676f63e669884ebdfbbd71bc4a71fb5ae225a75e8943",
+      "passed": true,
+      "exitCode": 0,
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "Lit",
+              [
+                "Undefined"
+              ]
+            ],
+            "final_state": null,
+            "last_report": 63254,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 34,
+                "pos_column": 32
+              },
+              "loc_source": "/work/Gillian-JS/regressions/string-code-units/concrete.js"
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "case": "coercion",
+      "expectation": "normal",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/string-code-units/coercion.js",
+        "--logging=normal",
+        "--no-heap",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "8063fc453d6b50b8cd295344c75517b8875889d7fd54560ff1badac36e7c4a7a",
+      "passed": true,
+      "exitCode": 0,
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "Lit",
+              [
+                "Empty"
+              ]
+            ],
+            "final_state": null,
+            "last_report": 28611,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 27,
+                "pos_column": 17
+              },
+              "loc_source": "/work/Gillian-JS/regressions/string-code-units/coercion.js"
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "case": "literal-values",
+      "expectation": "normal",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/string-code-units/literal-values.js",
+        "--logging=normal",
+        "--no-heap",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "c11be44f19ca468eed57c913db79be3dad6fa518d8cce71e451e81cc02f11328",
+      "passed": true,
+      "exitCode": 0,
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "Lit",
+              [
+                "Empty"
+              ]
+            ],
+            "final_state": null,
+            "last_report": 9429,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 5,
+                "pos_column": 13
+              },
+              "loc_source": "/work/Gillian-JS/regressions/string-code-units/literal-values.js"
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "case": "generated-code",
+      "expectation": "normal",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/string-code-units/generated-code.js",
+        "--logging=normal",
+        "--no-heap",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "7320b50ebf311fc2e04e29848e319fb7ebeb81e80692537d1da07d419def5306",
+      "passed": true,
+      "exitCode": 0,
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "Lit",
+              [
+                "Empty"
+              ]
+            ],
+            "final_state": null,
+            "last_report": 13042,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 7,
+                "pos_column": 13
+              },
+              "loc_source": "/work/Gillian-JS/regressions/string-code-units/generated-code.js"
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "case": "symbolic-choice",
+      "expectation": "normal",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/string-code-units/symbolic-choice.js",
+        "--logging=normal",
+        "--no-heap",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "aff7dcde313585d8678c9805b98141a073b4698be167c44e14c3892861761f53",
+      "passed": true,
+      "exitCode": 0,
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "Lit",
+              [
+                "Empty"
+              ]
+            ],
+            "final_state": null,
+            "last_report": 11763,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 7,
+                "pos_column": 13
+              },
+              "loc_source": "/work/Gillian-JS/regressions/string-code-units/symbolic-choice.js"
+            }
+          }
+        ],
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "Lit",
+              [
+                "Empty"
+              ]
+            ],
+            "final_state": null,
+            "last_report": 9562,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 7,
+                "pos_column": 13
+              },
+              "loc_source": "/work/Gillian-JS/regressions/string-code-units/symbolic-choice.js"
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "case": "wrong-code-point",
+      "expectation": "assertion",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/string-code-units/wrong-code-point.js",
+        "--logging=normal",
+        "--no-heap",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "df2bbec2299aef0874a6547cc6e0cbc19793a3128b223960763e961d4ba55bf2",
+      "passed": true,
+      "exitCode": 1,
+      "cutoff": false,
+      "paths": [
+        [
+          "RFail",
+          {
+            "proc": "main",
+            "proc_idx": 128,
+            "error_state": null,
+            "errors": [
+              [
+                "EState",
+                [
+                  "EPure",
+                  [
+                    "Lit",
+                    [
+                      "Bool",
+                      false
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            "loc": {
+              "loc_start": {
+                "pos_line": 4,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 4,
+                "pos_column": 15
+              },
+              "loc_source": "/work/Gillian-JS/regressions/string-code-units/wrong-code-point.js"
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "case": "symbolic-string",
+      "expectation": "unsupported",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/string-code-units/symbolic-string.js",
+        "--logging=normal",
+        "--no-heap",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "4ac8c2cf2f8af19427ddb090a4b29f5d90f5c858b2e28d70c621b613e150d86c",
+      "passed": true,
+      "exitCode": 125,
+      "cutoff": false,
+      "paths": null
+    },
+    {
+      "case": "concrete",
+      "expectation": "cutoff",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/string-code-units/concrete.js",
+        "--logging=normal",
+        "--no-heap",
+        "--json-ui",
+        "--unroll=0"
+      ],
+      "sourceSha256": "34197d31025c8858df74676f63e669884ebdfbbd71bc4a71fb5ae225a75e8943",
+      "passed": true,
+      "exitCode": 0,
+      "cutoff": true,
+      "paths": []
+    }
+  ],
+  "numericRegression": [
+    {
+      "case": "number-rounding",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-rounding.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "e26f0e3c1970242afc3e42af41bebcbe196f3e84d6412f9a74b9f68852081936",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    },
+    {
+      "case": "number-symbolic-monotonic",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-symbolic-monotonic.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "700b8787e15e73d02a2238034c2ebdb4fc298e17dbc08bce3f5c053075fb203f",
+      "expectedSuccess": false,
+      "exitCode": 1,
+      "incomplete": false,
+      "pathCount": 2,
+      "failedPaths": 1,
+      "passed": true
+    },
+    {
+      "case": "deductive-number-monotonic",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "verify",
+        "/work/Gillian-JS/regressions/numeric-soundness/deductive-number-monotonic.js",
+        "--logging=normal",
+        "--proc",
+        "increment"
+      ],
+      "sourceSha256": "14e45fc3d4bf4e962096d01a74b96a4cf164021aa65c6c8bd666d9cd7900f621",
+      "expectedSuccess": false,
+      "exitCode": 1,
+      "incomplete": false,
+      "passed": true
+    },
+    {
+      "case": "deductive-number-step-two",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "verify",
+        "/work/Gillian-JS/regressions/numeric-soundness/deductive-number-step-two.js",
+        "--logging=normal",
+        "--proc",
+        "incrementTwo"
+      ],
+      "sourceSha256": "cd98b7ed68c854e67f8f76e1238b48a63a5c1522fdad491bd700efb1b70cb7da",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "passed": true
+    },
+    {
+      "case": "number-overflow-nan",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-overflow-nan.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "98b2bbd186dbaa47379eae246a2917c9be90633edc8381e4db6f466d809791ad",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    },
+    {
+      "case": "number-signed-zero",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-signed-zero.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "ef9e98087e479583016afbbc8d896ced8ce8582664d83b0769dfcd5233c1d1dd",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    },
+    {
+      "case": "number-signed-zero-fail",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/number-signed-zero-fail.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "c754951f30889984b1f4a29dd59baf3fc8e42416f4146e6ab0b71d721de44416",
+      "expectedSuccess": false,
+      "exitCode": 1,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 1,
+      "passed": true
+    },
+    {
+      "case": "heap-alias",
+      "command": [
+        "opam",
+        "exec",
+        "--",
+        "dune",
+        "exec",
+        "--root",
+        "/work",
+        "--",
+        "gillian-js",
+        "wpst",
+        "/work/Gillian-JS/regressions/numeric-soundness/heap-alias.js",
+        "--logging=normal",
+        "--json-ui",
+        "--unroll=100"
+      ],
+      "sourceSha256": "c5004c5b5e90270af68f9e131fcc29140fd018895131fc3e3c49f36fcd5b2f94",
+      "expectedSuccess": true,
+      "exitCode": 0,
+      "incomplete": false,
+      "pathCount": 1,
+      "failedPaths": 0,
+      "passed": true
+    }
+  ],
+  "loweredBooleanAndFullInitializer": [
+    {
+      "id": "lowered-boolean-valid",
+      "sourceSha256": "a9cf9d039ac29e9bb5e2c0ede82bcc4329c8969623ee92d5350e0c78bc88b415",
+      "expected": {
+        "observation": "reported-success",
+        "normalPaths": 1
+      },
+      "passed": true,
+      "observation": "reported-success",
+      "pathCount": 1,
+      "normalPaths": 1,
+      "errorReturns": 0,
+      "failedPaths": 0,
+      "failedProcedures": [],
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "ALoc",
+              "#loc_385"
+            ],
+            "final_state": null,
+            "last_report": 75175,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 100,
+                "pos_column": 18
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ]
+      ],
+      "exitCode": 0,
+      "signal": null
+    },
+    {
+      "id": "lowered-boolean-output-schema",
+      "sourceSha256": "305bdc76ff2380f2c4f36ab091ddcdea0c47e6ca8206e169ac6f8d2ec4ed6c5c",
+      "expected": {
+        "observation": "failure",
+        "normalPaths": 1,
+        "failedProcedures": [
+          "assertOutput"
+        ]
+      },
+      "passed": true,
+      "observation": "failure",
+      "pathCount": 2,
+      "normalPaths": 1,
+      "errorReturns": 0,
+      "failedPaths": 1,
+      "failedProcedures": [
+        "assertOutput"
+      ],
+      "cutoff": false,
+      "paths": [
+        [
+          "RFail",
+          {
+            "proc": "assertOutput",
+            "proc_idx": 34,
+            "error_state": null,
+            "errors": [
+              [
+                "EState",
+                [
+                  "EPure",
+                  [
+                    "Lit",
+                    [
+                      "Bool",
+                      false
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            "loc": {
+              "loc_start": {
+                "pos_line": 61,
+                "pos_column": 2
+              },
+              "loc_end": {
+                "pos_line": 61,
+                "pos_column": 14
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ],
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "ALoc",
+              "#loc_385"
+            ],
+            "final_state": null,
+            "last_report": 75183,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 100,
+                "pos_column": 18
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ]
+      ],
+      "exitCode": 1,
+      "signal": null
+    },
+    {
+      "id": "lowered-boolean-output-status",
+      "sourceSha256": "80562683239b6009e939fc7ba8bda7fcc5b804c057a6842910bc59157e20767e",
+      "expected": {
+        "observation": "failure",
+        "normalPaths": 1,
+        "failedProcedures": [
+          "assertStatus"
+        ]
+      },
+      "passed": true,
+      "observation": "failure",
+      "pathCount": 2,
+      "normalPaths": 1,
+      "errorReturns": 0,
+      "failedPaths": 1,
+      "failedProcedures": [
+        "assertStatus"
+      ],
+      "cutoff": false,
+      "paths": [
+        [
+          "RFail",
+          {
+            "proc": "assertStatus",
+            "proc_idx": 34,
+            "error_state": null,
+            "errors": [
+              [
+                "EState",
+                [
+                  "EPure",
+                  [
+                    "Lit",
+                    [
+                      "Bool",
+                      false
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            "loc": {
+              "loc_start": {
+                "pos_line": 57,
+                "pos_column": 2
+              },
+              "loc_end": {
+                "pos_line": 57,
+                "pos_column": 14
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ],
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "ALoc",
+              "#loc_385"
+            ],
+            "final_state": null,
+            "last_report": 75183,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 100,
+                "pos_column": 18
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ]
+      ],
+      "exitCode": 1,
+      "signal": null
+    },
+    {
+      "id": "lowered-boolean-missing-output",
+      "sourceSha256": "4602bfed3b6bfa4a9d844c139a8ecdf460bdf16775cd3b6b037803fbc8c25e2e",
+      "expected": {
+        "observation": "failure",
+        "normalPaths": 1,
+        "failedProcedures": [
+          "assertRouting"
+        ]
+      },
+      "passed": true,
+      "observation": "failure",
+      "pathCount": 2,
+      "normalPaths": 1,
+      "errorReturns": 0,
+      "failedPaths": 1,
+      "failedProcedures": [
+        "assertRouting"
+      ],
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "ALoc",
+              "#loc_403"
+            ],
+            "final_state": null,
+            "last_report": 78229,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 101,
+                "pos_column": 18
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ],
+        [
+          "RFail",
+          {
+            "proc": "assertRouting",
+            "proc_idx": 34,
+            "error_state": null,
+            "errors": [
+              [
+                "EState",
+                [
+                  "EPure",
+                  [
+                    "Lit",
+                    [
+                      "Bool",
+                      false
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            "loc": {
+              "loc_start": {
+                "pos_line": 46,
+                "pos_column": 2
+              },
+              "loc_end": {
+                "pos_line": 46,
+                "pos_column": 14
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ]
+      ],
+      "exitCode": 1,
+      "signal": null
+    },
+    {
+      "id": "lowered-boolean-multiple-outputs",
+      "sourceSha256": "24623dee5abc7adc076250b23bf0abb64810aa6a8acde2af2cb83c0b0a847bda",
+      "expected": {
+        "observation": "failure",
+        "normalPaths": 1,
+        "failedProcedures": [
+          "assertRouting"
+        ]
+      },
+      "passed": true,
+      "observation": "failure",
+      "pathCount": 2,
+      "normalPaths": 1,
+      "errorReturns": 0,
+      "failedPaths": 1,
+      "failedProcedures": [
+        "assertRouting"
+      ],
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "ALoc",
+              "#loc_423"
+            ],
+            "final_state": null,
+            "last_report": 82836,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 101,
+                "pos_column": 18
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ],
+        [
+          "RFail",
+          {
+            "proc": "assertRouting",
+            "proc_idx": 34,
+            "error_state": null,
+            "errors": [
+              [
+                "EState",
+                [
+                  "EPure",
+                  [
+                    "Lit",
+                    [
+                      "Bool",
+                      false
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            "loc": {
+              "loc_start": {
+                "pos_line": 46,
+                "pos_column": 2
+              },
+              "loc_end": {
+                "pos_line": 46,
+                "pos_column": 14
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ]
+      ],
+      "exitCode": 1,
+      "signal": null
+    },
+    {
+      "id": "lowered-boolean-missing-completion",
+      "sourceSha256": "3bb2f884c2566019944dbc9e533010128a9fe156b4a8192aa6cfee57843e3786",
+      "expected": {
+        "observation": "failure",
+        "normalPaths": 0,
+        "failedProcedures": [
+          "assertCompletion"
+        ]
+      },
+      "passed": true,
+      "observation": "failure",
+      "pathCount": 1,
+      "normalPaths": 0,
+      "errorReturns": 0,
+      "failedPaths": 1,
+      "failedProcedures": [
+        "assertCompletion"
+      ],
+      "cutoff": false,
+      "paths": [
+        [
+          "RFail",
+          {
+            "proc": "assertCompletion",
+            "proc_idx": 34,
+            "error_state": null,
+            "errors": [
+              [
+                "EState",
+                [
+                  "EPure",
+                  [
+                    "Lit",
+                    [
+                      "Bool",
+                      false
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            "loc": {
+              "loc_start": {
+                "pos_line": 49,
+                "pos_column": 2
+              },
+              "loc_end": {
+                "pos_line": 49,
+                "pos_column": 14
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ]
+      ],
+      "exitCode": 1,
+      "signal": null
+    },
+    {
+      "id": "lowered-boolean-fault",
+      "sourceSha256": "3a0f0275147387a0e3706b4d8d08523ff00a7d5a85a5100491b58dcd96dee09b",
+      "expected": {
+        "observation": "failure",
+        "normalPaths": 1,
+        "failedProcedures": [
+          "assertNoFault"
+        ]
+      },
+      "passed": true,
+      "observation": "failure",
+      "pathCount": 2,
+      "normalPaths": 1,
+      "errorReturns": 0,
+      "failedPaths": 1,
+      "failedProcedures": [
+        "assertNoFault"
+      ],
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "ALoc",
+              "#loc_401"
+            ],
+            "final_state": null,
+            "last_report": 77595,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 101,
+                "pos_column": 18
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ],
+        [
+          "RFail",
+          {
+            "proc": "assertNoFault",
+            "proc_idx": 34,
+            "error_state": null,
+            "errors": [
+              [
+                "EState",
+                [
+                  "EPure",
+                  [
+                    "Lit",
+                    [
+                      "Bool",
+                      false
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            "loc": {
+              "loc_start": {
+                "pos_line": 50,
+                "pos_column": 2
+              },
+              "loc_end": {
+                "pos_line": 50,
+                "pos_column": 14
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ]
+      ],
+      "exitCode": 1,
+      "signal": null
+    },
+    {
+      "id": "lowered-boolean-budget-zero",
+      "sourceSha256": "a9cf9d039ac29e9bb5e2c0ede82bcc4329c8969623ee92d5350e0c78bc88b415",
+      "expected": {
+        "observation": "incomplete",
+        "normalPaths": 0
+      },
+      "passed": true,
+      "observation": "incomplete",
+      "pathCount": 0,
+      "normalPaths": 0,
+      "errorReturns": 0,
+      "failedPaths": 0,
+      "failedProcedures": [],
+      "cutoff": true,
+      "paths": [],
+      "exitCode": 0,
+      "signal": null
+    },
+    {
+      "id": "char-code-full-init",
+      "sourceSha256": "34197d31025c8858df74676f63e669884ebdfbbd71bc4a71fb5ae225a75e8943",
+      "expected": {
+        "observation": "reported-success",
+        "normalPaths": 1
+      },
+      "passed": true,
+      "observation": "reported-success",
+      "pathCount": 1,
+      "normalPaths": 1,
+      "errorReturns": 0,
+      "failedPaths": 0,
+      "failedProcedures": [],
+      "cutoff": false,
+      "paths": [
+        [
+          "RSucc",
+          {
+            "flag": [
+              "Normal"
+            ],
+            "ret_val": [
+              "Lit",
+              [
+                "Undefined"
+              ]
+            ],
+            "final_state": null,
+            "last_report": 75888,
+            "loc": {
+              "loc_start": {
+                "pos_line": 1,
+                "pos_column": 0
+              },
+              "loc_end": {
+                "pos_line": 34,
+                "pos_column": 32
+              },
+              "loc_source": "case.js"
+            }
+          }
+        ]
+      ],
+      "exitCode": 0,
+      "signal": null
+    }
+  ],
+  "rawEvidenceDirectories": [
+    "/home/vas/dev/Gillian/_build/gillian-string-code-units-n4keup7a",
+    "/home/vas/dev/Gillian/_build/gillian-numeric-5ebc4t9d",
+    "/tmp/gillian-json-prerequisite-boolean-EWbYE2"
+  ]
+}

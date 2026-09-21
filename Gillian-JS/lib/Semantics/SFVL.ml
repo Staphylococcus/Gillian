@@ -11,13 +11,17 @@ type field_name = Expr.t
 type field_value = Expr.t [@@deriving yojson]
 
 (* Definition *)
-type t = field_value Expr.Map.t [@@deriving yojson]
+type entry = { value : field_value; order : int } [@@deriving yojson]
+type t = entry Expr.Map.t [@@deriving yojson]
 
 (* Printing *)
 let pp ft sfvl =
   let open Fmt in
   (iter_bindings ~sep:comma Expr.Map.iter
-     (hbox (parens (pair ~sep:(any " :") Expr.pp Expr.pp))))
+     (hbox
+        (parens
+           (pair ~sep:(any " :") Expr.pp (fun fmt entry ->
+                Expr.pp fmt entry.value)))))
     ft sfvl
 
 (*************************************)
@@ -27,18 +31,60 @@ let pp ft sfvl =
 
 (* Map functions to be reused *)
 
-let add fn fv = Expr.Map.add fn fv
 let empty = Expr.Map.empty
 
-let field_names sfvl =
-  let result, _ = List.split (Expr.Map.bindings sfvl) in
-  result
+let get fn sfvl =
+  Option.map (fun entry -> entry.value) (Expr.Map.find_opt fn sfvl)
 
-let fold f sfvl ac = Expr.Map.fold f sfvl ac
-let get fn sfvl = Option.map (fun fv -> fv) (Expr.Map.find_opt fn sfvl)
-let is_empty sfvl = sfvl = empty
-let iter f sfvl = Expr.Map.iter f sfvl
-let partition f sfvl = Expr.Map.partition f sfvl
+let add fn fv sfvl =
+  let order =
+    match Expr.Map.find_opt fn sfvl with
+    | Some { value; order } when value <> Expr.Lit Literal.Nono -> order
+    | _ -> 1 + Expr.Map.fold (fun _ entry acc -> max acc entry.order) sfvl 0
+  in
+  Expr.Map.add fn { value = fv; order } sfvl
+
+let field_names sfvl = List.map fst (Expr.Map.bindings sfvl)
+
+let ordered_field_names sfvl =
+  let fields =
+    Expr.Map.bindings sfvl
+    |> List.sort (fun (_, a) (_, b) -> compare a.order b.order)
+  in
+  let rec check_order = function
+    | (_, a) :: ((_, b) :: _ as rest) ->
+        if a.order = b.order then
+          raise
+            (Gillian.Utils.Exceptions.Unsupported
+               "Property order is unknown after merging independently created \
+                objects");
+        check_order rest
+    | _ -> ()
+  in
+  check_order fields;
+  let fields =
+    List.map
+      (fun (field, _) ->
+        match field with
+        | Expr.Lit (Literal.String name) -> name
+        | _ ->
+            raise
+              (Gillian.Utils.Exceptions.Unsupported
+                 "Property enumeration needs concrete names"))
+      fields
+  in
+  Javert_utils.Property_order.sort fields
+  |> List.map (fun name -> Expr.Lit (Literal.String name))
+
+let fold f sfvl ac =
+  Expr.Map.fold (fun name entry ac -> f name entry.value ac) sfvl ac
+
+let is_empty = Expr.Map.is_empty
+let iter f sfvl = Expr.Map.iter (fun name entry -> f name entry.value) sfvl
+
+let partition f sfvl =
+  Expr.Map.partition (fun name entry -> f name entry.value) sfvl
+
 let remove = Expr.Map.remove
 
 (* WHAT IS THIS? *)
@@ -50,8 +96,8 @@ let union =
               "WARNING: SFVL.union: merging with field in both lists (%s: %s \
                and %s), choosing left."
               ((Fmt.to_to_string Expr.pp) k)
-              ((Fmt.to_to_string Expr.pp) fvl)
-              ((Fmt.to_to_string Expr.pp) fvr)));
+              ((Fmt.to_to_string Expr.pp) fvl.value)
+              ((Fmt.to_to_string Expr.pp) fvr.value)));
       Some fvl)
 
 let to_list fv_list = fold (fun f v ac -> (f, v) :: ac) fv_list []
@@ -59,25 +105,27 @@ let to_list fv_list = fold (fun f v ac -> (f, v) :: ac) fv_list []
 (** Gets a first key-value pair that satisfies a predicate *)
 let get_first (f : field_name -> bool) (sfvl : t) :
     (field_name * field_value) option =
-  Expr.Map.find_first_opt f sfvl
+  Option.map
+    (fun (name, entry) -> (name, entry.value))
+    (Expr.Map.find_first_opt f sfvl)
 
 (** Returns the logical variables occuring in --sfvl-- *)
 let lvars (sfvl : t) : SS.t =
   let gllv = Expr.lvars in
-  Expr.Map.fold
+  fold
     (fun e_field e_val ac -> SS.union ac (SS.union (gllv e_field) (gllv e_val)))
     sfvl SS.empty
 
 (** Returns the abstract locations occuring in --sfvl-- *)
 let alocs (sfvl : t) : SS.t =
-  Expr.Map.fold
+  fold
     (fun e_field e_val ac ->
       SS.union ac (SS.union (Expr.alocs e_field) (Expr.alocs e_val)))
     sfvl SS.empty
 
 let assertions (loc : Expr.t) (sfvl : t) : Asrt.t =
   List.rev
-    (Expr.Map.fold
+    (fold
        (fun field value (ac : Asrt.t) ->
          Asrt_utils.points_to ~loc ~field ~value :: ac)
        sfvl [])
@@ -88,8 +136,8 @@ let substitution (subst : SSubst.t) (partial : bool) (fv_list : t) : t =
   Expr.Map.fold
     (fun le_field le_val ac ->
       let sf = f_subst le_field in
-      let sv = f_subst le_val in
-      Expr.Map.add sf sv ac)
+      let sv = f_subst le_val.value in
+      Expr.Map.add sf { le_val with value = sv } ac)
     fv_list Expr.Map.empty
 
 (* Selective substitution *)
@@ -98,8 +146,8 @@ let selective_substitution (subst : SSubst.t) (partial : bool) (fv_list : t) : t
   let f_subst = SSubst.subst_in_expr subst ~partial in
   Expr.Map.fold
     (fun le_field le_val ac ->
-      let sv = f_subst le_val in
-      Expr.Map.add le_field sv ac)
+      let sv = f_subst le_val.value in
+      Expr.Map.add le_field { le_val with value = sv } ac)
     fv_list Expr.Map.empty
 
 (* Correctness of field-value lists *)

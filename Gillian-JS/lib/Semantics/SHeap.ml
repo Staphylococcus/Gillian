@@ -67,11 +67,11 @@ let set_fvl (heap : t) (loc : string) (fvl : SFVL.t) : unit =
   | true, false ->
       Hashtbl.remove heap.cfvl loc;
       Hashtbl.replace heap.sfvl loc sfvl;
-      heap.cdmn := Var.Set.add loc !(heap.cdmn)
+      heap.sdmn := Var.Set.add loc !(heap.sdmn)
   | false, true ->
       Hashtbl.replace heap.cfvl loc cfvl;
       Hashtbl.remove heap.sfvl loc;
-      heap.sdmn := Var.Set.add loc !(heap.sdmn)
+      heap.cdmn := Var.Set.add loc !(heap.cdmn)
   | false, false ->
       Hashtbl.replace heap.cfvl loc cfvl;
       Hashtbl.replace heap.sfvl loc sfvl;
@@ -143,24 +143,10 @@ let set
 (** Symbolic heap put heap (loc, (perm, field)) is assigned to value *)
 let set_fv_pair (heap : t) (loc : string) (field : Expr.t) (value : Expr.t) :
     unit =
-  heap.cdmn := Var.Set.remove loc !(heap.cdmn);
-  heap.sdmn := Var.Set.remove loc !(heap.sdmn);
-  let add, sadd, rem =
-    if is_c field && is_c value then (heap.cfvl, heap.cdmn, heap.sfvl)
-    else (heap.sfvl, heap.sdmn, heap.cfvl)
-  in
-  let fvadd =
-    SFVL.add field value
-      (Option.value ~default:SFVL.empty (Hashtbl.find_opt add loc))
-  in
-  let fvrem =
-    SFVL.remove field
-      (Option.value ~default:SFVL.empty (Hashtbl.find_opt rem loc))
-  in
-  sadd := Var.Set.add loc !sadd;
-  Hashtbl.replace add loc fvadd;
-  if fvrem = SFVL.empty then Hashtbl.remove rem loc
-  else Hashtbl.replace rem loc fvrem
+  (* Update the combined object before splitting it: changing a value from
+     concrete to symbolic must preserve its property's creation order. *)
+  let fields = Option.value ~default:SFVL.empty (get_fvl heap loc) in
+  set_fvl heap loc (SFVL.add field value fields)
 
 let init_object
     (heap : t)

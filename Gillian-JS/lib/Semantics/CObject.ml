@@ -1,26 +1,22 @@
 open Gillian.Concrete
-module Var = Gillian.Gil_syntax.Var
 
-type t = (string, Values.t) Hashtbl.t
+type t = { fields : (string, Values.t) Hashtbl.t; mutable order : string list }
 
 let pp fmt (loc, obj, metadata) =
-  let pp_kv fmt (prop, prop_val) =
-    Fmt.pf fmt "%s: %a" prop Values.pp prop_val
-  in
+  let pp_kv fmt (prop, value) = Fmt.pf fmt "%s: %a" prop Values.pp value in
   Fmt.pf fmt "@[<h>%s|-> [ %a ], %a@]" loc
     (Fmt.hashtbl ~sep:Fmt.comma pp_kv)
-    obj Values.pp metadata
+    obj.fields Values.pp metadata
 
-let init () : t = Hashtbl.create Config.medium_tbl_size
-let get (obj : t) (prop : string) = Hashtbl.find_opt obj prop
+let init () = { fields = Hashtbl.create Config.medium_tbl_size; order = [] }
+let get obj prop = Hashtbl.find_opt obj.fields prop
 
-let set (obj : t) (prop : string) (value : Values.t) =
-  Hashtbl.replace obj prop value
+let set obj prop value =
+  if not (Hashtbl.mem obj.fields prop) then obj.order <- prop :: obj.order;
+  Hashtbl.replace obj.fields prop value
 
-let remove (obj : t) (prop : string) = Hashtbl.remove obj prop
+let remove obj prop =
+  Hashtbl.remove obj.fields prop;
+  obj.order <- List.filter (( <> ) prop) obj.order
 
-let properties (obj : t) : string list =
-  Var.Set.elements
-    (Hashtbl.fold
-       (fun prop _ props -> Var.Set.add prop props)
-       obj Var.Set.empty)
+let properties obj = Javert_utils.Property_order.sort (List.rev obj.order)

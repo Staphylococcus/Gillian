@@ -5,6 +5,7 @@ module GProg = Gillian.Gil_syntax.Prog
 module GProc = Gillian.Gil_syntax.Proc
 module Literal = Gillian.Gil_syntax.Literal
 module Annot = Gillian.Gil_syntax.Annot
+module Utf16 = Javert_utils.Utf16
 
 (** JSIL external procedure calls *)
 module M
@@ -50,9 +51,7 @@ struct
             | None ->
                 raise (Failure "Eval statement argument not a literal string")
             | Some (String code) -> (
-                let code =
-                  Str.global_replace (Str.regexp (Str.quote "\\\"")) "\"" code
-                in
+                let code = Utf16.source_text code in
                 let opt_proc_eval =
                   try
                     let e_js =
@@ -151,9 +150,8 @@ struct
 
     match (params, body) with
     | String params, String code -> (
-        let code =
-          Str.global_replace (Str.regexp (Str.quote "\\\"")) "\"" code
-        in
+        let params = Utf16.source_text params in
+        let code = Utf16.source_text code in
         let code =
           "function THISISANELABORATENAME (" ^ params ^ ") {" ^ code ^ "}"
         in
@@ -185,6 +183,79 @@ struct
             | _ -> throw "Not a script."))
     | _, _ -> throw "Body or parameters not a string."
 
+  (* Keep string decoding separate from JS coercion and indexing, which execute
+     in String.jsil. Symbolic strings need a code-unit model; a backend failure
+     here must not be converted into a catchable JavaScript exception. *)
+  let execute_string_code_units state cs i x = function
+    | [ value ] -> (
+        match Val.to_literal value with
+        | Some (String string) ->
+            let units =
+              Utf16.code_units string
+              |> List.map (fun unit -> Num (float_of_int unit))
+            in
+            let state = update_store state x (Val.from_literal (LList units)) in
+            [ (state, cs, i, i + 1) ]
+        | _ ->
+            raise
+              (Exceptions.Unsupported
+                 "ExecuteStringCodeUnits requires a concrete string"))
+    | _ -> failwith "ExecuteStringCodeUnits expects one argument"
+
+  let execute_string_primitive state cs i x pid args =
+    let unsupported () =
+      raise (Exceptions.Unsupported (pid ^ " requires concrete operands"))
+    in
+    let result =
+      let literals =
+        List.map
+          (fun value ->
+            match Val.to_literal value with
+            | Some literal -> Some literal
+            | None -> (
+                match Val.to_list value with
+                | Some values ->
+                    let units =
+                      List.map
+                        (fun value ->
+                          match Val.to_literal value with
+                          | Some literal -> literal
+                          | None -> unsupported ())
+                        values
+                    in
+                    Some (LList units)
+                | None -> None))
+          args
+      in
+      match (pid, literals) with
+      | "ExecuteStringLength", [ Some (String string) ] ->
+          Num (float_of_int (List.length (Utf16.code_units string)))
+      | "ExecuteStringNth", [ Some (String string); Some (Num index) ] ->
+          let units = Utf16.code_units string in
+          if
+            index < 0.
+            || index >= float_of_int (List.length units)
+            || Float.floor index <> index
+          then unsupported ();
+          String (Utf16.of_code_units [ List.nth units (int_of_float index) ])
+      | "ExecuteStringFromCodeUnits", [ Some (LList units) ] ->
+          let units =
+            List.map
+              (function
+                | Num unit
+                  when unit >= 0. && unit <= 65535. && Float.floor unit = unit
+                  -> int_of_float unit
+                | _ -> unsupported ())
+              units
+          in
+          String (Utf16.of_code_units units)
+      | "ExecuteStringTrim", [ Some (String string) ] ->
+          String (Utf16.trim string)
+      | _ -> unsupported ()
+    in
+    let state = update_store state x (Val.from_literal result) in
+    [ (state, cs, i, i + 1) ]
+
   (** General External Procedure Treatment
 
       @param prog JSIL program
@@ -206,6 +277,11 @@ struct
       (v_args : Val.t list)
       (j : int option) =
     match pid with
+    | "ExecuteStringLength"
+    | "ExecuteStringNth"
+    | "ExecuteStringFromCodeUnits"
+    | "ExecuteStringTrim" -> execute_string_primitive state cs i x pid v_args
+    | "ExecuteStringCodeUnits" -> execute_string_code_units state cs i x v_args
     | "ExecuteEval" -> execute_eval prog state cs i x v_args j
     | "ExecuteFunctionConstructor" ->
         execute_function_constructor prog state cs i x v_args j

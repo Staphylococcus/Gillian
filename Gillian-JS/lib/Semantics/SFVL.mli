@@ -7,11 +7,12 @@ open Gillian.Symbolic
 
 type field_name = Expr.t
 type field_value = Expr.t
-type t = field_value Expr.Map.t [@@deriving yojson]
+type t [@@deriving yojson]
 
 val add : field_name -> field_value -> t -> t
 val empty : t
 val field_names : t -> field_name list
+val ordered_field_names : t -> field_name list
 val fold : (field_name -> field_value -> 'a -> 'a) -> t -> 'a -> 'a
 val get : field_name -> t -> field_value option
 val get_first : (field_name -> bool) -> t -> (field_name * field_value) option

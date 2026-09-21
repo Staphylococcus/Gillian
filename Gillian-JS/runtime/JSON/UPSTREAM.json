@@ -1,0 +1,9 @@
+{
+  "project": "JSON3",
+  "version": "3.2.6",
+  "commit": "7b89fd94939f970f316420e157a836cc68aa2207",
+  "source": "https://github.com/bestiejs/json3/blob/7b89fd94939f970f316420e157a836cc68aa2207/lib/json3.js",
+  "originalSha256": "676d9302acfd1d20d2b901f9df964ef72e13f3e5133fc8b4f01f3795efab733d",
+  "adaptations": "README.md",
+  "license": "LICENSE"
+}

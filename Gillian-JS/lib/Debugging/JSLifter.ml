@@ -48,7 +48,7 @@ struct
       node
     in
     let property_nodes =
-      properties |> Expr.Map.to_seq
+      properties |> Semantics.SFVL.to_list |> List.to_seq
       |> Seq.map (fun (name, value) ->
              let name = to_str Expr.pp name in
              match value with
@@ -141,7 +141,7 @@ struct
     in
     let add_properties_vars properties =
       let property_nodes =
-        properties |> Expr.Map.to_seq
+        properties |> Semantics.SFVL.to_list |> List.to_seq
         |> Seq.map (fun (name, value) ->
                let name = to_str Expr.pp name in
                let field_names =

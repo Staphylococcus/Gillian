@@ -494,7 +494,7 @@ module M = struct
             let _, pos_fv_list =
               SFVL.partition (fun _ fv -> fv = Lit Nono) fv_list
             in
-            Ok [ (heap, [ loc; EList (SFVL.field_names pos_fv_list) ], [], []) ]
+            Ok [ (heap, [ loc; EList (SFVL.ordered_field_names pos_fv_list) ], [], []) ]
           else raise (Failure "DEATH. TODO. get_full_domain. incomplete domain")
     in
 

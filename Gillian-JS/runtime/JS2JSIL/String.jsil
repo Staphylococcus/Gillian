@@ -1,5 +1,30 @@
 import Internals.jsil;
 
+proc String_fromCharCode (xsc, vthis) {
+        values := args;
+        count := l-len (values);
+        index := 2;
+        units := {{}};
+  loop: goto [index < count] item done;
+  item: value := l-nth (values, index);
+        ret := "i__toUint16" (value) with elab;
+        units := ret :: units;
+        index := index + 1;
+        goto loop;
+  done: units := l-rev (units);
+        ret := extern ExecuteStringFromCodeUnits (units);
+        return;
+  elab: throw
+};
+
+proc SP_trim (xsc, vthis) {
+        ret := "i__checkObjectCoercible" (vthis) with elab;
+        ret := "i__toString" (vthis) with elab;
+        ret := extern ExecuteStringTrim (ret);
+        return;
+  elab: throw
+};
+
 (* ****************** *)
 (* THE STRING LIBRARY *)
 (* ****************** *)
@@ -21,10 +46,10 @@ proc s__getOwnProperty (l, prop) {
 
 	index:	m := metadata(l);
 					str := [m, "@primitiveValue"];
-					len := s-len (str);
+					len := extern ExecuteStringLength (str);
 					goto [len <= idx] r_uf rtrn;
 
-	rtrn: rstr := s-nth (str, idx);
+	rtrn: rstr := extern ExecuteStringNth (str, idx);
 				ret := {{ "d", rstr, false, true, false }};
 				goto rlab;
 
@@ -67,7 +92,7 @@ proc String_construct (xsc, vthis, s) {
 					m := metadata(ret);
 					[m, "@primitiveValue"] := pv;
 
-					len := s-len (pv);
+					len := extern ExecuteStringLength (pv);
 
 					s := ret;
 					ret := "defineOwnProperty" (s, "length", {{ "d", len, false, false, false }}, true) with elab;
@@ -122,7 +147,7 @@ proc SP_charAt (xsc, vthis, position) {
 				S := ret;
 				ret := "i__toInteger" (position) with elab;
 				pos := ret;
-				size := s-len (S);
+				size := extern ExecuteStringLength (S);
 				goto [pos < 0] empt next;
 
 	next:	goto [size <= pos] empt fll;
@@ -130,10 +155,28 @@ proc SP_charAt (xsc, vthis, position) {
 	empt:	ret := "";
 				goto rlab;
 
-	fll:	ret := s-nth (S, pos);
+	fll:	ret := extern ExecuteStringNth (S, pos);
 	rlab: return;
 
 	elab: throw
+};
+
+(* ES5.1 15.5.4.5: index UTF-16 code units, not WTF-8 bytes. *)
+proc SP_charCodeAt (xsc, vthis, position) {
+        ret := "i__checkObjectCoercible" (vthis) with elab;
+        ret := "i__toString" (vthis) with elab;
+        str := ret;
+        ret := "i__toInteger" (position) with elab;
+        pos := ret;
+        units := extern ExecuteStringCodeUnits (str);
+        len := l-len (units);
+        goto [pos < 0] outside upper;
+  upper: goto [len <= pos] outside inside;
+  inside: ret := l-nth (units, pos);
+        return;
+  outside: ret := nan;
+        return;
+  elab: throw
 };
 
 (* *** CONCAT *** *)
@@ -178,7 +221,7 @@ proc SP_indexOf (xsc, vthis, searchString, position) {
 
 	nzero:	ret := "i__toInteger" (position) with elab;
 					pos := ret;
-	leng:		len := s-len (S);
+	leng:		len := extern ExecuteStringLength (S);
 
 					max := pos;
 					goto [0 < pos] min maxz; 
@@ -187,7 +230,7 @@ proc SP_indexOf (xsc, vthis, searchString, position) {
 					goto [len < min] minl st;
 	minl: 	min := len;
 	st:			start := min;
-					slen := s-len (sStr);
+					slen := extern ExecuteStringLength (sStr);
 
 					goto [slen = 0] empts nempt;
 	empts:	ret := start;
@@ -201,8 +244,8 @@ proc SP_indexOf (xsc, vthis, searchString, position) {
 					goto [kslen <= len] iloop end;
 
 	iloop:	kj := k + j;
-					skj := s-nth (S, kj);
-					ssj := s-nth (sStr, j);
+					skj := extern ExecuteStringNth (S, kj);
+					ssj := extern ExecuteStringNth (sStr, j);
 					goto [skj = ssj] checkj next;
 
 	checkj:	j := j + 1;
@@ -226,7 +269,7 @@ proc SP_lastIndexOf (xsc, vthis, searchString, position) {
 			ret := "i__toString" (vthis) with elab;
 			S := ret;
 
-			len := s-len (S);
+			len := extern ExecuteStringLength (S);
 
 			ret := "i__toString" (searchString) with elab;
 			sStr := ret;
@@ -246,7 +289,7 @@ proc SP_lastIndexOf (xsc, vthis, searchString, position) {
 			max := ret;
 			ret := "M_min" (empty, empty, max, len) with elab;
 			start := ret;
-			slen := s-len (sStr);
+			slen := extern ExecuteStringLength (sStr);
 			fink := -1;
 
 			goto [slen = 0] empts nempt;
@@ -269,8 +312,8 @@ proc SP_lastIndexOf (xsc, vthis, searchString, position) {
 			goto [k < 0] end iloop;
 
 	iloop:	kj := k + j;
-			skj := s-nth (S, kj);
-			ssj := s-nth (sStr, j);
+			skj := extern ExecuteStringNth (S, kj);
+			ssj := extern ExecuteStringNth (sStr, j);
 			goto [skj = ssj] checkj next;
 
 	checkj:	j := j + 1;
@@ -293,7 +336,7 @@ proc SP_slice (xsc, vthis, start, end) {
 			ret := "i__checkObjectCoercible" (vthis) with elab;
 			ret := "i__toString" (vthis) with elab;
 			S := ret;
-			len := s-len (S);
+			len := extern ExecuteStringLength (S);
 
 			goto [start = undefined] sund snull;
 	sund:	start := 0;
@@ -336,7 +379,7 @@ proc SP_slice (xsc, vthis, start, end) {
 			cnt := 0;
 	loop:	goto [cnt < span] add stop;
 
-	add:	ret := s-nth (S, from);
+	add:	ret := extern ExecuteStringNth (S, from);
 			nStr := ret;
 			R := R ++ nStr;
 			cnt := cnt + 1;
@@ -354,7 +397,7 @@ proc SP_substring (xsc, vthis, start, end) {
 			ret := "i__checkObjectCoercible" (vthis) with elab;
 			ret := "i__toString" (vthis) with elab;
 			S := ret;
-			len := s-len (S);
+			len := extern ExecuteStringLength (S);
 
 			ret := "i__toInteger" (start) with elab;
 			intS := ret;
@@ -383,7 +426,7 @@ proc SP_substring (xsc, vthis, start, end) {
 			cnt := 0;
 	loop:	goto [cnt < span] add stop;
 
-	add:	ret := s-nth (S, from);
+	add:	ret := extern ExecuteStringNth (S, from);
 			nStr := ret;
 			R := R ++ nStr;
 			cnt := cnt + 1;

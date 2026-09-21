@@ -1250,9 +1250,7 @@ let rec translate_expr tr_ctx e :
   *)
   | JS_Parser.Syntax.Null -> (annotate_first_cmd [], Lit Null, [])
   | JS_Parser.Syntax.Bool b -> (annotate_first_cmd [], Lit (Bool b), [])
-  | JS_Parser.Syntax.String s ->
-      let escaped_s = Str.global_replace (Str.regexp "\"") "\\\"" s in
-      (annotate_first_cmd [], Lit (String escaped_s), [])
+  | JS_Parser.Syntax.String s -> (annotate_first_cmd [], Lit (String s), [])
   | JS_Parser.Syntax.Num n -> (annotate_first_cmd [], Lit (Num n), [])
   (*
    Section 11.1.4 - Array Initialiser
@@ -5871,7 +5869,7 @@ and translate_statement tr_ctx e =
             ([ annotate_cmd cmd_ass_x1v None ], PVar x1_v, [])
       in
       (* x1_v := i__getValue (x1) with err *)
-      let x1_v, cmd_gv_x1, _ = make_get_value_call x1 tr_ctx.tr_err_lab in
+      let _, cmd_gv_x1, errs_x1_v = make_get_value_call x1 tr_ctx.tr_err_lab in
 
       (* x_ret_0 := empty  *)
       let x_ret_0, cmd_ass_ret_0 = make_empty_ass () in
@@ -5879,7 +5877,7 @@ and translate_statement tr_ctx e =
       let cmds1, errs1 =
         ( cmds1
           @ [ annotate_cmd cmd_gv_x1 None; annotate_cmd cmd_ass_ret_0 None ],
-          errs1 @ [ x1_v ] )
+          errs1 @ errs_x1_v )
       in
 
       let head, _, _, cont, end_loop = fresh_loop_vars () in

@@ -1,0 +1,3 @@
+(tests
+ (names utf16_tests property_order_tests)
+ (libraries semantics alcotest wtf8))

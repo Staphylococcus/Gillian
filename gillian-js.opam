@@ -10,6 +10,7 @@ depends: [
   "dune" {>= "3.16"}
   "dune-site"
   "flow_parser"
+  "wtf8"
   "fpath"
   "gillian" {= version}
   "odoc" {with-doc}

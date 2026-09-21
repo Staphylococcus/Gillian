@@ -257,6 +257,7 @@ proc setupInitialHeap () {
       ret := "create_object_with_call_construct_concrete" ($lstr, "String_call", "String_construct", 1);
 
       [$lstr, "prototype"]    := {{ "d", $lstr_proto, false, false, false }};
+      [$lstr, "fromCharCode"] := {{ "d", $lstr_fromCharCode, true, false, true }};
 
       ret := "create_object_with_call_construct_concrete" ($lstr_fromCharCode, "String_fromCharCode", empty, 1);
 
@@ -271,19 +272,25 @@ proc setupInitialHeap () {
       [$lstr_proto, "toString"]          := {{ "d", $lsp_toString, true, false, true }};
       [$lstr_proto, "valueOf"]           := {{ "d", $lsp_valueOf, true, false, true }};
       [$lstr_proto, "charAt"]            := {{ "d", $lsp_charAt, true, false, true }};
+      [$lstr_proto, "charCodeAt"]        := {{ "d", $lsp_charCodeAt, true, false, true }};
+      [$lstr_proto, "trim"]              := {{ "d", $lsp_trim, true, false, true }};
       [$lstr_proto, "concat"]            := {{ "d", $lsp_concat, true, false, true }};
       [$lstr_proto, "indexOf"]           := {{ "d", $lsp_indexOf, true, false, true }};
       [$lstr_proto, "lastIndexOf"]       := {{ "d", $lsp_lastIndexOf, true, false, true }};
       [$lstr_proto, "replace"]           := {{ "d", $lsp_replace, true, false, true }};
+      [$lstr_proto, "slice"]             := {{ "d", $lsp_slice, true, false, true }};
       [$lstr_proto, "substring"]         := {{ "d", $lsp_substring, true, false, true }};
 
       ret := "create_object_with_call_construct_concrete" ($lsp_toString, "SP_toString", empty, 0);
       ret := "create_object_with_call_construct_concrete" ($lsp_valueOf, "SP_valueOf", empty, 0);
       ret := "create_object_with_call_construct_concrete" ($lsp_charAt, "SP_charAt", empty, 1);
+      ret := "create_object_with_call_construct_concrete" ($lsp_charCodeAt, "SP_charCodeAt", empty, 1);
+      ret := "create_object_with_call_construct_concrete" ($lsp_trim, "SP_trim", empty, 0);
       ret := "create_object_with_call_construct_concrete" ($lsp_concat, "SP_concat", empty, 1);
       ret := "create_object_with_call_construct_concrete" ($lsp_indexOf, "SP_indexOf", empty, 1);
       ret := "create_object_with_call_construct_concrete" ($lsp_lastIndexOf, "SP_lastIndexOf", empty, 1);
       ret := "create_object_with_call_construct_concrete" ($lsp_replace, "SP_replace", empty, 2);
+      ret := "create_object_with_call_construct_concrete" ($lsp_slice, "SP_slice", empty, 2);
       ret := "create_object_with_call_construct_concrete" ($lsp_substring, "SP_substring", empty, 2);
 
       (* Boolean object *)

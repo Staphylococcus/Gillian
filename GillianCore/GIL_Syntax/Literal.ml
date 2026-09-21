@@ -47,7 +47,21 @@ let rec pp fmt x =
   | Bool b -> Fmt.pf fmt "%b" b
   | Int i -> Fmt.pf fmt "%ai" Z.pp_print i
   | Num n -> Fmt.pf fmt "%F" n
-  | String x -> Fmt.pf fmt "\"%s\"" x
+  | String x ->
+      (* Escape only when printing GIL, never in the stored string value. *)
+      Fmt.char fmt '"';
+      String.iter
+        (function
+          | '"' -> Fmt.string fmt "\\\""
+          | '\\' -> Fmt.string fmt "\\\\"
+          | '\n' -> Fmt.string fmt "\\n"
+          | '\r' -> Fmt.string fmt "\\r"
+          | '\t' -> Fmt.string fmt "\\t"
+          | '\b' -> Fmt.string fmt "\\b"
+          | '\012' -> Fmt.string fmt "\\f"
+          | c -> Fmt.char fmt c)
+        x;
+      Fmt.char fmt '"'
   | Loc loc -> Fmt.string fmt loc
   | Type t -> Fmt.string fmt (Type.str t)
   | LList ll -> Fmt.pf fmt "{{ %a }}" (Fmt.list ~sep:Fmt.comma pp) ll

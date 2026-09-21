@@ -43,6 +43,14 @@ let reset_generators () =
 let rec jsil2gil_expr (e : Expr.t) : Expr.t =
   let f = jsil2gil_expr in
   match e with
+  | Lit literal ->
+      let rec canonical = function
+        | Gil.Literal.String string ->
+            Gil.Literal.String (Utf16.canonical string)
+        | LList literals -> LList (List.map canonical literals)
+        | literal -> literal
+      in
+      Lit (canonical literal)
   | UnOp (op, e') -> (
       let e = Expr.UnOp (op, f e') in
       match op with
@@ -128,7 +136,7 @@ let jsil2gil_sspec (sspec : Spec.st) : GSpec.st =
 
 let jsil2gil_spec (spec : Spec.t) : GSpec.t =
   {
-    spec_name = spec.name;
+    spec_name = Utf16.canonical spec.name;
     spec_params = spec.params;
     spec_sspecs = List.map jsil2gil_sspec spec.sspecs;
     spec_normalised = spec.normalised;
@@ -192,7 +200,7 @@ let jsil2gil_macro (macro : Macro.t) : GMacro.t =
 let jsil2gil_bispec (bispec : BiSpec.t) : GBiSpec.t =
   (* TODO: add loc *)
   {
-    bispec_name = bispec.name;
+    bispec_name = Utf16.canonical bispec.name;
     bispec_params = bispec.params;
     bispec_pres = [ (jsil2gil_asrt bispec.pre, None) ];
     bispec_normalised = bispec.normalised;
@@ -477,7 +485,7 @@ let jsil2core_proc (proc : EProc.t) : ('a, string) GProc.t =
          body)
   in
   {
-    proc_name = proc.name;
+    proc_name = Utf16.canonical proc.name;
     proc_source_path = None;
     proc_internal = false;
     (* TODO (Alexis): Set depending on module of proc *)
@@ -491,11 +499,11 @@ let jsil2core_proc (proc : EProc.t) : ('a, string) GProc.t =
     proc_hidden = false;
   }
 
-let translate_tbl (tbl : (string, 'a) Hashtbl.t) (f : 'a -> 'b) :
-    (string, 'b) Hashtbl.t =
+let translate_tbl ?(key = Fun.id) (tbl : (string, 'a) Hashtbl.t) (f : 'a -> 'b)
+    : (string, 'b) Hashtbl.t =
   let size = (Hashtbl.stats tbl).max_bucket_length in
   let tbl' : (string, 'b) Hashtbl.t = Hashtbl.create size in
-  Hashtbl.iter (fun k v -> Hashtbl.add tbl' k (f v)) tbl;
+  Hashtbl.iter (fun k v -> Hashtbl.add tbl' (key k) (f v)) tbl;
   tbl'
 
 let jsil2core_prog (prog : EProg.t) : ('a, string) GProg.t =
@@ -511,12 +519,14 @@ let jsil2core_prog (prog : EProg.t) : ('a, string) GProg.t =
     GProg.make ~imports:prog.imports
       ~preds:(translate_tbl prog.preds jsil2gil_pred)
       ~lemmas:(translate_tbl prog.lemmas jsil2gil_lemma)
-      ~only_specs:(translate_tbl prog.only_specs jsil2gil_spec)
+      ~only_specs:
+        (translate_tbl ~key:Utf16.canonical prog.only_specs jsil2gil_spec)
       ~procs:new_procs
       ~macros:(translate_tbl prog.macros jsil2gil_macro)
-      ~bi_specs:(translate_tbl prog.bi_specs jsil2gil_bispec)
-      ~proc_names:prog.proc_names ~predecessors:(Hashtbl.create 1)
-      ~datatypes:(Hashtbl.create 1)
+      ~bi_specs:
+        (translate_tbl ~key:Utf16.canonical prog.bi_specs jsil2gil_bispec)
+      ~proc_names:(List.map Utf16.canonical prog.proc_names)
+      ~predecessors:(Hashtbl.create 1) ~datatypes:(Hashtbl.create 1)
       ~funcs:(Hashtbl.create 1) (* TODO *)
       ()
   in

@@ -113,31 +113,6 @@ let uint32_right_shift_f x y =
 
 let uint64_int_right_shift x y = Z.shift_right x (Z.to_int y)
 
-(** Stringifies a float, adapting based on its size, or whether it's an integer
-
-    Assumes the float is normal and positive *)
-let string_of_pos_float num =
-  (* Is the number an integer? *)
-  let inum = int_of_float num in
-  if is_int num then string_of_int inum (* It is not an integer *)
-  else if num > 1e+9 && num < 1e+21 then Printf.sprintf "%.0f" num
-  else if 1e-5 <= num && num < 1e-4 then
-    let s = Float.to_string (num *. 10.) in
-    let len = String.length s in
-    "0.0" ^ String.sub s 2 (len - 2)
-  else if 1e-6 <= num && num < 1e-5 then
-    let s = Float.to_string (num *. 100.) in
-    let len = String.length s in
-    "0.00" ^ String.sub s 2 (len - 2)
-  else
-    let re = Str.regexp "e\\([-+]\\)0" in
-    (* e+0 -> e+ *)
-    Str.replace_first re "e\\1" (Float.to_string num)
-
-(** Stringifies a float, considering negative and abnormal cases *)
-let rec float_to_string_inner n =
-  if Float.is_nan n then "NaN"
-  else if n = 0.0 || n = -0.0 then "0"
-  else if n < 0.0 then "-" ^ float_to_string_inner (-.n)
-  else if n = Float.infinity then "Infinity"
-  else string_of_pos_float n
+(** ECMAScript's shortest round-tripping binary64 representation. Keep this
+    conversion shared by concrete execution and symbolic constant reduction. *)
+let float_to_string_inner = Dtoa.ecma_string_of_float

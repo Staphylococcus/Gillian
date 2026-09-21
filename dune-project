@@ -35,6 +35,7 @@
   (cmdliner
    (>= 1.1.1))
   sedap
+  (dtoa (= 0.3.3))
   (fmt
    (>= 0.8.8))
   (linol-lwt
@@ -67,6 +68,7 @@
  (depends
   dune-site
   flow_parser
+  wtf8
   fpath
   (gillian
    (= :version)))

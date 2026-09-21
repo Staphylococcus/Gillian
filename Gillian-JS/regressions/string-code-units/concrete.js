@@ -1,0 +1,34 @@
+"use strict";
+function same(actual, expected) {
+  var ok = actual === expected || (actual !== actual && expected !== expected);
+  Assert(ok);
+}
+same("ASCII".charCodeAt(0), 65);
+same("ASCII".charCodeAt(4), 73);
+same("é".charCodeAt(0), 233);
+same("\u20ac".charCodeAt(0), 8364);
+same("😀".charCodeAt(0), 55357);
+same("😀".charCodeAt(1), 56832);
+same("😀".charCodeAt(2), NaN);
+same("\ud83d\ude00".charCodeAt(0), 55357);
+same("\ud83d\ude00".charCodeAt(1), 56832);
+same("\ud800".charCodeAt(0), 55296);
+same("\udfff".charCodeAt(0), 57343);
+same("a😀é".charCodeAt(3), 233);
+same("\u0000".charCodeAt(0), 0);
+same("\uffff".charCodeAt(0), 65535);
+same("\n\t\\".charCodeAt(0), 10);
+same("\n\t\\".charCodeAt(1), 9);
+same("\n\t\\".charCodeAt(2), 92);
+same("\u0022".charCodeAt(0), 34);
+same("".charCodeAt(0), NaN);
+same("abc".charCodeAt(-1), NaN);
+same("abc".charCodeAt(3), NaN);
+same("abc".charCodeAt(Infinity), NaN);
+same("abc".charCodeAt(-Infinity), NaN);
+same("abc".charCodeAt(9007199254740992), NaN);
+same("abc".charCodeAt(-0), 97);
+same("abc".charCodeAt(-0.9), 97);
+same("abc".charCodeAt(1.9), 98);
+same("abc".charCodeAt(), 97);
+same("abc".charCodeAt(NaN), 97);

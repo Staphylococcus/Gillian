@@ -23,7 +23,7 @@ proc i__getFields (l) {
 			  goto [class = "String"] add rlab;
 
 	add:	str := [m, "@primitiveValue"];
-			  len := s-len (str);
+			  len := extern ExecuteStringLength (str);
 
 			  n := len - 1;
 
