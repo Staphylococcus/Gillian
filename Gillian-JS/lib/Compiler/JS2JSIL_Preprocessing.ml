@@ -452,7 +452,7 @@ let translate_invariant_in_exp
     (fun_tbl : pre_fun_tbl_type)
     (fid : string)
     (sc_var : string)
-    (e : JS_Parser.Syntax.exp) : (Asrt.t * string list) option =
+    (e : JS_Parser.Syntax.exp) : (Asrt.t * string list * Expr.t option) option =
   let invariant =
     List.filter
       (fun annot -> annot.annot_type == JS_Parser.Syntax.Invariant)
@@ -469,11 +469,11 @@ let translate_invariant_in_exp
              ("invariant " ^ invariant.annot_formula))
       in
       match inv with
-      | Invariant (inv_a, inv_binders) ->
+      | Invariant (inv_a, inv_binders, rank) ->
           let inv_a =
             JSAsrt.js2jsil_tactic cc_tbl vis_tbl fun_tbl fid sc_var inv_a
           in
-          Some (inv_a, inv_binders)
+          Some (inv_a, inv_binders, rank)
       | _ -> L.fail "Impossible: invariant parsed incorrectly")
 
 let translate_single_func_specs

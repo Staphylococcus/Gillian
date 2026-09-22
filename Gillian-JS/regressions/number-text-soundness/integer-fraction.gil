@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Num) * (-1.0 < #x) * (#x < 0.0) ]]
+[[ (1.0 / ret == -inf) ]] normal
+proc answer(x) { ret := num_to_int(x); return };

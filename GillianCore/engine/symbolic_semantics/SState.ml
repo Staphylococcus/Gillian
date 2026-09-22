@@ -32,7 +32,6 @@ module type S = sig
   val get_typ_env : t -> Type_env.t
   val get_pfs : t -> PFS.t
   val sure_is_nonempty : t -> bool
-  val is_action_total : string -> int -> bool
   val consume_core_pred : string -> t -> vt list -> action_ret
   val produce_core_pred : string -> t -> vt list -> t list
 
@@ -365,7 +364,11 @@ module Make (SMemory : SMemory.S) :
     FOSolver.check_entailment SS.empty pfs ps gamma
 
   let equals ({ pfs; gamma; _ } : t) (le1 : vt) (le2 : vt) : bool =
-    let result = FOSolver.is_equal ~pfs ~gamma le1 le2 in
+    let result =
+      FOSolver.check_entailment SS.empty pfs
+        [ Expr.BinOp (le1, ValueEqual, le2) ]
+        gamma
+    in
     result
 
   let get_type ({ pfs; gamma; _ } : t) (le : vt) : Type.t option =
@@ -379,9 +382,7 @@ module Make (SMemory : SMemory.S) :
       ?(matching = false)
       (state : t) : st * t list =
     let { heap; store; pfs; gamma; spec_vars } = state in
-    let save_spec_vars =
-      if save then (SS.empty, true) else (spec_vars, false)
-    in
+    let save_spec_vars = (spec_vars, save) in
     L.verbose (fun m ->
         m
           "-----------------------------------\n\
@@ -535,7 +536,7 @@ module Make (SMemory : SMemory.S) :
       (t, err_t) Res_list.t =
     raise (Failure "ERROR: evaluate_slcmd called for non-abstract execution")
 
-  let match_invariant _ _ _ _ _ =
+  let match_invariant _ _ _ _ _ ~measure:_ =
     raise (Failure "ERROR: match_invariant called for pure symbolic execution")
 
   let clear_resource (state : t) : t =

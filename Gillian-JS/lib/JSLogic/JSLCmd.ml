@@ -12,7 +12,7 @@ type t =
   | Macro of string * JSExpr.t list  (** Macro *)
   | Assert of (JSAsrt.t * string list)  (** Assert *)
   | Assume of JSAsrt.pt  (** Assume *)
-  | Invariant of (JSAsrt.t * string list)  (** Invariant *)
+  | Invariant of (JSAsrt.t * string list * Expr.t option)  (** Invariant *)
   | UseSubst of string * (string * JSExpr.t) list
 
 let rec js2jsil

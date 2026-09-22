@@ -23,7 +23,8 @@ module type S = sig
   module Val : Val.S with type t = vt
   module Store : Store.S with type t = store_t and type vt = vt
 
-  type invariant_frames = (string * state_t) list
+  type invariant_frame = { frame : state_t; rank : (Type.t * Expr.t) option }
+  type invariant_frames = (string * invariant_frame) list
   type err_t = (vt, state_err_t) Exec_err.t [@@deriving show, yojson]
 
   (** Type of configurations: state, call stack, previous index, previous loop

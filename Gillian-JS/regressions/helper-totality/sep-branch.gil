@@ -1,0 +1,11 @@
+spec answer(a, flag)
+[[ (a v== #a) * (flag v== #flag) * types(#flag : Bool) * <Cell>(#a, "x"; #value) * <Cell>(#a, "kept"; 7i) ]]
+[[ (ret v== #value) * <Cell>(#a, "x"; #value) * <Cell>(#a, "kept"; 7i) ]] normal
+proc answer(a, flag) {
+  goto [flag] bad good;
+ bad: sep_assert ((true == false));
+ good: sep_assert (<Cell>(a, "x"; #captured)) [bind: #captured];
+  assert (#captured v== #value);
+  cell := [GetCell](a, "x");
+  ret := l-nth(cell, 2i); return
+};

@@ -1,0 +1,4 @@
+spec answer(xs)
+[[ (xs == #xs) * types(#xs : List) ]]
+[[ (ret == 1i) ]] normal
+proc answer(xs) { goto [l-len(xs) i> 0i] read done; read: unused := l-nth(xs, 0i); done: ret := 1i; return };

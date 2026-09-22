@@ -1,0 +1,8 @@
+spec answer(a, target)
+[[ (a v== #a) * (target v== #target) * <Cell>(#a, "pointer"; #target) * <Cell>(#target, "x"; 9i) ]]
+[[ <Cell>(#a, "pointer"; #target) * <Cell>(#target, "x"; 9i) * (ret == 9i) ]] normal
+proc answer(a, target) {
+ sep_assert (<Cell>(a, "pointer"; #captured)) [bind: #captured];
+ sep_assert (<Cell>(#captured, "x"; 9i));
+ cell := [GetCell](target, "x"); ret := l-nth(cell, 2i); return
+};

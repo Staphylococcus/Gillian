@@ -1,0 +1,1 @@
+macro EmptyCheck(value): assert(value)

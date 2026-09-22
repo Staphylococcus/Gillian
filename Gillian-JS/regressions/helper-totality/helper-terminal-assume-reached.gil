@@ -1,0 +1,8 @@
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() { ret := "helper"(false); return };
+proc helper(ok) {
+  goto [ok] done impossible;
+done: ret := 42i; return;
+impossible: assume(false)
+};

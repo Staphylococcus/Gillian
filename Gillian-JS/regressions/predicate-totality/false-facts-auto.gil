@@ -1,0 +1,5 @@
+pure pred Claimed(n : Int) : emp;
+facts: (n == 1i);
+spec answer(n)
+[[ (n == #n) * Claimed(#n) ]] [[ (ret == 1i) ]] normal
+proc answer(n) { ret := n; return };

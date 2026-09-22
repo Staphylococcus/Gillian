@@ -45,6 +45,8 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 (* Constants *)
 %token MIN_FLOAT
 %token MAX_FLOAT
+%token MAX_SAFE_INTEGER
+%token EPSILON
 %token RANDOM
 %token PI
 %token UTCTIME
@@ -68,6 +70,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token <string> VAR
 (* Binary operators *)
 %token EQ
+%token VALUEEQ
 %token WAND
 %token LAND
 %token LOR
@@ -142,6 +145,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token SETTOLIST
 %token LSTLEN
 %token STRLEN
+%token STRBYTES
 %token INTTONUM
 %token NUMTOINT
 (* Expression keywords *)
@@ -265,7 +269,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %left LIMPLIES
 %left OR, LOR
 %left AND, LAND
-%nonassoc EQ
+%nonassoc EQ VALUEEQ
 %nonassoc FLT FLE FGT FGE ILT ILE IGT IGE SLT
 %left LEFTSHIFT SIGNEDRIGHTSHIFT UNSIGNEDRIGHTSHIFT LEFTSHIFTL SIGNEDRIGHTSHIFTL UNSIGNEDRIGHTSHIFTL
 %left BITWISEOR BITWISEXOR BITWISEAND BITWISEXORL BITWISEORL BITWISEANDL
@@ -529,6 +533,8 @@ comparison_expr:
 
 eq_expr:
   | comparison_expr { $1 }
+  | e1 = eq_expr; VALUEEQ; e2 = comparison_expr
+    { Expr.BinOp (e1, ValueEqual, e2) }
   | e1 = eq_expr; EQ; e2 = comparison_expr
     { Expr.BinOp (e1, Equal, e2) }
 
@@ -895,8 +901,8 @@ g_logic_cmd_target:
   | SYMBEXEC { LCmd.SL SymbExec }
 
 (* invariant (a) [existentials: x, y, z] *)
-  | INVARIANT; LBRACE; a = g_assertion_target; RBRACE; binders = option(binders_target)
-    { LCmd.SL (Invariant (a, Option.value ~default:[ ] binders)) }
+  | INVARIANT; LBRACE; a = g_assertion_target; RBRACE; binders = option(binders_target); rank = option(variant_target)
+    { LCmd.SL (Invariant (a, Option.value ~default:[ ] binders, rank)) }
 
   | CONSUME; LBRACE; a = g_assertion_target; RBRACE; binders = option(binders_target)
     { LCmd.SL (Consume (a, Option.value ~default:[ ] binders)) }
@@ -1240,6 +1246,7 @@ unop_target:
   | LSTLEN      { UnOp.LstLen }
   | LSTREV      { UnOp.LstRev }
   | STRLEN      { UnOp.StrLen }
+  | STRBYTES    { UnOp.StrToBytes }
   | SETTOLIST   { UnOp.SetToList }
   | INTTONUM    { UnOp.IntToNum }
   | NUMTOINT    { UnOp.NumToInt }
@@ -1249,6 +1256,8 @@ unop_target:
 constant_target:
   | MIN_FLOAT { Constant.Min_float }
   | MAX_FLOAT { Constant.Max_float }
+  | MAX_SAFE_INTEGER { Constant.MaxSafeInteger }
+  | EPSILON { Constant.Epsilon }
   | RANDOM    { Constant.Random }
   | PI        { Constant.Pi }
   | UTCTIME   { Constant.UTCTime }
@@ -1277,4 +1286,3 @@ type_target:
 %inline option_preceded_separated_list(PREC, SEP, X):
   | PREC; xs = separated_list(SEP, X) { xs }
   | { [] }
-

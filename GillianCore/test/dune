@@ -4,5 +4,6 @@
 
 (rule
  (alias runtest)
+ (deps numeric_strings.json)
  (action
   (run ./run_tests.exe -q --color=always)))

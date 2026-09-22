@@ -131,10 +131,7 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
   | ToUint32Op -> unary_num_thing lit to_uint32
   | ToNumberOp ->
       let s = as_str lit in
-      if s = "" then Num 0.
-      else
-        let num = try Float.of_string s with Failure _ -> nan in
-        Num num
+      Num (string_to_number s)
   | IntToNum ->
       let x = as_int lit in
       Num (Z.to_float x)
@@ -158,6 +155,11 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
   | LstRev ->
       let ll = as_list lit in
       LList (List.rev ll)
+  | StrToBytes ->
+      let s = as_str lit in
+      LList
+        (String.to_seq s |> List.of_seq
+        |> List.map (fun byte -> Literal.Num (float_of_int (Char.code byte))))
   | StrLen ->
       let s = as_str lit in
       Num (float_of_int (String.length s))
@@ -168,7 +170,7 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
       raise (Exceptions.Unsupported "eval_unop concrete: set-to-list")
   | IsInt ->
       let x = as_num lit in
-      Bool (is_int x)
+      Bool (Float.is_integer x)
 
 let rec evaluate_binop
     (store : CStore.t)
@@ -202,6 +204,7 @@ let rec evaluate_binop
           raise (Exceptions.Unsupported "eval_binop concrete: set operator")
       | Or | And | Impl ->
           raise (Exceptions.Impossible "eval_binop concrete: by construction")
+      | ValueEqual -> Bool (Literal.same_value lit1 lit2)
       | Equal -> (
           match (lit1, lit2) with
           | Undefined, Undefined -> Bool true
@@ -214,7 +217,7 @@ let rec evaluate_binop
           | String s1, String s2 -> Bool (s1 = s2)
           | Loc l1, Loc l2 -> Bool (l1 = l2)
           | Type t1, Type t2 -> Bool (t1 = t2)
-          | LList l1, LList l2 -> Bool (l1 = l2)
+          | LList _, LList _ -> Bool (Literal.same_value lit1 lit2)
           | Nono, Nono -> Bool true
           | _, _ -> Bool false)
       | LstNth -> (

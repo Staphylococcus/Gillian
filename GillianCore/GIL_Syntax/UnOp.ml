@@ -48,6 +48,7 @@ type t = TypeDef__.unop =
   | SetToList  (** From set to list *)
   (* Strings *)
   | StrLen  (** String length *)
+  | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
   (* Integer vs Number *)
   | NumToInt  (** Number to Integer - actual cast *)
   | IntToNum  (** Integer to Number - actual cast *)
@@ -86,6 +87,7 @@ let str = function
   | LstLen -> "l-len"
   | LstRev -> "l-rev"
   | StrLen -> "s-len"
+  | StrToBytes -> "s-bytes"
   | SetToList -> "set_to_list"
   | IsInt -> "is_int"
   | NumToInt -> "as_int"

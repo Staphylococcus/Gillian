@@ -1,0 +1,10 @@
+spec count(s)
+[[ (s == #s) * types(#s : Str) ]]
+[[ (ret == l-len(s-bytes(#s))) ]] normal
+proc count(s) {
+  bytes := s-bytes(s); n := 0i;
+head: invariant (types(bytes : List, n : Int) * (0i i<= n) * ((n i+ l-len(bytes)) == l-len(s-bytes(#s)))) variant(l-len(bytes));
+  goto [l-len(bytes) i> 0i] step done;
+step: bytes := cdr(bytes); n := n i+ 1i; goto head;
+done: ret := 0i; return
+};

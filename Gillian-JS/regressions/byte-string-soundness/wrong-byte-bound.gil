@@ -1,0 +1,4 @@
+spec first(s)
+[[ (s == #s) * types(#s : Str) * (0i i< l-len(s-bytes(#s))) ]]
+[[ types(ret : Num) * (is_int(ret)) * (0.0 <= ret) * (ret <= 127.0) ]] normal
+proc first(s) { bytes := s-bytes(s); ret := l-nth(bytes, 0i); return };

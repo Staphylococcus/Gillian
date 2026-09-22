@@ -102,12 +102,14 @@ let union =
 
 let to_list fv_list = fold (fun f v ac -> (f, v) :: ac) fv_list []
 
-(** Gets a first key-value pair that satisfies a predicate *)
+(** Gets a first key-value pair that satisfies an arbitrary predicate. Semantic
+    key equality is not monotone in the map's syntactic ordering, so
+    [Map.find_first_opt] (a binary search) cannot be used here. *)
 let get_first (f : field_name -> bool) (sfvl : t) :
     (field_name * field_value) option =
   Option.map
     (fun (name, entry) -> (name, entry.value))
-    (Expr.Map.find_first_opt f sfvl)
+    (List.find_opt (fun (name, _) -> f name) (Expr.Map.bindings sfvl))
 
 (** Returns the logical variables occuring in --sfvl-- *)
 let lvars (sfvl : t) : SS.t =

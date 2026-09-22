@@ -1,0 +1,3 @@
+spec answer()
+[[ emp ]] [[ (ret == true) ]] normal
+proc answer() { ret := ($$max_safe_integer == 9007199254740991.0); return };

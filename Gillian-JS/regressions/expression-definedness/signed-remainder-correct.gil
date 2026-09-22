@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Int) * (-3i i<= #x) * (#x i<= -2i) ]]
+[[ (-1i i<= ret) * (ret i<= 0i) ]] normal
+proc answer(x) { ret := x i% 2i; return };

@@ -1,0 +1,13 @@
+spec count(n)
+[[ (n == #n) * types(#n : Int) * (0i i<= #n) ]]
+[[ (ret == 0i) ]] normal
+proc count(n) {
+  goto head;
+head: PHI(current: n, next);
+  invariant ((0i i<= current) * types(current : Int)) variant(current);
+  goto [current i> 0i] step done;
+step: next := current;
+  goto head;
+done: ret := current;
+  return
+};

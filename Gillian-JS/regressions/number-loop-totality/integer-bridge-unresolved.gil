@@ -1,0 +1,4 @@
+spec step(n)
+[[ (n == #n) * types(#n : Int) * (0i i< #n) * (#n i<= 4294967295i) ]]
+[[ (ret < as_num(#n)) * (0.0 <= ret) * (is_int(ret)) ]] normal
+proc step(n) { ret := as_num(n i- 1i); return };

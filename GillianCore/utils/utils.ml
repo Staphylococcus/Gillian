@@ -10,6 +10,9 @@ module Arith_utils = struct
   include Arith_utils
 end
 
+(** @canonical Gillian.Utils.Utf16 *)
+module Utf16 = Utf16
+
 (** @canonical Gillian.Utils.Call_graph *)
 module Call_graph = struct
   (** @inline *)

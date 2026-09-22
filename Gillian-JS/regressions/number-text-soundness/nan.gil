@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x v== #x) * types(#x : Num) * (! (#x == #x)) ]]
+[[ (ret == "NaN") ]] normal
+proc answer(x) { ret := num_to_string(x); return };

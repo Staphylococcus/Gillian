@@ -1,0 +1,8 @@
+spec answer(a, n)
+[[ (a v== #a) * (n v== #n) * types(#n : Num) * (is_int(#n)) * (0.0 <= #n) * (#n <= 4294967295.0) * <Cell>(#a, num_to_string(#n); 10i) ]]
+[[ <Cell>(#a, num_to_string(#n); 10i) * (ret == true) ]] normal
+proc answer(a, n) {
+ goto [n == 1.0] change done;
+change: unused := [DeleteCell](a, "1");
+done: ret := true; return
+};

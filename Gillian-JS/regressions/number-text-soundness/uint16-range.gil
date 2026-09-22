@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Num) ]]
+[[ (0.0 <=# ret) * (ret <=# 65535.0) * (is-int ret) ]] normal
+proc answer(x) { ret := num_to_uint16(x); return };

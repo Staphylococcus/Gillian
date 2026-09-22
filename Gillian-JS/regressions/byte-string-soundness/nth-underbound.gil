@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Str) * (1i i< l-len(s-bytes(#x))) ]]
+[[ (ret == 1i) ]] normal
+proc answer(x) { unused := s-nth(x, 3.0); ret := 1i; return };

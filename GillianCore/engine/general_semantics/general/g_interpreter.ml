@@ -44,7 +44,14 @@ struct
 
   type state_vt = State.vt [@@deriving yojson, show]
   type heap_t = State.heap_t
-  type invariant_frames = (string * State.t) list [@@deriving yojson]
+
+  type invariant_frame = { frame : State.t; rank : (Type.t * Expr.t) option }
+  [@@deriving yojson]
+
+  type invariant_frames = (string * invariant_frame) list [@@deriving yojson]
+
+  let frame_states frames = List.map (fun (id, f) -> (id, f.frame)) frames
+
   type err_t = (Val.t, state_err_t) Exec_err.t [@@deriving show, yojson]
   type branch_path = branch_case list [@@deriving yojson]
 
@@ -404,27 +411,29 @@ struct
     | Malformed
 
   let understand_loop_action current previous : loop_action =
-    match current = previous with
-    (* No change in loop structure *)
-    | true -> Nothing
-    (* Change in loop structure *)
-    | false -> (
-        let len_cur = List.length current in
-        let len_prev = List.length previous in
-        match len_cur - len_prev with
-        (* We have entered a new loop *)
-        | 1 ->
-            if List.tl current <> previous then Malformed
-            else FrameOff (List.hd current)
-        (* We have entered more than one loop - this is not allowed *)
-        | n when n > 0 -> Malformed
-        (* We have exited at least one loop *)
-        | n ->
-            let ids = Option.get (List_utils.list_sub previous 0 (-n)) in
-            let rEState =
-              Option.get (List_utils.list_sub previous (-n) (len_prev + n))
-            in
-            if rEState <> current then Malformed else FrameOn ids)
+    let rec remove_common a b =
+      match (a, b) with
+      | x :: xs, y :: ys when String.equal x y -> remove_common xs ys
+      | _ -> (a, b)
+    in
+    let entered, exited =
+      remove_common (List.rev current) (List.rev previous)
+    in
+    match (List.rev entered, List.rev exited) with
+    | [], [] -> Nothing
+    | [ id ], [] -> FrameOff id
+    | _, _ :: _ -> FrameOn (List.rev exited)
+    | _ -> Malformed
+
+  let rec pop_frames ids frames =
+    match (ids, frames) with
+    | [], _ -> frames
+    | id :: ids, (actual, _) :: frames when String.equal id actual ->
+        pop_frames ids frames
+    | _ ->
+        raise
+          (Gillian_result.Exc.Gillian_error
+             (OperationError "Loop frame stack does not match exited loops"))
 
   (* ******************* *
    * Auxiliary Functions *
@@ -471,9 +480,24 @@ struct
         in
         Some (lab, subst_lst')
 
-  let make_eval_expr (state : State.t) : Expr.t -> Val.t =
+  let make_eval_expr ?(total = false) (state : State.t) : Expr.t -> Val.t =
    fun e ->
-    try State.eval_expr state e
+    try
+      (if total then
+         let proves condition =
+           let condition = State.eval_expr state condition |> Val.to_expr in
+           State.assert_a state [ condition ]
+         in
+         Totality.check_expression ~proves
+           ~evaluate:(fun e -> State.eval_expr state e |> Val.to_expr)
+           ~require:(fun expr condition ->
+             if not (proves condition) then
+               raise
+                 (Gillian_result.Exc.analysis_failure
+                    (Fmt.str "Executed operation is not proved defined: %a"
+                       Expr.pp expr)))
+           e);
+      State.eval_expr state e
     with State.Internal_State_Error (errs, s) ->
       raise (Interpreter_error (List.map (fun x -> Exec_err.EState x) errs, s))
 
@@ -592,6 +616,7 @@ struct
       left_states @ right_states
 
     let rec eval_macro name args lcmd prog annot state =
+      if !Config.Verification.total then Totality.check_macro prog.MP.prog name;
       let macro =
         match Macro.get MP.(prog.prog.macros) name with
         | Some macro -> macro
@@ -650,6 +675,7 @@ struct
         ?(annot : annot option)
         (state : State.t) : (State.t, state_err_t) Res_list.t =
       print_lconfiguration lcmd annot state;
+      if !Config.Verification.total then Totality.check_logic lcmd;
 
       let eval_expr = make_eval_expr state in
       match lcmd with
@@ -676,7 +702,12 @@ struct
             L.verbose (fun m -> m "LCMDs done with state:\n%a" pp_state_t state);
           Res_list.return state
       | lcmd :: rest_lcmds ->
-          let** new_state = eval_lcmd prog lcmd ?annot state in
+          let outcomes = eval_lcmd prog lcmd ?annot state in
+          if
+            !Config.Verification.total && outcomes = []
+            && Option.is_none prog.lemma_induction
+          then Totality.unsupported "proof command produced no outcomes.";
+          let** new_state = outcomes in
           eval_lcmds ~top prog rest_lcmds ~annot new_state
   end
 
@@ -764,6 +795,9 @@ struct
           | Some _ ->
               let err = [ Exec_err.EProc pid ] in
               raise (Interpreter_error (err, state))
+          | None when !Config.Verification.total ->
+              Totality.unsupported
+                "dynamic call target is not resolved on this proof path."
           | None ->
               raise
                 (Internal_error
@@ -855,6 +889,23 @@ struct
           in
           let new_store = Store.init (List.combine params args) in
           let old_store = State.get_store state in
+          (* Simplification in the callee cannot rewrite a suspended caller's
+             store. Keep those symbolic identities live until it is restored. *)
+          let saved =
+            let vars = Store.lvars old_store in
+            (* Only predicate abstraction can rename existing heap locations.
+               Plain execution must not accumulate every allocated location as
+               a permanent proof identity (and print it at every step). *)
+            if List.mem !Config.current_exec_mode Exec_mode.exec_with_preds then
+              Store.fold old_store
+                (fun _ value saved ->
+                  SS.union saved (Expr.alocs (Val.to_expr value)))
+                vars
+            else vars
+          in
+          let state =
+            if SS.is_empty saved then state else State.add_spec_vars state saved
+          in
           let state' = State.set_store state new_store in
           let cs' =
             (* Note the new loop identifiers *)
@@ -876,6 +927,17 @@ struct
           in
           L.verbose (fun fmt ->
               fmt "Run_spec returned %d Results" (List.length ret));
+          (* A contradictory self-induction hypothesis may close the recursive
+             branch, but its independent base-case obligations still have to
+             pass. Other certified summaries must produce an outcome. *)
+          if
+            ret = []
+            && Option.fold ~none:false
+                 ~some:(fun ctx -> pid <> ctx.Totality.name)
+                 eval_state.prog.totality
+          then
+            Totality.unsupported
+              "total summary application produced no outcomes.";
           let successes, errors =
             List.partition_map
               (function
@@ -913,6 +975,14 @@ struct
           let caller = Call_stack.get_cur_proc_id cs in
           let () = Call_graph.add_proc_call call_graph caller pid in
           let args = build_args v_args params in
+          let inline = ref false in
+          if !Config.Verification.closed_entry then (
+            (* No entry result is a frameable procedure summary. All callees
+               must execute, including calls back into the selected entry. *)
+            match prog.totality with
+            | Some ctx when pid = ctx.name ->
+                Totality.unsupported "closed entry cannot call its own summary."
+            | _ -> ());
           (match prog.totality with
           | None -> ()
           | Some ctx when pid = ctx.name ->
@@ -936,10 +1006,54 @@ struct
                          natural integer: %a < %a"
                         pid Expr.pp rank Expr.pp entry))
           | Some _ ->
-              if not (SS.mem pid prog.proved_total_procs) then
-                Totality.unsupported
-                  (pid
-                 ^ " has not passed every totality proof case in this run."));
+              if not (SS.mem pid prog.proved_total_procs) then (
+                let helper =
+                  match Prog.get_proc prog.prog pid with
+                  | Some p when Totality.inline_body p -> p
+                  | _ ->
+                      Totality.unsupported
+                        (pid
+                       ^ " has not passed every totality proof case in this \
+                          run.")
+                in
+                (* Full expansion can close a finite helper call tree, such
+                   as lookup through the standard prototype chain. No call is
+                   discharged by reaching this budget: exhaustion aborts the
+                   proof, and every expanded branch must actually finish.
+                   Selected recursive summaries still require their variant. *)
+                if Call_stack.recursive_depth cs pid >= !Config.max_branching
+                then
+                  Totality.unsupported
+                    (pid
+                   ^ " unranked inlined call cycle exhausted the expansion \
+                      budget; totality proof is incomplete.");
+                if
+                  SS.cardinal (SS.of_list helper.proc_params)
+                  <> List.length helper.proc_params
+                then
+                  Totality.unsupported
+                    (pid ^ " has duplicate formal parameters.");
+                let helper =
+                  Totality.prepare_loops ~set_loop_info:Annot.set_loop_info
+                    ~defer_cycle:(fun members message ->
+                      List.iter
+                        (fun i ->
+                          Hashtbl.replace prog.unsupported_totality_nodes
+                            (pid, i) message)
+                        members)
+                    ~macros:prog.prog.macros
+                    ~predecessors:prog.prog.predecessors helper
+                in
+                Hashtbl.replace prog.prog.procs pid helper;
+                inline := true));
+
+          if
+            Option.is_some prog.totality
+            && (not !inline)
+            && List.length v_args <> List.length params
+          then
+            Totality.unsupported
+              (pid ^ " requires exact call arity for a total summary.");
 
           let is_internal_proc proc_name =
             (Prog.get_proc_exn prog.prog proc_name).proc_internal
@@ -950,21 +1064,23 @@ struct
           in
 
           let spec_exec_proc () =
-            match spec with
-            | Some spec -> (
-                (* Fmt.pr "Calling %s WITH SPEC\n" pid; *)
-                match !symb_exec_next with
-                | true ->
-                    symb_exec_next := false;
-                    symb_exec_proc ()
-                | false ->
-                    exec_with_spec spec x j args pid subst symb_exec_proc
-                      eval_state)
-            | None ->
-                (* Fmt.pr "Calling %s WITHOUT SPEC\n" pid; *)
-                if Hashtbl.mem eval_state.prog.prog.bi_specs pid then
-                  [ eval_state_to_susp ~spec_id:pid eval_state ]
-                else symb_exec_proc ()
+            if !inline then symb_exec_proc ()
+            else
+              match spec with
+              | Some spec -> (
+                  (* Fmt.pr "Calling %s WITH SPEC\n" pid; *)
+                  match !symb_exec_next with
+                  | true ->
+                      symb_exec_next := false;
+                      symb_exec_proc ()
+                  | false ->
+                      exec_with_spec spec x j args pid subst symb_exec_proc
+                        eval_state)
+              | None ->
+                  (* Fmt.pr "Calling %s WITHOUT SPEC\n" pid; *)
+                  if Hashtbl.mem eval_state.prog.prog.bi_specs pid then
+                    [ eval_state_to_susp ~spec_id:pid eval_state ]
+                  else symb_exec_proc ()
           in
 
           match Exec_mode.is_biabduction_exec !Config.current_exec_mode with
@@ -1112,14 +1228,12 @@ struct
                         ("vs", `List (List.map state_vt_to_yojson vs));
                       ]
                     "Ok");
-              let e' = Expr.EList (List.map Val.to_expr vs) in
-              let v' = eval_expr e' in
+              let v' = Val.from_list vs in
               let state'' = update_store state' x v' in
               let rest_confs =
                 rest_rets
                 |> List.mapi (fun ix (r_state, r_vs) ->
-                       let r_e = Expr.EList (List.map Val.to_expr r_vs) in
-                       let r_v = eval_expr r_e in
+                       let r_v = Val.from_list r_vs in
                        let r_state' = update_store r_state x r_v in
                        let branch_case = (LAction, ix + 1) in
                        make_confcont ~state:r_state'
@@ -1210,6 +1324,7 @@ struct
 
       (* Logic command *)
       let eval_logic (lcmd : LCmd.t) eval_state =
+        Totality.check_closed_logic lcmd;
         let {
           prog;
           i;
@@ -1227,6 +1342,44 @@ struct
           eval_state
         in
         DL.log ~v:true (fun m -> m "LCmd");
+        (match (prog.totality, lcmd) with
+        | ( Some _,
+            SL
+              ((Invariant (_, binders, _) | SepAssert (_, binders)) as proof_cmd)
+          ) ->
+            let saved =
+              List.fold_left
+                (fun acc frame ->
+                  Option.fold ~none:acc
+                    ~some:(fun store -> SS.union acc (Store.lvars store))
+                    frame.Call_stack.store)
+                SS.empty cs
+            in
+            let saved =
+              List.fold_left
+                (fun acc (_, frame) ->
+                  SS.union acc (State.get_lvars frame.frame))
+                saved iframes
+            in
+            let established =
+              match (proof_cmd, loop_ids) with
+              | Invariant _, id :: _ -> List.mem_assoc id iframes
+              | _ -> false
+            in
+            let saved =
+              if established then saved
+              else SS.union saved (State.get_spec_vars state)
+            in
+            if not (SS.is_empty (SS.inter saved (SS.of_list binders))) then
+              Totality.unsupported
+                (match proof_cmd with
+                | SepAssert _ ->
+                    "separation assertion binders shadow protected input, \
+                     caller or loop identities."
+                | _ ->
+                    "logical invariant binders shadow protected input, caller \
+                     or loop identities.")
+        | _ -> ());
         match lcmd with
         | SL SymbExec ->
             symb_exec_next := true;
@@ -1240,32 +1393,56 @@ struct
               (Gillian_result.Exc.Gillian_error
                  (OperationError "Loop invariant requires loop metadata"))
         (* Invariant being revisited *)
-        | SL (Invariant (a, binders)) when prev_loop_ids = loop_ids ->
+        | SL (Invariant (a, binders, variant))
+          when prev_loop_ids = loop_ids
+               && (Option.is_none prog.totality
+                  || List.mem_assoc (List.hd loop_ids) iframes) ->
             if not (List.mem_assoc (List.hd loop_ids) iframes) then
               raise
                 (Gillian_result.Exc.Gillian_error
                    (OperationError "Loop invariant has no established frame"));
+            let measure =
+              match
+                ( prog.totality,
+                  variant,
+                  (List.assoc (List.hd loop_ids) iframes).rank )
+              with
+              | None, _, _ -> None
+              | Some _, Some variant, Some entry -> Some (variant, Some entry)
+              | _ -> Totality.unsupported "loop has no captured entry measure."
+            in
             let _ =
-              State.match_invariant prog true state a binders
+              State.match_invariant prog true state a binders ~measure
               |> check_loop_results "invariant preservation" state
             in
             L.verbose (fun fmt -> fmt "Invariant re-established.");
             []
-        | SL (Invariant (a, binders)) ->
-            assert (loop_action = FrameOff (List.hd loop_ids));
+        | SL (Invariant (a, binders, variant)) ->
+            assert (
+              loop_action = FrameOff (List.hd loop_ids)
+              || Option.is_some prog.totality
+                 && not (List.mem_assoc (List.hd loop_ids) iframes));
+            let measure =
+              match (prog.totality, variant) with
+              | None, _ -> None
+              | Some _, Some variant -> Some (variant, None)
+              | _ -> Totality.unsupported "loop requires a variant."
+            in
             let frames_and_states =
-              State.match_invariant prog false state a binders
+              State.match_invariant prog false state a binders ~measure
               |> check_loop_results "invariant establishment" state
             in
             List.map
-              (fun (frame, state) ->
-                let iframes = (List.hd loop_ids, frame) :: iframes in
+              (fun (frame, state, rank) ->
+                let iframes = (List.hd loop_ids, { frame; rank }) :: iframes in
                 make_confcont ~state ~callstack:cs ~invariant_frames:iframes
                   ~prev_idx:i ~loop_ids ~next_idx:(i + 1)
                   ~branch_count:b_counter ())
               frames_and_states
         | _ ->
             let all_results = evaluate_lcmd prog lcmd ~annot state in
+            if Option.is_some prog.totality && all_results = [] then
+              Totality.unsupported "proof command produced no outcomes.";
             let successes, errors = Res_list.split all_results in
             let success_confs =
               let num_successes = List.length successes in
@@ -1528,12 +1705,17 @@ struct
               let open Syntaxes.List in
               let+ state =
                 if Exec_mode.is_verification_exec !Config.current_exec_mode then
-                  State.frame_on state iframes to_frame_on
+                  State.frame_on state (frame_states iframes) to_frame_on
                   |> check_loop_results "frame restoration on return" state
                 else [ state ]
               in
               let state' = State.set_store state old_store in
               let state'' = update_store state' x v_ret in
+              let iframes =
+                if Exec_mode.is_verification_exec !Config.current_exec_mode then
+                  pop_frames to_frame_on iframes
+                else iframes
+              in
               make_confcont ~state:state'' ~callstack:cs'
                 ~invariant_frames:iframes ~prev_idx:prev'
                 ~loop_ids:start_loop_ids ~next_idx:j ~branch_count:b_counter ()
@@ -1592,12 +1774,17 @@ struct
             let ( let+ ) x f = List.map f x in
             let+ state =
               if Exec_mode.is_verification_exec !Config.current_exec_mode then
-                State.frame_on state iframes to_frame_on
+                State.frame_on state (frame_states iframes) to_frame_on
                 |> check_loop_results "frame restoration on throw" state
               else [ state ]
             in
             let state' = State.set_store state old_store in
             let state'' = update_store state' x v_ret in
+            let iframes =
+              if Exec_mode.is_verification_exec !Config.current_exec_mode then
+                pop_frames to_frame_on iframes
+              else iframes
+            in
             make_confcont ~state:state'' ~callstack:cs'
               ~invariant_frames:iframes ~prev_idx:prev' ~loop_ids:start_loop_ids
               ~next_idx:j ~branch_count:b_counter ()
@@ -1698,6 +1885,13 @@ struct
         (branch_path : branch_path)
         (branch_case : branch_case option)
         laction_fuel : CConf.t list =
+      (* Helpers execute their full bodies. A cycle on an untaken branch does
+         not invalidate that execution, but no node of an unranked cyclic
+         component may execute. Check before frame handling or the command. *)
+      if Option.is_some prog.totality then
+        Option.iter Totality.unsupported
+          (Hashtbl.find_opt prog.unsupported_totality_nodes
+             (Call_stack.get_cur_proc_id cs, i));
       let _, (annot, _) = get_cmd prog cs i in
 
       (* The full list of loop ids is the concatenation
@@ -1725,7 +1919,7 @@ struct
           L.verbose (fun fmt ->
               fmt "INFO: Going to frame on %a" pp_str_list ids);
           let states =
-            State.frame_on state iframes ids
+            State.frame_on state (frame_states iframes) ids
             |> check_loop_results "frame restoration on exit" state
           in
           let n = List.length states in
@@ -1735,7 +1929,18 @@ struct
                   "WARNING: FRAMING ON AFTER EXITING LOOP BRANCHED INTO %i \
                    STATES"
                   n);
-          List.concat_map eval_in_state states
+          let iframes = pop_frames ids iframes in
+          let previous =
+            List.filteri (fun i _ -> i >= List.length ids) prev_loop_ids
+          in
+          (* Restore exited frames first, then handle entering a sibling loop.
+             Recursive dispatch strictly shortens the previous loop stack. *)
+          List.concat_map
+            (fun state ->
+              eval_cmd prog state cs iframes prev previous i b_counter
+                last_known_loc report_id_ref branch_path branch_case
+                laction_fuel)
+            states
 
     and eval_cmd_after_frame_handling
         (prog : annot MP.prog)
@@ -1752,9 +1957,15 @@ struct
         (branch_case : branch_case option)
         (laction_fuel : int) : CConf.t list =
       let store = State.get_store state in
-      let eval_expr = make_eval_expr state in
+      let eval_expr =
+        make_eval_expr ~total:(Option.is_some prog.totality) state
+      in
       let proc_name, annot_cmd = get_cmd prog cs i in
       let annot, cmd = annot_cmd in
+      if Option.is_some prog.totality then
+        ignore
+          (Totality.check_command ~is_action_total:State.is_action_total
+             proc_name cmd);
       let () =
         let is_internal =
           let pid = (List.hd cs).pid in

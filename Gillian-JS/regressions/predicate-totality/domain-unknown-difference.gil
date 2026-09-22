@@ -1,0 +1,4 @@
+spec answer(a, keys)
+[[ (a v== #a) * (keys v== #keys) * types(#keys : Set) * <Props>(#a, -{ }-;) ]]
+[[ <Props>(#a, #keys;) * (ret == true) ]] normal
+proc answer(a, keys) { ret := true; return };

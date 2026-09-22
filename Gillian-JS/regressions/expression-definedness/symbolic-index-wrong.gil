@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Num) * (is_int(#x)) * (0.0 <= #x) * (#x <= 1.0) ]]
+[[ (ret == 42i) ]] normal
+proc answer(x) { ret := l-nth({{42i, 43i}}, as_int(x)); return };

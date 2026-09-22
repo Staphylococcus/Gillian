@@ -99,6 +99,12 @@ module Literal : sig
   (** Evaluates a constant *)
   val evaluate_constant : Constant.t -> t
 
+  (** Value identity, including NaN and signed zero. *)
+  val same_value : t -> t -> bool
+
+  (** Resolve fixed constants without sampling random values or reading time. *)
+  val static_constant : Constant.t -> t option
+
   (** Builds a GIL list from an OCaml list *)
   val from_list : t list -> t
 
@@ -151,6 +157,7 @@ module UnOp : sig
     | LstRev  (** List reverse *)
     | SetToList  (** From set to list *)
     | StrLen  (** String length *)
+    | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
     (* Integer vs Number *)
     | NumToInt  (** Number to Integer - actual cast *)
     | IntToNum  (** Integer to Number - actual cast *)
@@ -166,6 +173,8 @@ module BinOp : sig
   (** GIL Binary Operators *)
 
   type t =
+    | ValueEqual
+        (** Value identity, preserving signed zero and admitting NaN. *)
     | Equal  (** Equality *)
     | ILessThan  (** Less for integers *)
     | ILessThanEqual  (** Less or equal for integers *)
@@ -552,7 +561,7 @@ module SLCmd : sig
     | GUnfold of string  (** Global Unfold *)
     | ApplyLem of string * Expr.t list * string list  (** Apply lemma *)
     | SepAssert of Asrt.t * string list  (** Assert *)
-    | Invariant of Asrt.t * string list  (** Invariant *)
+    | Invariant of Asrt.t * string list * Expr.t option  (** Invariant *)
     | Consume of Asrt.t * string list
     | Produce of Asrt.t
     | SymbExec
@@ -1329,6 +1338,7 @@ module Visitors : sig
          ; visit_EmptyType : 'c -> Type.t -> Type.t
          ; visit_Epsilon : 'c -> Constant.t -> Constant.t
          ; visit_Equal : 'c -> BinOp.t -> BinOp.t
+         ; visit_ValueEqual : 'c -> BinOp.t -> BinOp.t
          ; visit_Error : 'c -> Flag.t -> Flag.t
          ; visit_FDiv : 'c -> BinOp.t -> BinOp.t
          ; visit_FLessThan : 'c -> BinOp.t -> BinOp.t
@@ -1379,7 +1389,8 @@ module Visitors : sig
              'c -> LCmd.t -> Expr.t -> LCmd.t list -> LCmd.t list -> LCmd.t
          ; visit_Int : 'c -> Literal.t -> Z.t -> Literal.t
          ; visit_IntType : 'c -> Type.t -> Type.t
-         ; visit_Invariant : 'c -> SLCmd.t -> Asrt.t -> string list -> SLCmd.t
+         ; visit_Invariant :
+             'c -> SLCmd.t -> Asrt.t -> string list -> Expr.t option -> SLCmd.t
          ; visit_Consume : 'c -> SLCmd.t -> Asrt.t -> string list -> SLCmd.t
          ; visit_Produce : 'c -> SLCmd.t -> Asrt.t -> SLCmd.t
          ; visit_LAction :
@@ -1458,6 +1469,7 @@ module Visitors : sig
          ; visit_FreshSVar : 'c -> LCmd.t -> string -> LCmd.t
          ; visit_StrCat : 'c -> BinOp.t -> BinOp.t
          ; visit_StrLen : 'c -> UnOp.t -> UnOp.t
+         ; visit_StrToBytes : 'c -> UnOp.t -> UnOp.t
          ; visit_StrLess : 'c -> BinOp.t -> BinOp.t
          ; visit_NumToInt : 'c -> UnOp.t -> UnOp.t
          ; visit_IntToNum : 'c -> UnOp.t -> UnOp.t
@@ -1590,6 +1602,7 @@ module Visitors : sig
     method visit_EmptyType : 'c -> Type.t -> Type.t
     method visit_Epsilon : 'c -> Constant.t -> Constant.t
     method visit_Equal : 'c -> BinOp.t -> BinOp.t
+    method visit_ValueEqual : 'c -> BinOp.t -> BinOp.t
     method visit_Error : 'c -> Flag.t -> Flag.t
     method visit_FDiv : 'c -> BinOp.t -> BinOp.t
     method visit_FLessThan : 'c -> BinOp.t -> BinOp.t
@@ -1643,7 +1656,10 @@ module Visitors : sig
 
     method visit_Int : 'c -> Literal.t -> Z.t -> Literal.t
     method visit_IntType : 'c -> Type.t -> Type.t
-    method visit_Invariant : 'c -> SLCmd.t -> Asrt.t -> string list -> SLCmd.t
+
+    method visit_Invariant :
+      'c -> SLCmd.t -> Asrt.t -> string list -> Expr.t option -> SLCmd.t
+
     method visit_Consume : 'c -> SLCmd.t -> Asrt.t -> string list -> SLCmd.t
     method visit_Produce : 'c -> SLCmd.t -> Asrt.t -> SLCmd.t
 
@@ -1726,6 +1742,7 @@ module Visitors : sig
     method visit_FreshSVar : 'c -> LCmd.t -> string -> LCmd.t
     method visit_StrCat : 'c -> BinOp.t -> BinOp.t
     method visit_StrLen : 'c -> UnOp.t -> UnOp.t
+    method visit_StrToBytes : 'c -> UnOp.t -> UnOp.t
     method visit_StrLess : 'c -> BinOp.t -> BinOp.t
     method visit_IntToNum : 'c -> UnOp.t -> UnOp.t
     method visit_NumToInt : 'c -> UnOp.t -> UnOp.t
@@ -1882,6 +1899,7 @@ module Visitors : sig
          ; visit_EmptyType : 'c -> 'f
          ; visit_Epsilon : 'c -> 'f
          ; visit_Equal : 'c -> 'f
+         ; visit_ValueEqual : 'c -> 'f
          ; visit_Error : 'c -> 'f
          ; visit_Fail : 'c -> string -> Expr.t list -> 'f
          ; visit_Fold :
@@ -1899,7 +1917,7 @@ module Visitors : sig
          ; visit_Goto : 'c -> 'g -> 'f
          ; visit_GuardedGoto : 'c -> Expr.t -> 'g -> 'g -> 'f
          ; visit_If : 'c -> Expr.t -> LCmd.t list -> LCmd.t list -> 'f
-         ; visit_Invariant : 'c -> Asrt.t -> string list -> 'f
+         ; visit_Invariant : 'c -> Asrt.t -> string list -> Expr.t option -> 'f
          ; visit_Consume : 'c -> Asrt.t -> string list -> 'f
          ; visit_Produce : 'c -> Asrt.t -> 'f
          ; visit_LAction : 'c -> string -> string -> Expr.t list -> 'f
@@ -1989,6 +2007,7 @@ module Visitors : sig
          ; visit_FuncApp : 'c -> string -> Expr.t list -> 'f
          ; visit_StrCat : 'c -> 'f
          ; visit_StrLen : 'c -> 'f
+         ; visit_StrToBytes : 'c -> 'f
          ; visit_StrLess : 'c -> 'f
          ; visit_IntToNum : 'c -> 'f
          ; visit_NumToInt : 'c -> 'f
@@ -2107,6 +2126,7 @@ module Visitors : sig
     method visit_EmptyType : 'c -> 'f
     method visit_Epsilon : 'c -> 'f
     method visit_Equal : 'c -> 'f
+    method visit_ValueEqual : 'c -> 'f
     method visit_Error : 'c -> 'f
     method visit_Fail : 'c -> string -> Expr.t list -> 'f
 
@@ -2127,7 +2147,7 @@ module Visitors : sig
     method visit_GuardedGoto : 'c -> Expr.t -> 'g -> 'g -> 'f
     method visit_If : 'c -> Expr.t -> LCmd.t list -> LCmd.t list -> 'f
     method visit_IsInt : 'c -> 'f
-    method visit_Invariant : 'c -> Asrt.t -> string list -> 'f
+    method visit_Invariant : 'c -> Asrt.t -> string list -> Expr.t option -> 'f
     method visit_Consume : 'c -> Asrt.t -> string list -> 'f
     method visit_Produce : 'c -> Asrt.t -> 'f
     method visit_LAction : 'c -> string -> string -> Expr.t list -> 'f
@@ -2216,6 +2236,7 @@ module Visitors : sig
     method visit_FuncApp : 'c -> string -> Expr.t list -> 'f
     method visit_StrCat : 'c -> 'f
     method visit_StrLen : 'c -> 'f
+    method visit_StrToBytes : 'c -> 'f
     method visit_StrLess : 'c -> 'f
     method visit_IntToNum : 'c -> 'f
     method visit_NumToInt : 'c -> 'f
@@ -2328,6 +2349,7 @@ module Visitors : sig
          ; visit_EmptyType : 'c -> unit
          ; visit_Epsilon : 'c -> unit
          ; visit_Equal : 'c -> unit
+         ; visit_ValueEqual : 'c -> unit
          ; visit_Error : 'c -> unit
          ; visit_FDiv : 'c -> unit
          ; visit_FLessThan : 'c -> unit
@@ -2364,7 +2386,8 @@ module Visitors : sig
          ; visit_If : 'c -> Expr.t -> LCmd.t list -> LCmd.t list -> unit
          ; visit_Int : 'c -> Z.t -> unit
          ; visit_IntType : 'c -> unit
-         ; visit_Invariant : 'c -> Asrt.t -> string list -> unit
+         ; visit_Invariant :
+             'c -> Asrt.t -> string list -> Expr.t option -> unit
          ; visit_Consume : 'c -> Asrt.t -> string list -> unit
          ; visit_Produce : 'c -> Asrt.t -> unit
          ; visit_LAction : 'c -> string -> string -> Expr.t list -> unit
@@ -2442,6 +2465,7 @@ module Visitors : sig
          ; visit_FuncApp : 'c -> string -> Expr.t list -> unit
          ; visit_StrCat : 'c -> unit
          ; visit_StrLen : 'c -> unit
+         ; visit_StrToBytes : 'c -> unit
          ; visit_StrLess : 'c -> unit
          ; visit_IntToNum : 'c -> unit
          ; visit_NumToInt : 'c -> unit
@@ -2552,6 +2576,7 @@ module Visitors : sig
     method visit_EmptyType : 'c -> unit
     method visit_Epsilon : 'c -> unit
     method visit_Equal : 'c -> unit
+    method visit_ValueEqual : 'c -> unit
     method visit_Error : 'c -> unit
     method visit_FDiv : 'c -> unit
     method visit_FLessThan : 'c -> unit
@@ -2592,7 +2617,10 @@ module Visitors : sig
     method visit_If : 'c -> Expr.t -> LCmd.t list -> LCmd.t list -> unit
     method visit_Int : 'c -> Z.t -> unit
     method visit_IntType : 'c -> unit
-    method visit_Invariant : 'c -> Asrt.t -> string list -> unit
+
+    method visit_Invariant :
+      'c -> Asrt.t -> string list -> Expr.t option -> unit
+
     method visit_Consume : 'c -> Asrt.t -> string list -> unit
     method visit_Produce : 'c -> Asrt.t -> unit
     method visit_LAction : 'c -> string -> string -> Expr.t list -> unit
@@ -2670,6 +2698,7 @@ module Visitors : sig
     method visit_FuncApp : 'c -> string -> Expr.t list -> unit
     method visit_StrCat : 'c -> unit
     method visit_StrLen : 'c -> unit
+    method visit_StrToBytes : 'c -> unit
     method visit_StrLess : 'c -> unit
     method visit_IntToNum : 'c -> unit
     method visit_NumToInt : 'c -> unit

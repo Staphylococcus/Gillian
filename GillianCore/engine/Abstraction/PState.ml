@@ -515,7 +515,7 @@ module Make (State : SState.S) :
         in
         let new_bindings =
           List.map
-            (fun (e, e_v) -> Asrt.Pure (BinOp (e, Equal, e_v)))
+            (fun (e, e_v) -> Asrt.Pure (BinOp (e, ValueEqual, e_v)))
             new_bindings
         in
         let full_subst = make_id_subst a in
@@ -591,11 +591,20 @@ module Make (State : SState.S) :
       (revisited : bool)
       (astate : t)
       (a : Asrt.t)
-      (binders : string list) : (t * t, err_t) Res_list.t =
+      (binders : string list)
+      ~(measure : (Expr.t * (Type.t * Expr.t) option) option) :
+      (t * t * (Type.t * Expr.t) option, err_t) Res_list.t =
     let store = State.get_store astate.state in
     let pvars_store = SStore.domain store in
     let pvars_a = Asrt.pvars a in
-    let pvars_diff = SS.diff pvars_a pvars_store in
+    let required_pvars =
+      if !Config.Verification.total then
+        SS.union pvars_a
+          (SS.of_list
+             (List.filter (fun x -> not (Names.is_lvar_name x)) binders))
+      else pvars_a
+    in
+    let pvars_diff = SS.diff required_pvars pvars_store in
     L.verbose (fun m -> m "%s" (String.concat ", " (SS.elements pvars_diff)));
     (if not (SS.is_empty pvars_diff) then
        let pvars_errs : err_t list =
@@ -701,6 +710,27 @@ module Make (State : SState.S) :
           in
           Error err
     in
+    (* Bind the measure to the current heap/local values learned by matching.
+       The old logical binder names still describe the preceding iteration. *)
+    (match measure with
+    | Some (variant, Some (typ, entry)) ->
+        let rank =
+          SVal.SESubst.subst_in_expr subst' ~partial:true variant
+          |> State.eval_expr new_state.state
+        in
+        if
+          State.get_type new_state.state rank <> Some typ
+          || not
+               (State.assert_a new_state.state
+                  [
+                    Totality.natural_rank typ rank;
+                    Totality.rank_decreases typ rank entry;
+                  ])
+        then
+          raise
+            (Gillian_result.Exc.analysis_failure
+               "Loop variant is not a strictly smaller natural integer")
+    | _ -> ());
     (* Successful matching *)
     (* TODO: Should the frame state have the subst produced? *)
     let frame_state = copy new_state in
@@ -738,7 +768,7 @@ module Make (State : SState.S) :
                | Expr.PVar x when List.mem x pvar_binders -> false
                | UnOp (LstLen, _) -> false
                | _ -> true)
-        |> List.map (fun (e, e_v) -> Asrt.Pure (BinOp (e, Equal, e_v)))
+        |> List.map (fun (e, e_v) -> Asrt.Pure (BinOp (e, ValueEqual, e_v)))
       in
       let subst_bindings = make_id_subst bindings in
       let pvar_subst_list_known =
@@ -766,8 +796,22 @@ module Make (State : SState.S) :
       L.verbose (fun fmt -> fmt "Invariant v2: %a" Asrt.pp a_substed);
       let a_produce = Reduction.reduce_assertion (bindings @ a_substed) in
       L.verbose (fun fmt -> fmt "Invariant v3: %a" Asrt.pp a_produce);
+      (* Overlapping resources survive consumption in the frame. Retain their
+         identities while abstracting the invariant too: unfolding an opaque
+         predicate must reuse shared outputs, not create fresh locations that
+         contradict the saved frame on exit. Exclusive resources stay framed. *)
+      let shared =
+        to_assertions frame_state
+        |> List.filter (function
+             | Asrt.CorePred (name, _, _) -> State.is_overlapping_asrt name
+             | _ -> false)
+      in
+      let shared_subst = make_id_subst shared in
       (* Create empty state *)
       let invariant_state : t = clear_resource new_state in
+      let invariant_state =
+        add_spec_vars invariant_state (Asrt.alocs (to_assertions frame_state))
+      in
       let () =
         List.iter
           (fun (x, v) ->
@@ -780,6 +824,9 @@ module Make (State : SState.S) :
           pvar_subst_list
       in
       let invariant_state = set_store invariant_state store in
+      let** invariant_state =
+        SMatcher.produce invariant_state shared_subst shared
+      in
       let* res = SMatcher.produce invariant_state full_subst a_produce in
       match res with
       | Ok new_astate ->
@@ -791,7 +838,43 @@ module Make (State : SState.S) :
             simplify ~kill_new_lvars:true invariant_state
           in
           let+ invariant_state = invariant_states in
-          Ok (copy frame_state, invariant_state)
+          let invariant_state, rank =
+            match measure with
+            | Some (variant, None) ->
+                let state = invariant_state.state in
+                let rank = State.eval_expr state variant in
+                let typ =
+                  Option.value ~default:Type.UndefinedType
+                    (State.get_type state rank)
+                in
+                if not (State.assert_a state [ Totality.natural_rank typ rank ])
+                then
+                  raise
+                    (Gillian_result.Exc.analysis_failure
+                       "Loop entry variant is not a natural integer");
+                let name = LVar.alloc () in
+                let entry = Expr.LVar name in
+                let state = State.add_spec_vars state (SS.singleton name) in
+                let state =
+                  match State.assume_t state entry typ with
+                  | Some state -> state
+                  | None ->
+                      Totality.unsupported
+                        "could not type captured loop measure."
+                in
+                let state =
+                  match
+                    State.assume_a state [ Expr.BinOp (entry, ValueEqual, rank) ]
+                  with
+                  | Some state -> state
+                  | None ->
+                      Totality.unsupported
+                        "could not capture loop entry measure."
+                in
+                ({ invariant_state with state }, Some (typ, entry))
+            | _ -> (invariant_state, None)
+          in
+          Ok (copy frame_state, invariant_state, rank)
       | Error e ->
           let msg =
             Fmt.str
@@ -924,6 +1007,27 @@ module Make (State : SState.S) :
       | SepAssert (a, binders) -> (
           if not (List.for_all Names.is_lvar_name binders) then
             failwith "Binding of pure variables in *-assert.";
+          (* Total assertions are observations with fresh witnesses. Rebinding
+             an existing logical name would also have to rename suspended
+             callers/loop frames; keep that separate from this fragment. *)
+          let state_lvars =
+            if !Config.Verification.total then
+              SS.union (get_lvars astate) (get_spec_vars astate)
+            else State.get_lvars astate.state
+          in
+          if !Config.Verification.total then (
+            if List.length binders <> SS.cardinal (SS.of_list binders) then
+              Totality.unsupported "duplicate separation assertion binders.";
+            if not (SS.is_empty (SS.inter state_lvars (SS.of_list binders)))
+            then
+              Totality.unsupported "separation assertion binders must be fresh.";
+            if
+              List.exists
+                (function
+                  | Asrt.Wand _ -> true
+                  | _ -> false)
+                a
+            then Totality.unsupported "separation assertions with magic wands.");
           let store = State.get_store astate.state in
           let pvars_store = SStore.domain store in
           let pvars_a = Asrt.pvars a in
@@ -938,7 +1042,6 @@ module Make (State : SState.S) :
           let store_subst = SStore.to_ssubst store in
           let a = SVal.SESubst.substitute_asrt store_subst ~partial:true a in
           (* let known_vars   = SS.diff (SS.filter is_spec_var_name (Asrt.lvars a)) (SS.of_list binders) in *)
-          let state_lvars = State.get_lvars astate.state in
           let known_lvars =
             SS.elements
               (SS.diff
@@ -1013,7 +1116,10 @@ module Make (State : SState.S) :
                 List.for_all (fun (_, x_v) -> x_v <> None) new_bindings
               in
               if not success then
-                raise (Failure "Assert failed - binders not captured");
+                if !Config.Verification.total then
+                  Totality.unsupported
+                    "separation assertion binder was not captured."
+                else raise (Failure "Assert failed - binders not captured");
               let additional_bindings =
                 List.filter
                   (fun (e, v) ->
@@ -1026,7 +1132,7 @@ module Make (State : SState.S) :
               in
               let new_bindings =
                 List.map
-                  (fun (e, e_v) -> Asrt.Pure (BinOp (e, Equal, e_v)))
+                  (fun (e, e_v) -> Asrt.Pure (BinOp (e, ValueEqual, e_v)))
                   new_bindings
               in
               let a_new_bindings = new_bindings in
@@ -1053,6 +1159,11 @@ module Make (State : SState.S) :
 
                 Ok (copy_with_state new_astate new_state)
               in
+              (match result with
+              | [] when !Config.Verification.total ->
+                  Totality.unsupported
+                    "separation assertion restoration produced no state."
+              | _ -> ());
               Res_list.map_error
                 (fun _ ->
                   let msg =
@@ -1083,6 +1194,16 @@ module Make (State : SState.S) :
       | Consume (asrt, binders) -> consume ~prog astate asrt binders
       | Produce asrt -> produce astate asrt
       | ApplyLem (lname, args, binders) ->
+          if
+            !Config.Verification.total
+            && (not (SS.mem lname prog.proved_lemmas))
+            && not
+                 (Option.fold ~none:false
+                    ~some:(fun ctx -> ctx.ProofDependencies.name = lname)
+                    prog.lemma_induction)
+          then
+            Totality.unsupported
+              (lname ^ " has not passed every lemma proof case in this run.");
           ProofDependencies.check_lemma ~proved:prog.proved_lemmas
             ~induction:prog.lemma_induction prog.prog lname;
           if not (List.for_all Names.is_lvar_name binders) then

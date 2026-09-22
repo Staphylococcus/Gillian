@@ -436,8 +436,19 @@ let simplify_pfs_and_gamma
                      || te1 = NoneType) ->
                 stop_explain "Inequality of two undefined/null/empty/none"
             | _ -> `Replace whole)
-        | BinOp (BinOp (lst, LstNth, idx), Equal, elem)
-        | BinOp (elem, Equal, BinOp (lst, LstNth, idx)) -> (
+        | BinOp (BinOp (lst, LstNth, idx), ((Equal | ValueEqual) as op), elem)
+        | BinOp (elem, ((Equal | ValueEqual) as op), BinOp (lst, LstNth, idx))
+          when op = ValueEqual
+               ||
+               match whole with
+               | BinOp (left, _, right) ->
+                   let nonnumeric e =
+                     match Typing.type_lexpr gamma e with
+                     | Some NumberType, _ | None, _ -> false
+                     | _ -> true
+                   in
+                   nonnumeric left || nonnumeric right
+               | _ -> false -> (
             match idx with
             | Lit (Int nx) ->
                 let prepend_lvars =
@@ -537,7 +548,16 @@ let simplify_pfs_and_gamma
             extend_with len_pr;
             extend_with len_sl;
             `Replace lst_eq
-        | BinOp (le1, Equal, le2) -> (
+        (* Exact numeric aliases permit substitution even at NaN and signed
+           zero. Ordinary numeric equality must retain its IEEE constraints. *)
+        | BinOp (le1, ((Equal | ValueEqual) as equality), le2)
+          when equality = Equal
+               ||
+               match (le1, le2) with
+               | LVar _, LVar _ | LVar _, Lit (Num _) | Lit (Num _), LVar _ ->
+                   fst (Typing.type_lexpr gamma le1) = Some NumberType
+                   && fst (Typing.type_lexpr gamma le2) = Some NumberType
+               | _ -> false -> (
             let te1, _ = Typing.type_lexpr gamma le1 in
             let te2, _ = Typing.type_lexpr gamma le2 in
             match (te1, te2) with
@@ -549,8 +569,9 @@ let simplify_pfs_and_gamma
                      ((Fmt.to_to_string Expr.pp) le2)
                      (Type.str te2))
             | _, _
-              when ((te1 = Some NumberType || te1 = None)
-                   && (te2 = Some NumberType || te2 = None))
+              when equality = Equal
+                   && ((te1 = Some NumberType || te1 = None)
+                      && (te2 = Some NumberType || te2 = None))
                    &&
                    match (le1, le2) with
                    | LVar _, Lit (Num n) | Lit (Num n), LVar _ ->
@@ -585,6 +606,16 @@ let simplify_pfs_and_gamma
                 | ALoc alocl, ALoc alocr when matching ->
                     L.verbose (fun fmt ->
                         fmt "Two equal alocs: %s and %s" alocl alocr);
+                    (* A location saved in a caller/loop frame cannot be renamed
+                       only in the current state. Choose it as representative. *)
+                    let alocl, alocr =
+                      if SS.mem alocr vars_to_save then (alocr, alocl)
+                      else (alocl, alocr)
+                    in
+                    if alocl <> alocr && SS.mem alocr vars_to_save then
+                      raise
+                        (Gillian_result.Exc.analysis_failure
+                           "Cannot merge distinct protected heap locations");
                     SESubst.put result (ALoc alocr) (ALoc alocl);
                     let temp_subst =
                       SESubst.init [ (ALoc alocr, ALoc alocl) ]
@@ -648,7 +679,7 @@ let simplify_pfs_and_gamma
                                           ((Fmt.to_to_string Expr.pp) le)
                                           ((Fmt.to_to_string Expr.pp) le'))); *)
                                  if le <> le' then
-                                   PFS.extend lpfs (BinOp (le, Equal, le')));
+                                   PFS.extend lpfs (BinOp (le, ValueEqual, le')));
                               SESubst.iter result (fun x le ->
                                   let sle =
                                     SESubst.subst_in_expr temp_subst
@@ -908,7 +939,7 @@ let simplify_pfs_and_gamma
                        || (kill_new_lvars && SS.mem v vars_to_save)
                        || ((not kill_new_lvars) && vars_to_save <> SS.empty))
                     && not (Names.is_aloc_name v)
-                  then PFS.extend lpfs (BinOp (LVar v, Equal, le))
+                  then PFS.extend lpfs (BinOp (LVar v, ValueEqual, le))
               | _ -> ());
 
           sanitise_pfs_no_store ~matching gamma lpfs;

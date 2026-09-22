@@ -1,6 +1,6 @@
 (library
  (name utils)
  (public_name gillian.utils)
- (libraries unix str fmt yojson zarith dtoa)
+ (libraries unix str fmt yojson zarith dtoa wtf8)
  (preprocess
   (pps visitors.ppx ppx_deriving_yojson ppx_deriving.std)))

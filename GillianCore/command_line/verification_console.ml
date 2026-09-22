@@ -28,6 +28,13 @@ module Make
     let doc = "Only verify procs." in
     Arg.(value & flag & info [ "procs-only" ] ~doc)
 
+  let closed_entry =
+    let doc =
+      "Check one parameterless entry from an empty state. Requires --total; \
+       executes helper bodies without heap abstraction or reusable summaries."
+    in
+    Arg.(value & flag & info [ "closed-entry" ] ~doc)
+
   let proc_arg =
     let doc =
       "Specifies a procedure or list of procedures that should be verified. By \
@@ -142,11 +149,13 @@ module Make
       lemmas_to_verify
       procs_only
       total
+      closed_entry
       () =
     (* Attention: if you plan to add UX verification, you must be careful about predicates.
        In our current formalism, they must be stricly exact. *)
     let () = Fmt_tty.setup_std_outputs () in
     let () = Config.Verification.total := total in
+    let () = Config.Verification.closed_entry := closed_entry in
     let () = Config.stats := stats in
     let () = Config.lemma_proof := not no_lemma_proof in
     let () = Config.current_exec_mode := Verification in
@@ -170,7 +179,7 @@ module Make
     Term.(
       const verify_once $ files $ already_compiled $ output_gil $ no_unfold
       $ stats $ no_lemma_proof $ manual $ incremental $ proc_arg $ lemma_arg
-      $ procs_only $ total)
+      $ procs_only $ total $ closed_entry)
 
   let verify_info =
     let doc = "Verifies a file of the target language" in

@@ -1,0 +1,2 @@
+spec answer() [[ emp ]] [[ (ret == 1i) ]] normal
+proc answer() { unused := true or 1i; ret := 1i; return };

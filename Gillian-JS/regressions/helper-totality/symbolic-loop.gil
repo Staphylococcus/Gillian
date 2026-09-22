@@ -1,0 +1,8 @@
+spec answer(flag)
+[[ (flag == #flag) * types(#flag : Bool) ]] [[ (ret == 42i) ]] normal
+proc answer(flag) { ret := "helper"(flag); return };
+proc helper(flag) {
+  goto [flag] spin done;
+spin: goto spin;
+done: ret := 42i; return
+};

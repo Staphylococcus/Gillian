@@ -61,6 +61,28 @@ let heap_transition () =
   in
   check [ "z"; "a" ] fields
 
+let semantic_lookup () =
+  let fields =
+    List.fold_left
+      (fun fields key -> Fields.add (name key) value fields)
+      Fields.empty
+      [ "a"; "b"; "c"; "d"; "e"; "f"; "g" ]
+  in
+  List.iter
+    (fun key ->
+      let result =
+        Fields.get_first (fun field -> Expr.equal field (name key)) fields
+      in
+      Alcotest.(check bool)
+        ("find " ^ key) true
+        (match result with
+        | Some (field, _) -> Expr.equal field (name key)
+        | None -> false))
+    [ "a"; "b"; "c"; "d"; "e"; "f"; "g" ];
+  Alcotest.(check bool)
+    "no matching key" true
+    (Option.is_none (Fields.get_first (fun _ -> false) fields))
+
 let () =
   Alcotest.run "Property order"
     [
@@ -68,5 +90,6 @@ let () =
         [
           ("keys", `Quick, order);
           ("symbolic transition", `Quick, heap_transition);
+          ("semantic lookup", `Quick, semantic_lookup);
         ] );
     ]

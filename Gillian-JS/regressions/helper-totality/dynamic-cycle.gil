@@ -1,0 +1,10 @@
+spec answer(flag)
+[[ (flag == #flag) * types(#flag : Bool) ]] [[ (ret == 42i) ]] normal
+proc answer(flag) {
+  goto [flag] one two;
+one: target := "first"; goto call;
+two: target := "second"; goto call;
+call: ret := target(); return
+};
+proc first() { ret := 42i; return };
+proc second() { target := "second"; ret := target(); return };

@@ -1,0 +1,11 @@
+nounfold pred Box(a; value): <Cell>(a, "x"; value);
+spec answer(a)
+[[ (a v== #a) * Box(#a; #value) * <Cell>(#a, "kept"; 7i) ]]
+[[ (ret v== #value) * Box(#a; #value) * <Cell>(#a, "kept"; 7i) ]] normal
+proc answer(a) {
+  sep_assert (Box(a; #captured)) [bind: #captured];
+  assert (#captured v== #value);
+  unfold Box(a, #captured);
+  cell := [GetCell](a, "x");
+  ret := l-nth(cell, 2i); return
+};

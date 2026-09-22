@@ -1,0 +1,4 @@
+spec answer(n)
+[[ (n v== #n) * types(#n : Num) * (0.0 < #n) * (#n <= 4294967295.0) ]]
+[[ (ret == false) ]] normal
+proc answer(n) { ret := not (n == 0.0); return };

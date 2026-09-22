@@ -2,6 +2,7 @@
 
 type t = TypeDef__.binop =
   (* Comparison *)
+  | ValueEqual  (** Value identity, preserving signed zero and admitting NaN. *)
   | Equal  (** Equality *)
   | ILessThan  (** Less for integers *)
   | ILessThanEqual  (** Less or equal for integers *)
@@ -62,6 +63,7 @@ let of_yojson = TypeDef__.binop_of_yojson
 
 let str (x : t) =
   match x with
+  | ValueEqual -> "v=="
   | Equal -> "=="
   | ILessThan -> "i<"
   | ILessThanEqual -> "i<="

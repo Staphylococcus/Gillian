@@ -62,6 +62,7 @@ type 'annot prog = {
   lemma_induction : ProofDependencies.induction option;
   totality : Totality.context option;
   proved_total_procs : SS.t;
+  unsupported_totality_nodes : (string * int, string) Hashtbl.t;
   prog : ('annot, int) Prog.t;
 }
 
@@ -153,6 +154,7 @@ let rec missing_expr (kb : KB.t) (e : Expr.t) : KB.t list =
     (* Program variables, logical variables, and abstract locations
        are known if and only if they are in the knowledge base *)
     | PVar _ | LVar _ | ALoc _ -> [ KB.singleton e ]
+    | UnOp (LstLen, UnOp (StrToBytes, bytes)) -> f bytes
     | UnOp (LstLen, e1) -> (
         (* If a LstLen exists, then it must be of a program or a logical variable.
            All other cases (literal list, expression list, list concat, sub-list)
@@ -523,7 +525,7 @@ let ins_outs_formula (kb : KB.t) (pf : Expr.t) : (KB.t * outs) list =
     List.map (fun ins -> (ins, [])) default_ins
   in
   match pf with
-  | BinOp (e1, Equal, e2) -> (
+  | BinOp (e1, (Equal | ValueEqual), e2) -> (
       L.verbose (fun fmt -> fmt "IO Equality: %a" Expr.pp pf);
       L.verbose (fun fmt ->
           fmt "Ins: %a" Fmt.(brackets (list ~sep:semi kb_pp)) default_ins);
@@ -955,6 +957,7 @@ let init_prog ?preds_tbl (prog : ('a, int) Prog.t) : 'a prog =
       lemma_induction = None;
       totality = None;
       proved_total_procs = SS.empty;
+      unsupported_totality_nodes = Hashtbl.create 0;
     }
   in
   match res with

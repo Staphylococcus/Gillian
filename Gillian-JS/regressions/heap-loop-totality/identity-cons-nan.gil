@@ -1,0 +1,7 @@
+spec answer(xs, ys)
+[[ (xs v== #xs) * (ys v== #ys) * types(#xs : List, #ys : List) ]]
+[[ (ret == (#xs == #ys)) ]] normal
+proc answer(xs, ys) {
+  ret := (l+({{ nan }}, xs) == l+({{ nan }}, ys));
+  return
+};

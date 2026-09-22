@@ -33,6 +33,9 @@ module type S = sig
   val execute_action : string -> t -> vt list -> action_ret
   val is_overlapping_asrt : string -> bool
 
+  (** Target-certified termination of primitive actions at this arity. *)
+  val is_action_total : string -> int -> bool
+
   (** Expression Evaluation *)
   val eval_expr : t -> Expr.t -> vt
 
@@ -111,16 +114,17 @@ module type S = sig
   val evaluate_slcmd : 'a MP.prog -> SLCmd.t -> t -> (t, err_t) Res_list.t
 
   (** [match_invariant prog revisited state invariant binders] returns a list of
-      pairs of states. In each pair, the first element is the framed off state,
-      and the second one is the invariant, i.e. the state obtained by producing
-      the invariant *)
+      frames, generalized states and optional frozen loop measures. On a
+      back-edge, measure binders are instantiated by this invariant match, so
+      heap measures refer to current values instead of stale entry ghosts *)
   val match_invariant :
     'a MP.prog ->
     bool ->
     t ->
     Asrt.t ->
     string list ->
-    (t * t, err_t) Res_list.t
+    measure:(Expr.t * (Type.t * Expr.t) option) option ->
+    (t * t * (Type.t * Expr.t) option, err_t) Res_list.t
 
   val frame_on : t -> (string * t) list -> string list -> (t, err_t) Res_list.t
 

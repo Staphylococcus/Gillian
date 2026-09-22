@@ -1,0 +1,14 @@
+pred Shared(obj:Obj; value:Int): <Metadata>(obj; #md) * <Metadata>(#md; null) * <Cell>(#md, "value"; value);
+spec answer(obj)
+[[ (obj == #obj) * Shared(#obj, #initial) * types(#initial : Int) * (0i i<= #initial) ]]
+[[ (ret == 0i) * Shared(#obj, 0i) ]] normal
+proc answer(obj) {
+head: invariant (Shared(obj, #value) * types(#value : Int) * (0i i<= #value)) [bind: #value] variant(#value);
+ unfold Shared(obj, #value);
+ metadata := [GetMetadata](obj); md := l-nth(metadata, 1i);
+ cell := [GetCell](md, "value"); n := l-nth(cell, 2i);
+ goto [n i> 0i] step done;
+step: unused := [SetCell](md, "value", n); goto head;
+done: metadata := [GetMetadata](obj); md := l-nth(metadata, 1i);
+ cell := [GetCell](md, "value"); ret := l-nth(cell, 2i); return
+};

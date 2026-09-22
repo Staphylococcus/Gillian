@@ -1,0 +1,7 @@
+spec answer(a, n)
+[[ (a v== #a) * (n v== #n) * types(#n : Num) * (is_int(#n)) * (0.0 <= #n) * (#n <= 4294967295.0) *
+ <Props>(#a, -{ "x" }-;) * <Cell>(#a, "x"; 1i) ]]
+[[ <Props>(#a, -{ "x" }-;) * <Cell>(#a, "x"; 1i) * (ret == none) ]] normal
+proc answer(a, n) {
+ cell := [GetCell](a, num_to_string(n)); ret := l-nth(cell, 2i); return
+};

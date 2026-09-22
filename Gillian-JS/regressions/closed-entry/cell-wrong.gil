@@ -1,0 +1,9 @@
+spec main()
+[[ emp ]] [[ (ret == $lclosed) * <Metadata>($lclosed; null) * <Cell>($lclosed, "value"; 42i) ]] normal
+proc main() {
+ fresh := [Alloc]($lclosed, null);
+ absent := [GetCell]($lclosed, "value");
+ ignored := [SetCell]($lclosed, "value", 41i);
+ ret := $lclosed;
+ return
+};

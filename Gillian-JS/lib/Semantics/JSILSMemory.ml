@@ -431,7 +431,7 @@ module M = struct
       | None -> raise (Failure "DEATH. get_partial_domain. illegal loc_name")
       | Some ((_, None), _) ->
           raise (Failure "DEATH. get_partial_domain. missing domain")
-      | Some ((fv_list, Some dom), mtdt) -> (
+      | Some ((fv_list, Some dom), mtdt) ->
           L.verbose (fun fmt -> fmt "Domain: %a" Expr.pp dom);
           let none_fv_list, pos_fv_list =
             SFVL.partition (fun _ fv -> fv = Lit Nono) fv_list
@@ -448,23 +448,39 @@ module M = struct
             Reduction.reduce_lexpr ?gamma:(Some gamma) ?pfs:(Some pfs) dom'
           in
 
-          (* Expected dom - dom *)
-          let dom_diff = Expr.BinOp (e_dom, SetDiff, dom'') in
-          let dom_diff' =
-            Reduction.reduce_lexpr ?gamma:(Some gamma) ?pfs:(Some pfs) dom_diff
+          (* Props owns the complement of its domain. We may fold exposed
+             negative cells back into it, but cannot claim a present or
+             unowned field is absent. Prove this before consuming anything. *)
+          let inclusion = Expr.BinOp (dom'', SetSub, e_dom) in
+          let entails f =
+            FOSolver.check_entailment Containers.SS.empty pfs [ f ] gamma
           in
-
-          (* if dom_diff' != {} then we have to put the excess properties in the heap as nones *)
-          match dom_diff' with
-          | ESet props ->
-              let new_fv_list =
-                List.fold_left
-                  (fun fv_list prop -> SFVL.add prop (Lit Nono) fv_list)
-                  pos_fv_list props
-              in
-              SHeap.set heap loc_name new_fv_list (Some e_dom) mtdt;
-              Ok [ (heap, [ loc; e_dom ], [], []) ]
-          | _ -> raise (Failure "DEATH. get_partial_domain. dom_diff"))
+          if not (entails inclusion) then
+            Error
+              [ ([ loc ], [ [ FPure inclusion ] ], Expr.UnOp (Not, inclusion)) ]
+          else
+            let difference =
+              Reduction.reduce_lexpr ~gamma ~pfs
+                (Expr.BinOp (e_dom, SetDiff, dom''))
+            in
+            let props =
+              match difference with
+              | ESet props -> props
+              | _ when entails (Expr.BinOp (difference, Equal, ESet [])) -> []
+              | _ ->
+                  raise
+                    (Gillian_result.Exc.Gillian_error
+                       (OperationError
+                          "Unsupported property-domain matching: needs a \
+                           finite exposed difference"))
+            in
+            let new_fv_list =
+              List.fold_left
+                (fun fields prop -> SFVL.add prop (Lit Nono) fields)
+                pos_fv_list props
+            in
+            SHeap.set heap loc_name new_fv_list (Some e_dom) mtdt;
+            Ok [ (heap, [ loc; e_dom ], [], []) ]
     in
     let result =
       Option.fold ~some:f ~none:(Error [ ([ loc ], [], Expr.false_) ]) loc_name
@@ -526,7 +542,7 @@ module M = struct
      location/cell, or remove an object whose remaining fields could be framed.
      The modern wrapper calls this only for program actions, never for consume
      or produce. Unsupported footprints remain incomplete proofs. *)
-  let check_total_action action heap pfs gamma args =
+  let prepare_total_action action heap pfs gamma args =
     let unsupported reason =
       raise
         (Gillian_result.Exc.Gillian_error
@@ -546,41 +562,61 @@ module M = struct
              (Expr.BinOp (UnOp (TypeOf, prop), Equal, Lit (Type StringType))))
       then unsupported "requires a string property key."
     in
-    if action = JSILNames.alloc then
+    (* Resolve an already owned property once, then pass that exact stored key
+       to the legacy syntactic setter/deleter. Argument reduction can turn an
+       equal symbolic key into a literal between GetCell and SetCell. A relaxed
+       guard alone would permit inserting a second, aliased heap entry. *)
+    if action = JSILNames.setCell || action = JSILNames.delCell then
       match args with
-      | Expr.Lit Empty :: _ -> ()
-      | _ -> unsupported "requires fresh allocation in the current fragment."
-    else if action = JSILNames.getCell then
-      match args with
-      | [ _; prop ] -> string_key prop
-      | _ -> unsupported "has invalid arguments."
-    else if action = JSILNames.setCell || action = JSILNames.delCell then
-      match args with
-      | loc :: prop :: _ ->
+      | loc :: prop :: rest -> (
           string_key prop;
-          let owns_cell =
+          let owned_key =
             match object_at loc with
+            | None -> None
             | Some ((fields, _), _) ->
-                (* The legacy setter/deleter uses syntactic keys. Accepting
-                   merely equal aliases here could update a different entry. *)
-                Option.is_some (SFVL.get prop fields)
-            | None -> false
+                if Option.is_some (SFVL.get prop fields) then Some prop
+                else
+                  Option.map fst
+                    (SFVL.get_first
+                       (fun key -> FOSolver.is_equal ~pfs ~gamma key prop)
+                       fields)
           in
-          if not owns_cell then unsupported "requires an exposed property cell."
+          match owned_key with
+          | Some key -> loc :: key :: rest
+          | None -> unsupported "requires an exposed property cell.")
       | _ -> unsupported "has invalid arguments."
-    else if action = JSILNames.delObj then
-      match args with
-      | [ loc ] ->
-          let owns_object =
-            match object_at loc with
-            | Some ((fields, Some dom), Some _) ->
-                entails
-                  (Expr.BinOp (dom, Equal, ESet (SFVL.field_names fields)))
-            | _ -> false
-          in
-          if not owns_object then
-            unsupported "requires a complete object footprint."
-      | _ -> unsupported "has invalid arguments."
+    else (
+      (if action = JSILNames.alloc then
+         match args with
+         | Expr.Lit Empty :: _ -> ()
+         | Expr.Lit (Loc loc) :: _
+           when !Config.Verification.closed_entry
+                && not (Utils.Names.is_lloc_name loc)
+                && not (SHeap.has_loc heap loc) ->
+             (* The closed-entry verifier starts at emp and forbids resource
+                production/folding, loop abstraction and summaries. Thus no location
+                can be hidden in a predicate or suspended frame. Reserve the
+                concrete allocator's namespace, and never overwrite a name. *)
+             ()
+         | _ -> unsupported "requires fresh allocation in the current fragment."
+       else if action = JSILNames.getCell then
+         match args with
+         | [ _; prop ] -> string_key prop
+         | _ -> unsupported "has invalid arguments."
+       else if action = JSILNames.delObj then
+         match args with
+         | [ loc ] ->
+             let owns_object =
+               match object_at loc with
+               | Some ((fields, Some dom), Some _) ->
+                   entails
+                     (Expr.BinOp (dom, Equal, ESet (SFVL.field_names fields)))
+               | _ -> false
+             in
+             if not owns_object then
+               unsupported "requires a complete object footprint."
+         | _ -> unsupported "has invalid arguments.");
+      args)
 
   let execute_action
       ?matching:_

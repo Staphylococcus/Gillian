@@ -31,8 +31,12 @@ pred JSObjGeneral (l:Obj; proto, class:Str, ext:Bool) :
  **** FUNCTION OBJECTS ****
  **************************)
 
+(* Keep function length descriptors aligned with JS2JSIL/Init.jsil: the
+   property is configurable. These predicates and the duplicate creation
+   helpers below describe the same runtime allocation layout. *)
+
 pred JSFunctionObject (l:Obj; fid:Str, sc:List, len:Num, proto:Obj) :
-  ((l, "length")     -> {{ "d", len, false, false, false }}) *
+  ((l, "length")     -> {{ "d", len, false, false, true }}) *
   ((l, "arguments")  -> {{ "a", $lthrw_type_error, $lthrw_type_error, false, false }}) *
   ((l, "caller")     -> {{ "a", $lthrw_type_error, $lthrw_type_error, false, false }}) *
   ((l, "prototype")  -> {{ "d", proto, true, false, false }}) *
@@ -50,7 +54,7 @@ pred JSFunctionObjectStrong (l:Obj; fid:Str, sc:List, len:Num, proto:Obj) :
   empty_fields(l : -{ "arguments", "caller", "length", "prototype" }-);
 
 pred JSBIFunction (l:Obj; fid:Str, len:Num) :
-  ((l, "length")     -> {{ "d", len, false, false, false }}) *
+  ((l, "length")     -> {{ "d", len, false, false, true }}) *
   MetaData(l, #md) * MetaData(#md, null) *
   ((#md, "@proto")      -> $lfun_proto) *
   ((#md, "@class")      -> "Function") *
@@ -60,7 +64,7 @@ pred JSBIFunction (l:Obj; fid:Str, len:Num) :
   empty_fields(#md : -{ "@call", "@class", "@extensible", "@proto", "@scope" }-);
 
 pred BIFunctionObject (l:Obj; len:Num, proto:Obj, call, construct) :
-  ((l, "length")     -> {{ "d", len, false, false, false }}) *
+  ((l, "length")     -> {{ "d", len, false, false, true }}) *
   ((l, "prototype")  -> {{ "d", proto, false, false, false }}) *
   MetaData(l, #md) * MetaData(#md, null) *
   ((#md, "@proto")      -> $lfun_proto) *
@@ -475,7 +479,7 @@ proc create_object_with_call_construct (call, construct, len) {
 
         ret := "create_default_object" ($lfun_proto, "Function", true);
 
-        [ret, "length"] := {{ "d", len, false, false, false }};
+        [ret, "length"] := {{ "d", len, false, false, true }};
 
         (* Get the metadata *)
         m := metadata(ret);
@@ -495,7 +499,7 @@ proc create_object_with_call_construct_concrete (l, call, construct, len) {
 
         ret := "create_default_object_concrete" (l, $lfun_proto, "Function", true);
 
-        [ret, "length"] := {{ "d", len, false, false, false }};
+        [ret, "length"] := {{ "d", len, false, false, true }};
 
         (* Get the metadata *)
         m := metadata(ret);

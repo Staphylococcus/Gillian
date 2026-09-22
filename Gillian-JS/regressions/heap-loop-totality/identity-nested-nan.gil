@@ -1,0 +1,4 @@
+spec answer(a)
+[[ (a == #a) * <Cell>(#a, "x"; {{ {{ nan }} }}) ]]
+[[ <Cell>(#a, "x"; {{ {{ nan }} }}) * (ret == true) ]] normal
+proc answer(a) { ret := true; return };

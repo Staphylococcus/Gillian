@@ -1,0 +1,12 @@
+pure nounfold pred Cell(obj; value) : <Cell>(obj, "x"; value);
+pure nounfold pred Alias(obj; value): Cell(obj; value);
+spec answer(obj)
+[[ (obj v== #obj) * Alias(#obj; 42i) ]] [[ (ret == 7i) * Alias(#obj; 42i) ]] normal
+proc answer(obj) {
+  unfold Alias(obj, 42i);
+  unfold Cell(obj, 42i);
+  ignored := [SetCell](obj, "x", 7i);
+  cell := [GetCell](obj, "x");
+  ret := l-nth(cell, 2i);
+  return
+};

@@ -32,7 +32,7 @@ let to_int32 n =
       let posint = (if n < 0. then -1. else 1.) *. floor (abs_float n) in
       let int32bit =
         let smod = mod_float posint i32 in
-        if smod < 0. then smod +. i32 else smod
+        if smod = 0. then 0. else if smod < 0. then smod +. i32 else smod
       in
       if int32bit >= i31 then int32bit -. i32 else int32bit
   | _ -> 0.
@@ -45,7 +45,7 @@ let to_uint32 n =
       let posint = (if n < 0. then -1. else 1.) *. floor (abs_float n) in
       let int32bit =
         let smod = mod_float posint i32 in
-        if smod < 0. then smod +. i32 else smod
+        if smod = 0. then 0. else if smod < 0. then smod +. i32 else smod
       in
       int32bit
   | _ -> 0.
@@ -58,7 +58,7 @@ let to_uint16 n =
       let posint = (if n < 0. then -1. else 1.) *. floor (abs_float n) in
       let int16bit =
         let smod = mod_float posint i16 in
-        if smod < 0. then smod +. i16 else smod
+        if smod = 0. then 0. else if smod < 0. then smod +. i16 else smod
       in
       int16bit
   | _ -> 0.
@@ -116,3 +116,27 @@ let uint64_int_right_shift x y = Z.shift_right x (Z.to_int y)
 (** ECMAScript's shortest round-tripping binary64 representation. Keep this
     conversion shared by concrete execution and symbolic constant reduction. *)
 let float_to_string_inner = Dtoa.ecma_string_of_float
+
+(* Validate ECMAScript's numeric-string grammar before using the native
+   decimal/radix parsers. OCaml additionally accepts underscores, signed radix
+   prefixes and other spellings that JavaScript must reject. *)
+let decimal_string =
+  Str.regexp
+    {|[+-]?\(Infinity\|\([0-9]+\(\.[0-9]*\)?\|\.[0-9]+\)\([eE][+-]?[0-9]+\)?\)|}
+
+let radix_strings =
+  List.map Str.regexp [ "0[xX][0-9a-fA-F]+"; "0[oO][0-7]+"; "0[bB][01]+" ]
+
+let string_to_number string =
+  try
+    let string = Utf16.trim string in
+    let matches pattern =
+      Str.string_match pattern string 0
+      && Str.match_end () = String.length string
+    in
+    if string = "" then 0.
+    else if matches decimal_string then Float.of_string string
+    else if List.exists matches radix_strings then
+      Z.to_float (Z.of_string string)
+    else nan
+  with Failure _ | Invalid_argument _ | Exceptions.Unsupported _ -> nan

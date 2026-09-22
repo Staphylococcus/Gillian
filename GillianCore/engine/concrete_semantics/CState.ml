@@ -40,6 +40,7 @@ end = struct
 
   type action_ret = (t * vt list, err_t) result list
 
+  let is_action_total _ _ = false
   let init init_data : t = (CMemory.init init_data, CStore.init [], [])
 
   let execute_action (action : string) (state : t) (args : vt list) : action_ret
@@ -147,7 +148,7 @@ end = struct
       (t, err_t) Res_list.t =
     raise (Failure "ERROR: evaluate_slcmd called for non-abstract execution")
 
-  let match_invariant _ _ _ _ _ =
+  let match_invariant _ _ _ _ _ ~measure:_ =
     raise (Failure "ERROR: match_invariant called for concrete execution")
 
   let frame_on _ _ _ =

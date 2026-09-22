@@ -33,6 +33,14 @@ let rec equal la lb =
   | LList ll, LList lr -> List.for_all2 equal ll lr
   | _ -> false
 
+(** Value identity for logical heap matching. NaN payloads are not separate
+    JavaScript Number values; signed zeros remain observably different. *)
+let rec same_value left right =
+  match (left, right) with
+  | Num a, Num b when Float.is_nan a && Float.is_nan b -> true
+  | LList a, LList b -> List.equal same_value a b
+  | _ -> equal left right
+
 let to_yojson = TypeDef__.literal_to_yojson
 let of_yojson = TypeDef__.literal_of_yojson
 
@@ -106,6 +114,11 @@ let evaluate_constant (c : Constant.t) : t =
       let lctime = lctime +. usec in
       let _, tl = Float.modf (lctime *. 1e+3) in
       Num (float_of_int (int_of_float tl))
+
+let static_constant c =
+  match c with
+  | Constant.Random | UTCTime | LocalTime -> None
+  | _ -> Some (evaluate_constant c)
 
 let from_list lits = LList lits
 

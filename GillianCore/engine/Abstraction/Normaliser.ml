@@ -244,10 +244,10 @@ module Make (SPState : PState.S) = struct
     List.iter
       (fun a ->
         match (a : Expr.t) with
-        | BinOp (LVar x, Equal, le)
-        | BinOp (le, Equal, LVar x)
-        | BinOp (PVar x, Equal, le)
-        | BinOp (le, Equal, PVar x) -> (
+        | BinOp (LVar x, (Equal | ValueEqual), le)
+        | BinOp (le, (Equal | ValueEqual), LVar x)
+        | BinOp (PVar x, (Equal | ValueEqual), le)
+        | BinOp (le, (Equal | ValueEqual), PVar x) -> (
             let x_type = Type_env.get gamma x in
             match x_type with
             | None ->
@@ -284,14 +284,23 @@ module Make (SPState : PState.S) = struct
       List.iter
         (fun (f : Expr.t) : unit ->
           match f with
-          | BinOp (PVar x, Equal, e) | BinOp (e, Equal, PVar x) ->
-              if
+          | BinOp (PVar x, ((Equal | ValueEqual) as op), e)
+          | BinOp (e, ((Equal | ValueEqual) as op), PVar x) ->
+              let exact_binding =
+                op = ValueEqual
+                ||
+                match Typing.type_lexpr gamma e with
+                | Some NumberType, _ | None, _ -> false
+                | _ -> true
+              in
+              if not exact_binding then Stack.push f non_store_pure_assertions
+              else if
                 (not (Hashtbl.mem pvar_equalities x))
                 && not (SStore.mem store x)
               then Hashtbl.add pvar_equalities x e
               else
                 Stack.push
-                  (Expr.BinOp (PVar x, Equal, e))
+                  (Expr.BinOp (PVar x, op, e))
                   non_store_pure_assertions
           | _ -> Stack.push f non_store_pure_assertions)
         fs
@@ -367,7 +376,7 @@ module Make (SPState : PState.S) = struct
         try
           let e = Hashtbl.find pvar_equalities var in
           Stack.push
-            (Expr.BinOp (LVar (new_lvar_name var), Equal, e))
+            (Expr.BinOp (LVar (new_lvar_name var), ValueEqual, e))
             non_store_pure_assertions;
           Hashtbl.remove pvar_equalities var
         with _ ->

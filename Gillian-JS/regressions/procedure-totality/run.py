@@ -16,9 +16,15 @@ DESCENT = (1, "variant is not a strictly smaller natural integer")
 ENTRY = (1, "entry variant is not a natural integer")
 POST = (1, "Couldn't satisfy postcondition")
 CASES = [
+    ("heap-alias-set.gil", ["--total"], TOTAL),
+    ("heap-alias-set-wrong.gil", ["--total"], POST),
+    ("heap-alias-delete.gil", ["--total"], TOTAL),
+    ("heap-alias-delete-wrong.gil", ["--total"], POST),
+    ("heap-alias-set-unproven.gil", ["--total"], (124, "requires an exposed property cell")),
+    ("heap-alias-delete-unproven.gil", ["--total"], (124, "requires an exposed property cell")),
     ("return.gil", ["--total"], TOTAL),
-    ("javascript-return.js", ["--total", "--proc=answer"], (124, "operation outside the totality fragment")),
-    ("javascript-empty.js", ["--total", "--proc=answer"], (124, "TypeError must be selected and proved total")),
+    ("javascript-return.js", ["--total", "--proc=answer"], TOTAL),
+    ("javascript-empty.js", ["--total", "--proc=answer"], TOTAL),
     ("heap-roundtrip.gil", ["--total"], TOTAL),
     ("heap-wrong-result.gil", ["--total"], POST),
     ("heap-list-no-progress.gil", ["--total"], DESCENT),
@@ -67,7 +73,7 @@ CASES = [
     ("external.gil", ["--total"], (124, "operation outside the totality fragment")),
     ("action.gil", ["--total"], (124, "uncertified primitive action: unknown/0")),
     ("apply.gil", ["--total"], (124, "operation outside the totality fragment")),
-    ("dynamic-call.gil", ["--total"], (124, "operation outside the totality fragment")),
+    ("dynamic-call.gil", ["--total"], TOTAL),
     ("extra-argument.gil", ["--total"], (124, "requires exact call arity")),
     ("incomplete-spec.gil", ["--total"], (124, "requires a complete specification")),
     ("budget.gil", ["--total"], (124, "exploration budget exhausted")),

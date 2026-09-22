@@ -1,0 +1,8 @@
+nounfold pred Box(a; value): <Cell>(a, "x"; value);
+spec answer(a)
+[[ (a v== #a) * Box(#a; #value) ]]
+[[ Box(#a; 42i) * (ret == true) ]] normal
+proc answer(a) {
+  sep_assert ((#value == 42i));
+  ret := true; return
+};

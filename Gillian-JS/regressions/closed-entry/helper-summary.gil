@@ -1,0 +1,14 @@
+spec main()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc main() {
+ ret := "helper"();
+ return
+};
+
+spec helper()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc helper() {
+ fresh := [Alloc]($lclosed, null);
+ ret := 41i;
+ return
+};

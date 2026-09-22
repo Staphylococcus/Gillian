@@ -424,12 +424,6 @@ let is_different (pfs : Expr.t list) (li : Expr.t) (lj : Expr.t) : bool option =
       | Expr.Lit x, Lit y when not (Literal.equal x y) -> Some true
       | UnOp (ToStringOp, _), Lit (String "")
       | Lit (String ""), UnOp (ToStringOp, _) -> Some true
-      | UnOp (ToStringOp, _), Lit (String s)
-        when not (Str.string_match (Str.regexp "0-9") (Str.first_chars s 1) 0)
-        -> Some true
-      | Lit (String s), UnOp (ToStringOp, _)
-        when not (Str.string_match (Str.regexp "0-9") (Str.first_chars s 1) 0)
-        -> Some true
       | _, _ ->
           if
             List.mem (Expr.UnOp (Not, BinOp (li, Equal, lj))) pfs
@@ -784,13 +778,36 @@ let find_list_length_eqs (pfs : PFS.t) (e : Expr.t) : Cint.t list =
 let rec reduce_lexpr_loop
     ?(matching = false)
     ?(reduce_lvars = false)
+    ?(resolve_constants = true)
     ?(fuel = 20)
     (pfs : PFS.t)
     (gamma : Type_env.t)
     (le : Expr.t) =
+  (* Resolve fixed runtime constants before any syntactic identity can erase
+     them. Share their values with concrete evaluation; never sample dynamic
+     constants while simplifying a proof. Recursive descent reuses this pass
+     instead of repeatedly rebuilding every already-normalized subtree. *)
+  let le =
+    if not resolve_constants then le
+    else
+      Expr.map_opt
+        (fun e ->
+          match e with
+          | Expr.Lit (Constant c) ->
+              ( Some
+                  (Option.fold ~none:e
+                     ~some:(fun l -> Expr.Lit l)
+                     (Literal.static_constant c)),
+                false )
+          | _ -> (Some e, true))
+        None le
+      |> Option.get
+  in
   let f =
     if fuel <= 0 then Fun.id
-    else reduce_lexpr_loop ~matching ~reduce_lvars ~fuel:(fuel - 1) pfs gamma
+    else
+      reduce_lexpr_loop ~matching ~reduce_lvars ~resolve_constants:false
+        ~fuel:(fuel - 1) pfs gamma
   in
 
   (* L.verbose (fun fmt -> fmt "Reducing Expr: %a" Expr.pp le); *)
@@ -805,6 +822,10 @@ let rec reduce_lexpr_loop
     (* -------------------------
               Base cases
        ------------------------- *)
+    | Lit (Constant c) ->
+        Option.fold ~none:le
+          ~some:(fun literal -> Expr.Lit literal)
+          (Literal.static_constant c)
     | Lit _ | PVar _ | ALoc _ -> le
     (* -------------------------
                  LVar
@@ -1312,6 +1333,12 @@ let rec reduce_lexpr_loop
         let fle = f le in
         let def = Expr.UnOp (op, fle) in
         match (op, fle) with
+        | ToNumberOp, UnOp (ToStringOp, number) ->
+            (* ECMAScript's shortest decimal format round-trips every number.
+               Adding +0 preserves that number and canonicalizes -0, whose
+               formatted spelling is "0". NaN remains NaN. The reverse
+               composition is deliberately not cancelled. *)
+            f (BinOp (number, FPlus, Lit (Num 0.)))
         | _, Lit lit -> (
             try Lit (CExprEval.evaluate_unop op lit) with
             | CExprEval.TypeError err_msg ->
@@ -1366,6 +1393,9 @@ let rec reduce_lexpr_loop
             raise (ReductionException (def, err_msg))
         (* Set operation *)
         | SetToList, ESet le -> EList (Expr.Set.elements (Expr.Set.of_list le))
+        | StrToBytes, _ when lexpr_is_string gamma fle -> def
+        | StrToBytes, _ ->
+            raise (ReductionException (def, "StrToBytes requires a GIL string"))
         (* String length *)
         | StrLen, _ when lexpr_is_string gamma fle ->
             let len = get_length_of_string fle in
@@ -1487,14 +1517,34 @@ let rec reduce_lexpr_loop
     | BinOp (ALoc x, Equal, ALoc y) when not matching -> Lit (Bool (x = y))
     | BinOp (ALoc _, Equal, Lit (Loc _)) | BinOp (Lit (Loc _), Equal, ALoc _) ->
         Expr.false_
+    (* Proof resource values need identity, not IEEE comparison. List equality
+       already preserves element identity; numeric equality does not. *)
+    | BinOp (e1, ValueEqual, e2) when Expr.equal e1 e2 -> Expr.true_
+    | BinOp (Lit l1, ValueEqual, Lit l2) -> Expr.bool (Literal.same_value l1 l2)
+    | BinOp (EList l1, ValueEqual, EList l2) ->
+        if List.length l1 <> List.length l2 then Expr.false_
+        else
+          Expr.conjunct
+            (List.map2 (fun a b -> Expr.BinOp (a, ValueEqual, b)) l1 l2)
+    | BinOp (e1, ValueEqual, e2)
+      when let t1, _ = Typing.type_lexpr gamma e1 in
+           let t2, _ = Typing.type_lexpr gamma e2 in
+           match (t1, t2) with
+           | Some ObjectType, _ | _, Some ObjectType -> true
+           | Some t1, Some t2 when t1 = t2 -> (
+               match t1 with
+               | NumberType | DatatypeType _ -> false
+               | _ -> true)
+           | _ -> false -> BinOp (e1, Equal, e2)
     (* BinOps: Equalities (lists) *)
-    | BinOp (Lit (LList ll), Equal, Lit (LList lr)) -> Expr.bool (ll = lr)
+    | BinOp (Lit (LList ll), Equal, Lit (LList lr)) ->
+        Expr.bool (Literal.same_value (LList ll) (LList lr))
     | BinOp (EList le, Equal, Lit (LList ll))
     | BinOp (Lit (LList ll), Equal, EList le) ->
         if List.length ll <> List.length le then Expr.false_
         else if ll = [] then Expr.true_
         else
-          List.map2 (fun x y -> Expr.Infix.( == ) x (Lit y)) le ll
+          List.map2 (fun x y -> Expr.BinOp (x, ValueEqual, Lit y)) le ll
           |> Expr.conjunct
     (* Z3 edge case: A list can't contain itself *)
     | BinOp (EList [ x ], Equal, y) when Expr.equal x y -> Expr.false_
@@ -1502,7 +1552,9 @@ let rec reduce_lexpr_loop
     | BinOp (EList ll, Equal, EList lr) ->
         if List.length ll <> List.length lr then Expr.(false_)
         else if ll = [] then Expr.(true_)
-        else List.map2 Expr.Infix.( == ) ll lr |> Expr.conjunct
+        else
+          List.map2 (fun x y -> Expr.BinOp (x, ValueEqual, y)) ll lr
+          |> Expr.conjunct
     (* x = l1 ++ ... ++ ln when x = li and there is a non empty list => false *)
     | BinOp (NOp (LstCat, les), Equal, (LVar _ as x))
       when List.mem x les
@@ -1683,14 +1735,19 @@ let rec reduce_lexpr_loop
           ( BinOp (sl, Equal, Lit (String "")),
             And,
             BinOp (sr, Equal, Lit (String "")) )
-    (* by injectivity *)
+    (* Only a canonical formatter output can be inverted. Parsing alone also
+       accepts strings such as "01", "+1" and "-0", which formatting never emits. *)
     | BinOp (UnOp (ToStringOp, le1), Equal, Lit (String s))
     | BinOp (Lit (String s), Equal, UnOp (ToStringOp, le1)) -> (
         match s with
         | "" -> Expr.false_
         | "Infinity" | "-Infinity" | "NaN" -> le
         | _ -> (
-            try Expr.BinOp (le1, Equal, Lit (Num (Float.of_string s)))
+            try
+              let value = Float.of_string s in
+              if Arith_utils.float_to_string_inner value = s then
+                Expr.BinOp (le1, Equal, Lit (Num value))
+              else Expr.false_
             with _ -> Expr.false_))
     (* BinOps: Equalities (Empty?) *)
     | BinOp (Lit Empty, Equal, e) | BinOp (e, Equal, Lit Empty) -> (
@@ -1725,7 +1782,7 @@ let rec reduce_lexpr_loop
     | BinOp (ConstructorApp (ln, lles), Equal, ConstructorApp (rn, rles)) ->
         if ln = rn && List.length lles = List.length rles then
           Expr.conjunct
-            (List.map2 (fun le re -> Expr.BinOp (le, Equal, re)) lles rles)
+            (List.map2 (fun le re -> Expr.BinOp (le, ValueEqual, re)) lles rles)
         else Expr.false_
     | BinOp (ConstructorApp _, Equal, rle) as le -> (
         match rle with
@@ -1933,8 +1990,8 @@ let rec reduce_lexpr_loop
             (* Nested equalities *)
             | Lit (Bool b), (BinOp (_, Equal, _) as e)
             | (BinOp (_, Equal, _) as e), Lit (Bool b)
-            | Lit (Bool b), UnOp (Not, (BinOp (_, Equal, _) as e))
-            | UnOp (Not, (BinOp (_, Equal, _) as e)), Lit (Bool b) ->
+            | Lit (Bool b), (UnOp (Not, BinOp (_, Equal, _)) as e)
+            | (UnOp (Not, BinOp (_, Equal, _)) as e), Lit (Bool b) ->
                 if b then e else UnOp (Not, e)
             (* For two non-LVar lists l1 = h1::tl1, l2 = h2::tl2
                l1 = l2 <=> h1 = h2 /\ tl1 = tl2
@@ -1952,7 +2009,10 @@ let rec reduce_lexpr_loop
                 in
                 match (htl1, htl2, flel, fler) with
                 | Some (hl1, tl1), Some (hl2, tl2), _, _ ->
-                    BinOp (BinOp (hl1, Equal, hl2), And, BinOp (tl1, Equal, tl2))
+                    BinOp
+                      ( BinOp (hl1, ValueEqual, hl2),
+                        And,
+                        BinOp (tl1, Equal, tl2) )
                 | None, Some _, (Lit (LList _) | EList _), _ -> Expr.false_
                 | Some _, None, _, (Lit (LList _) | EList _) -> Expr.false_
                 | _ -> def)
@@ -2090,7 +2150,7 @@ let rec reduce_lexpr_loop
         | SetSub when lexpr_is_bool gamma def -> (
             match (flel, fler) with
             | ESet [], _ -> Lit (Bool true)
-            | _, ESet [] -> Lit (Bool false)
+            | _, ESet [] -> BinOp (flel, Equal, ESet [])
             | ESet left, ESet right
               when Expr.all_literals left && Expr.all_literals right ->
                 Lit
@@ -2633,6 +2693,7 @@ let clean_double_equalities (a : Asrt.t) : Asrt.t =
   in
   let is_bool_binop = function
     | BinOp.Equal
+    | ValueEqual
     | ILessThan
     | ILessThanEqual
     | FLessThan
@@ -2705,7 +2766,7 @@ let reduce_assertion
         a' equalities
     in
     let a' = reduce_assertion_loop matching pfs gamma a' in
-    if a' <> a && not (a' == a) then loop a' else a'
+    if Asrt.equal a' a then a' else loop a'
   in
 
   loop a

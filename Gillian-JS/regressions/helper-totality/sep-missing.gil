@@ -1,0 +1,9 @@
+spec answer(a)
+[[ (a v== #a) * <Cell>(#a, "x"; #value) * <Cell>(#a, "kept"; 7i) ]]
+[[ (ret v== #value) * <Cell>(#a, "x"; #value) * <Cell>(#a, "kept"; 7i) ]] normal
+proc answer(a) {
+  sep_assert (<Cell>(a, "missing"; #captured)) [bind: #captured];
+  assert (#captured v== #value);
+  cell := [GetCell](a, "x");
+  ret := l-nth(cell, 2i); return
+};

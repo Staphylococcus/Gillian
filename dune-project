@@ -36,6 +36,7 @@
    (>= 1.1.1))
   sedap
   (dtoa (= 0.3.3))
+  wtf8
   (fmt
    (>= 0.8.8))
   (linol-lwt

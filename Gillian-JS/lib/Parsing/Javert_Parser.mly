@@ -113,6 +113,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token SETTOLIST
 %token LSTLEN
 %token STRLEN
+%token STRBYTES
 %token NUMTOINT
 %token INTTONUM
 (* Expression keywords *)
@@ -161,6 +162,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token LTRUE
 %token LFALSE
 %token LEQUAL
+%token VALUEEQUAL
 %token LLESSTHAN
 %token LLESSTHANEQUAL
 %token LLESSTHANSTRING
@@ -238,7 +240,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %left LAND
 %left separating_conjunction
 %right LNOT
-%nonassoc LEQUAL LLESSTHAN LLESSTHANEQUAL LLESSTHANSTRING LARROW
+%nonassoc LEQUAL VALUEEQUAL LLESSTHAN LLESSTHANEQUAL LLESSTHANSTRING LARROW
 %nonassoc SETMEM SETSUB LSETMEM LSETSUB
 (* Program operators have higher precedence.*)
 (* Based on JavaScript:
@@ -367,6 +369,7 @@ unop_target:
   | LSTLEN      { UnOp.LstLen }
   | LSTREV      { UnOp.LstRev }
   | STRLEN      { UnOp.StrLen }
+  | STRBYTES    { UnOp.StrToBytes }
   | SETTOLIST   { UnOp.SetToList }
   | INTTONUM    { UnOp.IntToNum }
   | NUMTOINT    { UnOp.NumToInt }
@@ -455,6 +458,8 @@ pure_assertion_target:
   | ISINT; expr=expr_target { Expr.UnOp (IsInt, expr) }
   | LTRUE { Expr.Lit (Bool true) }
   | LFALSE { Expr.Lit (Bool false) }
+  | left_expr=expr_target; VALUEEQUAL; right_expr=expr_target
+    { Expr.BinOp (left_expr, ValueEqual, right_expr) }
   | left_expr=expr_target; LEQUAL; right_expr=expr_target
     { Expr.BinOp (left_expr, Equal, right_expr) }
   | left_expr=expr_target; LLESSTHAN; right_expr=expr_target
@@ -552,8 +557,8 @@ logic_cmd_target:
     { LCmd.SL (Unfold (name, les, unfold_info, true)) }
   | UNFOLDALL; name = VAR
     { LCmd.SL (GUnfold name) }
-  | INVARIANT; LBRACE; a = assertion_target; RBRACE; binders = option(binders_target)
-    { LCmd.SL (Invariant (a, Option.value ~default:[ ] binders)) }
+  | INVARIANT; LBRACE; a = assertion_target; RBRACE; binders = option(binders_target); rank = option(jsil_lemma_variant_target)
+    { LCmd.SL (Invariant (a, Option.value ~default:[ ] binders, rank)) }
   | SEPASSERT; LBRACE; a = assertion_target; RBRACE; binders = option(binders_target)
     { LCmd.SL (SepAssert (a, Option.value ~default:[ ] binders)) }
   | APPLY; lemma_name = VAR; LBRACE; params = separated_list(COMMA, expr_target); RBRACE; binders = option(binders_target)
@@ -1027,6 +1032,8 @@ js_pure_assertion_target:
   | LFALSE
     { JSAsrt.False }
 (* E == E *)
+  | left_expr=js_lexpr_target; VALUEEQUAL; right_expr=js_lexpr_target
+    { JSAsrt.SameValue (left_expr, right_expr) }
   | left_expr=js_lexpr_target; LEQUAL; right_expr=js_lexpr_target
     { JSAsrt.Eq (left_expr, right_expr) }
 (* E <# E *)
@@ -1228,8 +1235,8 @@ js_logic_cmd_target:
     { JSLCmd.Assume a }
 
 (* invariant a *)
-  | INVARIANT; a = js_assertion_target; binders = option(binders_target);
-    { JSLCmd.Invariant (a, Option.value ~default:[ ] binders)  }
+  | INVARIANT; a = js_assertion_target; binders = option(binders_target); rank = option(jsil_lemma_variant_target)
+    { JSLCmd.Invariant (a, Option.value ~default:[ ] binders, rank) }
 
 (* apply lemma_name(args) *)
    | APPLY; lemma_name = VAR; LBRACE; params = separated_list(COMMA, js_lexpr_target); RBRACE

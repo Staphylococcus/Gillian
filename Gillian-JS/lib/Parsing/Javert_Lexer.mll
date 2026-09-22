@@ -232,6 +232,7 @@ rule read = parse
   | "l-rev"              { Javert_Parser.LSTREV }
   | "l-sub"              { Javert_Parser.LSTSUB }
   | "s-len"              { Javert_Parser.STRLEN }
+  | "s-bytes"            { Javert_Parser.STRBYTES }
 (* Expression keywords *)
   | "l-nth"              { Javert_Parser.LSTNTH }
   | "s-nth"              { Javert_Parser.STRNTH }
@@ -243,6 +244,7 @@ rule read = parse
   | "/\\"                { Javert_Parser.LAND }
   | "\\/"                { Javert_Parser.LOR }
   | "!"                  { Javert_Parser.LNOT }
+  | "v=="                { Javert_Parser.VALUEEQUAL }
   | "=="                 { Javert_Parser.LEQUAL }
   | "<#"                 { Javert_Parser.LLESSTHAN       }
   | "<=#"                { Javert_Parser.LLESSTHANEQUAL  }

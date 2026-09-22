@@ -581,7 +581,7 @@ let rec trans_lcmd ~ctx ~pvar_map lcmd =
       `Normal (make_assert ~bindings:vs f @ [ If (ge, gcl1, gcl2) ])
   | Invariant { bindings; assertion } ->
       let asrt = trans_asrt ~ctx assertion in
-      `Invariant (SLCmd.Invariant (asrt, bindings))
+      `Invariant (SLCmd.Invariant (asrt, bindings, None))
   | SymbExec -> `Normal [ SL SymbExec ]
 
 let trans_asrt_annot da =

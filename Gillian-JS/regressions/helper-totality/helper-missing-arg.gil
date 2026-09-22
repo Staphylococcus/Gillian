@@ -1,0 +1,4 @@
+spec answer()
+[[ emp ]] [[ (ret == undefined) ]] normal
+proc answer() { ret := "helper"(); return };
+proc helper(x) { ret := x; return };

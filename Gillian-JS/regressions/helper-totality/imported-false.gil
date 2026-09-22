@@ -1,0 +1,4 @@
+import "imported.gil";
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() { ret := "helper"(); return };

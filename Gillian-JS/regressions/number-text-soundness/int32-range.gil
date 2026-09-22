@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Num) ]]
+[[ (-2147483648.0 <=# ret) * (ret <=# 2147483647.0) * (is-int ret) ]] normal
+proc answer(x) { ret := num_to_int32(x); return };

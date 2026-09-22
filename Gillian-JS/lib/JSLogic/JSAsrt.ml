@@ -9,6 +9,7 @@ type pt =
   | True
   | False
   | Eq of JSExpr.t * JSExpr.t
+  | SameValue of JSExpr.t * JSExpr.t
   | Less of JSExpr.t * JSExpr.t
   | LessEq of JSExpr.t * JSExpr.t
   | StrLess of JSExpr.t * JSExpr.t
@@ -50,6 +51,7 @@ let rec js2jsil_pure (scope_le : Expr.t option) (a : pt) : Expr.t =
   | True -> Expr.true_
   | False -> Expr.false_
   | Eq (le1, le2) -> BinOp (fe le1, Equal, fe le2)
+  | SameValue (le1, le2) -> BinOp (fe le1, ValueEqual, fe le2)
   | Less (le1, le2) -> BinOp (fe le1, FLessThan, fe le2)
   | LessEq (le1, le2) -> BinOp (fe le1, FLessThanEqual, fe le2)
   | StrLess (le1, le2) -> BinOp (fe le1, StrLess, fe le2)

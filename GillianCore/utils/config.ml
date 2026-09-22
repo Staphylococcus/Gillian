@@ -107,6 +107,7 @@ module Verification = struct
   type things_to_verify = Specific | All | ProcsOnly | LemmasOnly
 
   let total = ref false
+  let closed_entry = ref false
   let procs_to_verify = ref ([] : string list)
   let lemmas_to_verify = ref ([] : string list)
   let things_to_verify = ref All

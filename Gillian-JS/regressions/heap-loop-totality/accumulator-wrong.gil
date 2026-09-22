@@ -1,0 +1,14 @@
+spec count(obj)
+[[ (obj == #obj) * <Cell>(#obj, "n"; #initial) * <Cell>(#obj, "acc"; 0i) * types(#initial : Int) * (0i i<= #initial) ]]
+[[ <Cell>(#obj, "n"; 0i) * <Cell>(#obj, "acc"; #initial) * (ret == 0i) ]] normal
+proc count(obj) {
+head: invariant (<Cell>(obj, "n"; #value) * <Cell>(obj, "acc"; #acc) * (#value i+ #acc == #initial) * types(#value : Int, #acc : Int) * (0i i<= #value)) [bind: #value, #acc] variant(#value);
+  cell := [GetCell](obj, "n");
+  n := l-nth(cell, 2i);
+  goto [n i> 0i] step done;
+step: c := [GetCell](obj, "acc");
+  unused := [SetCell](obj, "acc", l-nth(c, 2i) i+ 1i);
+  unused := [SetCell](obj, "n", n i- 1i); goto head;
+done: c := [GetCell](obj, "acc");
+  ret := l-nth(c, 2i); return
+};

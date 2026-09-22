@@ -1,0 +1,8 @@
+pure nounfold pred Claimed(n : Int) : emp;
+facts: (n == 1i);
+lemma Claim(n)
+[[ types(#n : Int) ]] [[ Claimed(#n) ]]
+[* fold Claimed(#n) *]
+spec answer(n)
+[[ (n == #n) * types(#n : Int) ]] [[ (ret == 1i) ]] normal
+proc answer(n) { apply Claim(n); ret := n; return };

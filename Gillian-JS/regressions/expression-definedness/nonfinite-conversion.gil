@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Num)  ]]
+[[ (ret == 1i) ]] normal
+proc answer(x) { unused := as_int(x); ret := 1i; return };

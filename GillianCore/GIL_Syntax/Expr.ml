@@ -208,10 +208,6 @@ module Infix = struct
   let ( / ) a b =
     match (a, b) with
     | x, Lit (Int z) when Z.equal z Z.one -> x
-    | x, BinOp (a, ITimes, b) when equal x a -> b
-    | x, BinOp (a, ITimes, b) when equal x b -> a
-    | BinOp (a, ITimes, b), x when equal x a -> b
-    | BinOp (a, ITimes, b), x when equal x b -> a
     | Lit (Int x), Lit (Int y) -> Lit (Int (Z.div x y))
     | _ -> BinOp (a, IDiv, b)
 
@@ -237,7 +233,7 @@ module Infix = struct
   let ( == ) a b =
     match (a, b) with
     | Lit (Num a), Lit (Num b) -> bool (Stdlib.( = ) a b)
-    | Lit la, Lit lb -> bool (Literal.equal la lb)
+    | Lit la, Lit lb -> bool (Literal.same_value la lb)
     | _ -> BinOp (a, Equal, b)
 
   let lt = Stdlib.( < )
@@ -573,6 +569,7 @@ let rec is_boolean_expr : t -> bool = function
   | BinOp (_, ILessThanEqual, _)
   | BinOp (_, SetMem, _)
   | BinOp (_, Equal, _)
+  | BinOp (_, ValueEqual, _)
   | BinOp (_, StrLess, _)
   | BinOp (_, SetSub, _)
   | UnOp (IsInt, _) -> true

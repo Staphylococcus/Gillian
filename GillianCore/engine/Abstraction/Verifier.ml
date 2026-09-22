@@ -414,6 +414,12 @@ struct
       (preds : MP.preds_tbl_t)
       (pred_ins : (string, int list) Hashtbl.t)
       (lemma : Lemma.t) : t list * Lemma.t =
+    if
+      !Config.Verification.total
+      && (Option.is_none lemma.lemma_proof || lemma.lemma_specs = [])
+    then
+      Totality.unsupported
+        (lemma.lemma_name ^ " requires a nonempty checked lemma proof.");
     let tests_and_specs =
       List.concat_map
         (fun Lemma.{ lemma_hyp; lemma_concs; lemma_spec_variant = _ } ->
@@ -628,7 +634,10 @@ struct
 
   let analyse_lemma_results (test : t) (rets : SPState.t list) :
       unit Gillian_result.t =
-    if rets = [] then (
+    if rets = [] && !Config.Verification.total then
+      Gillian_result.operation_error
+        "Incomplete total proof: lemma produced no outcomes"
+    else if rets = [] then (
       print_vanish ();
       Ok ())
     else
@@ -963,11 +972,46 @@ struct
       (prog : prog_t)
       (pnames_to_verify : SS.t)
       (lnames_to_verify : SS.t) : unit Gillian_result.t =
+    if !Config.Verification.closed_entry then (
+      if
+        (not !Config.Verification.total)
+        || SS.cardinal pnames_to_verify <> 1
+        || not (SS.is_empty lnames_to_verify)
+      then
+        Totality.unsupported
+          "closed entry requires --total and exactly one procedure, no lemmas.";
+      let proc = Prog.get_proc_exn prog (SS.choose pnames_to_verify) in
+      let spec = Totality.spec proc in
+      (* Concrete fresh names are an implementation detail, represented by
+         abstract fresh identities in this execution. Neither the program nor
+         its postcondition may guess the concrete allocator's next name. *)
+      let check_names names =
+        if SS.exists Names.is_lloc_name names then
+          Totality.unsupported
+            "closed entry cannot name a generated concrete location."
+      in
+      List.iter
+        (fun (s : Spec.st) ->
+          List.iter (fun (a, _) -> check_names (Asrt.clocs a)) s.ss_posts)
+        spec.spec_sspecs;
+      Hashtbl.iter
+        (fun _ (pred : Pred.t) ->
+          List.iter
+            (fun (_, a) -> check_names (Asrt.clocs a))
+            pred.pred_definitions;
+          List.iter (fun e -> check_names (Expr.clocs e)) pred.pred_facts;
+          Option.iter (fun a -> check_names (Asrt.clocs a)) pred.pred_guard)
+        prog.preds;
+      match (proc.proc_params, spec.spec_sspecs) with
+      | [], [ { Spec.ss_pre = ([ Asrt.Emp ], _); ss_flag = Flag.Normal; _ } ] -> ()
+      | _ ->
+          Totality.unsupported
+            "closed entry requires no parameters and one normal emp specification.");
     let total_order =
       if !Config.Verification.total then
         Some
-          (Totality.order_procs ~is_action_total:SState.is_action_total prog
-             pnames_to_verify)
+          (Totality.order_procs ~is_action_total:SState.is_action_total
+             ~set_loop_info:PC.Annot.set_loop_info prog pnames_to_verify)
       else None
     in
     let prog', tests', tests =
@@ -980,7 +1024,11 @@ struct
       let lemma_names = ProofDependencies.order_lemmas prog lnames_to_verify in
       let groups =
         List.map
-          (fun name -> List.filter (fun test -> test.name = name) tests')
+          (fun name ->
+            let cases = List.filter (fun test -> test.name = name) tests' in
+            if !Config.Verification.total && cases = [] then
+              Totality.unsupported (name ^ " has no checked lemma proof cases.");
+            cases)
           lemma_names
         @
         match total_order with
@@ -1015,7 +1063,9 @@ struct
                     MP.proved_lemmas = SS.add name prog.proved_lemmas;
                   }
               | { name; flag = Some _; _ } :: _
-                when !Config.Verification.total && Result.is_ok res ->
+                when !Config.Verification.total
+                     && not !Config.Verification.closed_entry
+                     && Result.is_ok res ->
                   {
                     prog with
                     MP.proved_total_procs = SS.add name prog.proved_total_procs;
@@ -1032,7 +1082,9 @@ struct
       Result.is_ok result && check_previously_verified prev_results cur_verified
     in
     let msg : string =
-      if success && !Config.Verification.total then
+      if success && !Config.Verification.closed_entry then
+        "Closed entry postcondition succeeded:"
+      else if success && !Config.Verification.total then
         "All total procedure specs succeeded:"
       else if success then "All specs succeeded:"
       else "There were failures:"
@@ -1165,7 +1217,8 @@ struct
       let r = verify_procs ~init_data prog procs_to_verify lemmas_to_verify in
       let call_graph = SAInterpreter.call_graph in
       let () =
-        write_verif_results cur_source_files call_graph ~diff:"" global_results
+        if not !Config.Verification.closed_entry then
+          write_verif_results cur_source_files call_graph ~diff:"" global_results
       in
       r
 

@@ -1,0 +1,6 @@
+macro Check(): apply L()
+lemma L()
+[[ emp ]] [[ (false) ]]
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() { Check(); ret := 42i; return };

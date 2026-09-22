@@ -57,6 +57,7 @@ and literal =
   | Nono
 
 and binop =
+  | ValueEqual  (** Value identity, preserving signed zero and admitting NaN. *)
   | Equal
   | ILessThan
   | ILessThanEqual
@@ -137,6 +138,7 @@ and unop =
   | LstRev
   | SetToList
   | StrLen
+  | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
   | NumToInt
   | IntToNum
   | IsInt
@@ -178,7 +180,7 @@ and slcmd =
   | GUnfold of string
   | ApplyLem of string * expr list * string list
   | SepAssert of assertion * string list
-  | Invariant of assertion * string list
+  | Invariant of assertion * string list * expr option
   | Consume of assertion * string list
   | Produce of assertion
   | SymbExec

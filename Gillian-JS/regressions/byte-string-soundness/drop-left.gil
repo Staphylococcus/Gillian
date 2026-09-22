@@ -1,0 +1,4 @@
+spec join(a,b)
+[[ (a == #a) * (b == #b) * types(#a : Str, #b : Str) ]]
+[[ (ret == (#a ++ #b)) ]] normal
+proc join(a,b) { ret := b; return };

@@ -16,10 +16,13 @@ module Symbolic = struct
     | _ -> false
 
   let execute_action name heap pc args =
-    let run () = execute_action name heap pc args in
-    if !Config.Verification.total then
-      Legacy_symbolic.check_total_action name heap pc.pfs pc.gamma args;
-    run ()
+    let run checked_args = execute_action name heap pc checked_args in
+    let args =
+      if !Config.Verification.total then
+        Legacy_symbolic.prepare_total_action name heap pc.pfs pc.gamma args
+      else args
+    in
+    run args
 end
 
 module Concrete = JSILCMemory.M

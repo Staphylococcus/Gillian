@@ -1,0 +1,5 @@
+nounfold pred Slot(a:Obj, value:Num): <Cell>(a, "x"; value);
+spec answer(a)
+[[ (a == #a) * Slot(#a, nan) ]]
+[[ Slot(#a, nan) * (ret == true) ]] normal
+proc answer(a) { ret := true; return };

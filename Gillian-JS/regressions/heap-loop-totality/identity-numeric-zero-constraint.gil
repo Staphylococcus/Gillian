@@ -1,0 +1,4 @@
+spec answer(a)
+[[ (a == #a) * types(#v : Num) * (#v == 0.0) * <Cell>(#a, "x"; #v) ]]
+[[ <Cell>(#a, "x"; 0.0) * (ret == true) ]] normal
+proc answer(a) { ret := true; return };

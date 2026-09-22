@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x)  ]]
+[[ (ret == 1i) ]] normal
+proc answer(x) { unused := s-bytes(x); ret := 1i; return };

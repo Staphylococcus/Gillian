@@ -1,0 +1,11 @@
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() { ret := "helper"(2i); return };
+proc helper(n) {
+ goto [n == 0i] done init;
+init: i := 2i;
+head: invariant (types(i : Int) * (0i i<= i)) variant(i);
+ goto [i i> 0i] step done;
+step: unused := "helper"(n i- 1i); i := i i- 1i; goto head;
+done: ret := 42i; return
+};

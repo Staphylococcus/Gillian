@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Num) * (#x == inf) ]]
+[[ (ret == 0i) ]] normal
+proc answer(x) { ret := as_int(x); return };

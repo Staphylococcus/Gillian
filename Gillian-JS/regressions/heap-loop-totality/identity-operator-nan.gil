@@ -1,0 +1,4 @@
+spec answer(a)
+[[ (a == #a) * emp ]]
+[[ emp * (ret == true) ]] normal
+proc answer(a) { ret := nan v== nan; return };

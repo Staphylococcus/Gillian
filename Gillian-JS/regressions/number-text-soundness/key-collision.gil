@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Num) ]]
+[[ (ret == true) * (-i-(-{num_to_string(#x)}-, -{"0"}-) == -{}-) ]] normal
+proc answer(x) { ret := true; return };

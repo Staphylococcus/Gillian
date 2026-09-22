@@ -103,7 +103,8 @@ let jsil2gil_slcmd (slcmd : SLCmd.t) : GSLCmd.t =
   | GUnfold pn -> GUnfold pn
   | ApplyLem (x, es, xs) -> ApplyLem (x, List.map jsil2gil_expr es, xs)
   | SepAssert (a, xs) -> SepAssert (jsil2gil_asrt a, xs)
-  | Invariant (a, xs) -> Invariant (jsil2gil_asrt a, xs)
+  | Invariant (a, xs, rank) ->
+      Invariant (jsil2gil_asrt a, xs, Option.map jsil2gil_expr rank)
 
 let rec jsil2gil_lcmd (lcmd : LCmd.t) : GLCmd.t =
   let f = jsil2gil_lcmd in

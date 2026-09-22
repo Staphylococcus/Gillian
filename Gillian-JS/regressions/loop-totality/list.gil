@@ -1,0 +1,11 @@
+spec walk(xs)
+[[ (xs == #xs) * types(#xs : List) ]]
+[[ (ret == 0i) ]] normal
+proc walk(xs) {
+head: invariant (types(xs : List)) [bind: xs] variant(l-len xs);
+  goto [xs == {{ }}] done step;
+step: xs := cdr xs;
+  goto head;
+done: ret := l-len xs;
+  return
+};

@@ -1,0 +1,6 @@
+lemma Identity(n) variant(#n)
+[[ types(#n : Int) * (0i i<= #n) ]] [[ (0i i<= #n) ]]
+[* if (#n i> 0i) then { apply Identity(#n) } *]
+spec answer(n)
+[[ (n == #n) * types(#n : Int) * (0i i<= #n) ]] [[ (ret == #n) ]] normal
+proc answer(n) { apply Identity(n); ret := n; return };

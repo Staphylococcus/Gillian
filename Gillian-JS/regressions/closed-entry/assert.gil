@@ -1,0 +1,8 @@
+spec main()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc main() {
+ fresh := [Alloc]($lclosed, null);
+ assert(true);
+ ret := 42i;
+ return
+};

@@ -1,0 +1,10 @@
+spec count(len)
+[[ (len == #len) * types(#len : Num) * (is_int(#len)) * (0.0 <= #len) * (#len <= 4294967295.0) ]]
+[[ (ret <= #len) * (#len <= ret) ]] normal
+proc count(len) {
+  i := 0.0;
+head: invariant ((0.0 <= i) * (i <= len) * (len <= 4294967295.0) * (is_int(i)) * (is_int(len)) * types(i : Num, len : Num)) [bind: i] variant(4294967295.0 - i);
+  goto [i < len] step done;
+step: i := i + 1.0; goto head;
+done: ret := i; return
+};

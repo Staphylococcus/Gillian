@@ -19,6 +19,8 @@ module Make (State : SState.S) = struct
 
   type action_ret = (t * Expr.t list, err_t) result list
 
+  let is_action_total = State.is_action_total
+
   let make ~(state : State.t) ~(init_data : State.init_data) : t =
     { state; af_state = State.init init_data }
 
@@ -149,7 +151,7 @@ module Make (State : SState.S) = struct
     | Ok state' -> Ok { bi_state with state = state' }
     | Error err -> Error (lift_error bi_state err)
 
-  let match_invariant _ _ _ _ _ =
+  let match_invariant _ _ _ _ _ ~measure:_ =
     raise (Failure "ERROR: match_invariant called for bi-abductive execution")
 
   let frame_on _ _ _ =

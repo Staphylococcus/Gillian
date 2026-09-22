@@ -1,0 +1,4 @@
+spec answer(x, y)
+[[ (x v== #x) * (y v== #y) * types(#x : Num, #y : Num) * (!(#x == #x)) * (!(#y == #y)) ]]
+[[ (ret == false) ]] normal
+proc answer(x, y) { ret := (num_to_string(x) == num_to_string(y)); return };

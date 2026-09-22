@@ -1,0 +1,5 @@
+import "Internals.jsil";
+spec answer(x)
+[[ (x == #x) * types(#x : Num) * (is_int(#x)) * (0.0 <= #x) * (#x < 4294967295.0) ]]
+[[ (ret == #x) ]] normal
+proc answer(x) { ret := "i__toLength"(x); return };

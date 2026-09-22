@@ -638,7 +638,8 @@ module Make (State : SState.S) :
         let rargs = List.map (subst_in_expr subst) rargs in
         Wands.extend wands Wands.{ lhs = (lname, largs); rhs = (rname, rargs) };
         Res_list.return astate
-    | Pure (BinOp (PVar x, Equal, le)) | Pure (BinOp (le, Equal, PVar x)) -> (
+    | Pure (BinOp (PVar x, ((Equal | ValueEqual) as op), le))
+    | Pure (BinOp (le, ((Equal | ValueEqual) as op), PVar x)) -> (
         L.verbose (fun fmt -> fmt "Pure assertion.");
         match SVal.SESubst.get subst (PVar x) with
         | Some v_x ->
@@ -648,7 +649,7 @@ module Make (State : SState.S) :
                 (fun state -> [ Ok { state; preds; wands; pred_defs } ])
                 (State.assume_a ~matching:true
                    ~production:!Config.delay_entailment state
-                   [ BinOp (v_x, Equal, v_le) ])
+                   [ BinOp (v_x, op, v_le) ])
             in
             Option.value
               ~default:
@@ -659,7 +660,24 @@ module Make (State : SState.S) :
         | None ->
             if x = Names.return_variable then
               let v = subst_in_expr subst le in
-              Res_list.return (update_store astate x v)
+              let exact_binding =
+                op = ValueEqual
+                ||
+                match State.get_type state v with
+                | Some NumberType | None -> false
+                | _ -> true
+              in
+              if exact_binding then Res_list.return (update_store astate x v)
+              else
+                let value = Expr.LVar (LVar.alloc ()) in
+                let updated = update_store astate x value in
+                match
+                  State.assume_a ~matching:true
+                    ~production:!Config.delay_entailment updated.state
+                    [ BinOp (value, Equal, v) ]
+                with
+                | Some state -> Res_list.return { updated with state }
+                | None -> []
             else
               other_state_err
                 ("Produce Simple Assertion: Trying to produce un-substituted \
@@ -810,6 +828,12 @@ module Make (State : SState.S) :
       (pname : string)
       (args : Expr.t list) : (SVal.SESubst.t * t, err_t) Res_list.t =
     let pred = MP.get_pred_def astate.pred_defs pname in
+    if
+      !Config.Verification.total
+      && (pred.pred.pred_abstract || Option.is_some pred.pred.pred_guard)
+    then
+      Totality.unsupported
+        (pname ^ " uses abstract or guarded predicate unfolding.");
     let params = List.map (fun (x, _) -> Expr.PVar x) pred.pred.pred_params in
 
     let open Res_list.Syntax in
@@ -875,9 +899,10 @@ module Make (State : SState.S) :
           let first_results = produce astate subst_i first_def in
           let* result = first_results @ rest_results in
           match result with
+          | Error err when !Config.Verification.total -> [ Error err ]
           | Error err ->
-              (* If a production fails, it means this branch is not
-                 possible, we log and ignore. *)
+              (* Legacy partial verification treats production errors as
+                 infeasible. Total mode above retains the failed obligation. *)
               L.verbose (fun m -> m "Warning: %a" pp_err_t err);
               Res_list.vanish
           | Ok state ->
@@ -892,9 +917,12 @@ module Make (State : SState.S) :
           params
           Fmt.(
             iter_bindings ~sep:(any "@\n ") List.iteri (fun f' (i, res) ->
-                let subst, astate = Result.get_ok res in
-                Fmt.pf f' "Result %d@\nSTATE:@\n  @[%a@]@\nSUBST:@[<h>%a@]@\n" i
-                  pp_astate astate SVal.SESubst.pp subst))
+                match res with
+                | Error err -> Fmt.pf f' "Result %d: %a" i pp_err_t err
+                | Ok (subst, astate) ->
+                    Fmt.pf f'
+                      "Result %d@\nSTATE:@\n  @[%a@]@\nSUBST:@[<h>%a@]@\n" i
+                      pp_astate astate SVal.SESubst.pp subst))
           rets);
     rets
 
@@ -1161,7 +1189,7 @@ module Make (State : SState.S) :
               match ac with
               | Abort _ | Vanish -> ac
               | Success state ->
-                  let pf = Expr.BinOp (vd, Equal, od) in
+                  let pf = Expr.BinOp (vd, ValueEqual, od) in
                   cons_pure state pf)
             (Success state) vos eos
         with Invalid_argument _ ->
@@ -1341,7 +1369,9 @@ module Make (State : SState.S) :
                         Ok discharges
                     | Some out' when Expr.equal out out' -> Ok discharges
                     | Some out' ->
-                        let new_discharge = Expr.BinOp (out, Equal, out') in
+                        let new_discharge =
+                          Expr.BinOp (out, ValueEqual, out')
+                        in
                         Ok (new_discharge :: discharges))
                   (Ok []) outs
               in
@@ -1397,6 +1427,10 @@ module Make (State : SState.S) :
 
               match corrections with
               | [] -> Res_list.return astate
+              | _
+                when !Config.Verification.total
+                     && State.assert_a state corrections ->
+                  Res_list.return astate
               | _ ->
                   if !Config.under_approximation then
                     (* In under-approx we try to assume the types hold*)
@@ -1426,37 +1460,40 @@ module Make (State : SState.S) :
     match_assertion' ~no_auto_fold astate subst step |> fst
 
   and match_assertion_safely ?(no_auto_fold = false) state subst step =
-    try match_assertion' ~no_auto_fold state subst step
-    with err ->
-      let () =
-        L.verbose (fun m ->
-            m
-              "WARNING: UNCAUGHT EXCEPTION IN MATCH ASSERTION: %s@\n\
-               Here's the backtrace: %s"
-              (Printexc.to_string err)
-              (Printexc.get_backtrace ()))
-      in
-      let res_list =
-        if !Config.under_approximation then
-          let () =
-            L.verbose (fun m -> m "UX mode: vanishing despite exception!")
-          in
-          Res_list.vanish
-        else
-          match fst step with
-          | Pure pf ->
-              let { state = bstate; _ } = state in
-              let vs = State.unfolding_vals bstate [ pf ] in
-              Res_list.error_with (StateErr.EAsrt (vs, pf))
-          | asrt ->
-              let other_error =
-                StateErr.EOther
-                  (Fmt.str "Uncaught exception while matching assertions %a"
-                     Asrt.pp_atom asrt)
-              in
-              Res_list.error_with other_error
-      in
-      (res_list, None)
+    try match_assertion' ~no_auto_fold state subst step with
+    | ( Gillian_result.Exc.Gillian_error _
+      | Gillian_result.Exc.Gillian_internal_error _ ) as err
+      when !Config.Verification.total -> raise err
+    | err ->
+        let () =
+          L.verbose (fun m ->
+              m
+                "WARNING: UNCAUGHT EXCEPTION IN MATCH ASSERTION: %s@\n\
+                 Here's the backtrace: %s"
+                (Printexc.to_string err)
+                (Printexc.get_backtrace ()))
+        in
+        let res_list =
+          if !Config.under_approximation then
+            let () =
+              L.verbose (fun m -> m "UX mode: vanishing despite exception!")
+            in
+            Res_list.vanish
+          else
+            match fst step with
+            | Pure pf ->
+                let { state = bstate; _ } = state in
+                let vs = State.unfolding_vals bstate [ pf ] in
+                Res_list.error_with (StateErr.EAsrt (vs, pf))
+            | asrt ->
+                let other_error =
+                  StateErr.EOther
+                    (Fmt.str "Uncaught exception while matching assertions %a"
+                       Asrt.pp_atom asrt)
+                in
+                Res_list.error_with other_error
+        in
+        (res_list, None)
 
   and match_mp' (s_states : search_state') : internal_mp_u_res =
     let s_states, errs_so_far = s_states in
@@ -1678,6 +1715,12 @@ module Make (State : SState.S) :
       (pred : MP.pred)
       (args : Expr.t list) : (t, err_t) Res_list.t =
     let pred_name = pred.pred.pred_name in
+    if
+      !Config.Verification.total
+      && (pred.pred.pred_abstract || Option.is_some pred.pred.pred_guard)
+    then
+      Totality.unsupported
+        (pred_name ^ " uses abstract or guarded predicate folding.");
     L.verbose (fun fmt -> fmt "Folding predicate: %s\n" pred_name);
     if pred.pred.pred_abstract then
       Fmt.failwith "Impossible: Folding abstract predicate %s" pred_name;
@@ -1822,7 +1865,11 @@ module Make (State : SState.S) :
       (astate : t)
       (pname : string)
       (args : Expr.t list) : (t, err_t) Res_list.t =
-    if fuel = 0 then failwith "RECURSIVE UNFOLD: OUT OF FUEL"
+    if fuel = 0 then
+      if !Config.Verification.total then
+        Totality.unsupported
+          "recursive predicate unfolding exhausted its proof budget."
+      else failwith "RECURSIVE UNFOLD: OUT OF FUEL"
     else
       let open Res_list.Syntax in
       let** _, astate = unfold astate pname args in
@@ -2087,7 +2134,7 @@ module Make (State : SState.S) :
         (fun acc vd od ->
           let open Syntaxes.Result in
           let* acc = acc in
-          let equality = Expr.BinOp (vd, Equal, od) in
+          let equality = Expr.BinOp (vd, ValueEqual, od) in
           if
             State.assert_a state.lhs_state.state [ equality ]
             || State.assert_a state.current_state.state [ equality ]

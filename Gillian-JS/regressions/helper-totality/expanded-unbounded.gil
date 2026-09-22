@@ -1,0 +1,9 @@
+spec answer(n)
+[[ (n == #n) * types(#n : Int) * (0i i<= #n) ]]
+[[ (ret == 42i) ]] normal
+proc answer(n) { ret := "helper"(n); return };
+proc helper(n) {
+ goto [n == 0i] done step;
+step: ret := "helper"(n i- 1i); return;
+done: ret := 42i; return
+};

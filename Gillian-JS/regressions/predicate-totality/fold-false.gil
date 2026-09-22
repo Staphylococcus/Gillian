@@ -1,0 +1,4 @@
+pure nounfold pred One(n : Int) : (n == 1i);
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() { fold One(0i); ret := 42i; return };

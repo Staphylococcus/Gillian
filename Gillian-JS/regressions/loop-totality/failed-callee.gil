@@ -1,0 +1,15 @@
+spec count(n)
+[[ (n == #n) * types(#n : Int) * (0i i<= #n) ]]
+[[ (ret == 0i) ]] normal
+proc count(n) {
+head: invariant ((0i i<= n) * types(n : Int)) [bind: n] variant(n);
+  goto [n i> 0i] step done;
+step: n := "dec"(n);
+  goto head;
+done: ret := n;
+  return
+};
+spec dec(n)
+[[ (n == #n) * types(#n : Int) * (0i i< #n) ]]
+[[ (ret == #n i- 1i) ]] normal
+proc dec(n) { ret := n; return };

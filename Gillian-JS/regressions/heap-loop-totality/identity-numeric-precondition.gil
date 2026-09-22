@@ -1,0 +1,4 @@
+spec answer(n)
+[[ (n == 0.0) ]]
+[[ (ret == inf) ]] normal
+proc answer(n) { ret := 1.0 / n; return };

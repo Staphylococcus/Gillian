@@ -53,6 +53,7 @@ module Infer_types_to_gamma = struct
     | IntToNum -> tt = NumberType && f le IntType
     | NumToInt -> tt = IntType && f le NumberType
     | StrLen -> tt = NumberType && f le StringType
+    | StrToBytes -> tt = ListType && f le StringType
     | SetToList -> tt = ListType && f le SetType
 
   and infer_binop
@@ -66,7 +67,7 @@ module Infer_types_to_gamma = struct
     let f = f flag gamma new_gamma in
     let (rqt1 : Type.t option), (rqt2 : Type.t option), (rt : Type.t option) =
       match op with
-      | Equal -> (None, None, Some BooleanType)
+      | Equal | ValueEqual -> (None, None, Some BooleanType)
       | ILessThan | ILessThanEqual ->
           (Some IntType, Some IntType, Some BooleanType)
       | FLessThan | FLessThanEqual ->
@@ -285,7 +286,7 @@ let rec infer_types_expr gamma le : unit =
   | EList lle | ESet lle -> List.iter f lle
   | BinOp (le1, op, le2) -> (
       match op with
-      | Equal -> ()
+      | Equal | ValueEqual -> ()
       | And | Or | Impl ->
           e le1 BooleanType;
           e le2 BooleanType
@@ -406,7 +407,7 @@ module Type_lexpr = struct
         | Not | M_isNaN | IsInt -> BooleanType
         | ToStringOp -> StringType
         | Car | Cdr -> ListType
-        | LstRev | SetToList -> ListType
+        | LstRev | SetToList | StrToBytes -> ListType
         | IUnaryMinus | LstLen | NumToInt -> IntType
         | BitwiseNot
         | FUnaryMinus
@@ -448,6 +449,7 @@ module Type_lexpr = struct
         | LstRepeat -> infer_type le ListType
         | StrNth -> type_strnth gamma e1 e2
         | Equal
+        | ValueEqual
         | ILessThan
         | ILessThanEqual
         | FLessThan

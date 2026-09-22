@@ -632,7 +632,7 @@ let rec trans_lcmd ~fname ~ann lcmd =
       `Normal (make_assert ~bindings:vs f @ [ If (ge, gcl1, gcl2) ])
   | Invariant { bindings; assertion } ->
       let asrt = trans_asrt assertion in
-      `Invariant (SLCmd.Invariant (asrt, bindings))
+      `Invariant (SLCmd.Invariant (asrt, bindings, None))
   | SymbExec -> `Normal [ SL SymbExec ]
 
 let trans_asrt_annot da =

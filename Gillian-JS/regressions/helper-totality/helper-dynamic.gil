@@ -1,0 +1,5 @@
+spec answer()
+[[ emp ]] [[ (ret == 42i) ]] normal
+proc answer() { ret := "helper"(); return };
+proc helper() { f := "other"; ret := f(); return };
+proc other() { ret := 42i; return };

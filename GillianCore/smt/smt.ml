@@ -44,8 +44,63 @@ let fp_un op a = app_ op [ a ]
 let fp_bin op a b = app_ op [ a; b ]
 let fp_arith op a b = app_ op [ rne; a; b ]
 
+(* CExprEval uses Zarith division/remainder, which truncate toward zero.
+   SMT integer div/mod use Euclidean semantics. Zero-divisor executions are
+   rejected by the total-mode domain checks; logical zero terms stay arbitrary. *)
+let integer_quotient a b =
+  let zero = int_k 0 in
+  let negative x = num_lt x zero in
+  let absolute x = ite (negative x) (num_neg x) x in
+  let magnitude = num_div (absolute a) (absolute b) in
+  ite (bool_not (eq (negative a) (negative b))) (num_neg magnitude) magnitude
+
 let fp_finite a =
   bool_not (bool_or (fp_un "fp.isNaN" a) (fp_un "fp.isInfinite" a))
+
+(* Truncate, then wrap modulo 2^width. Binary64 values of magnitude at least
+   2^(width+52) are multiples of 2^width. Smaller magnitudes fit the native
+   unsigned conversion of that width+52; sanitize its domain before applying
+   it. This also maps NaN/infinities and both zeros to positive zero. *)
+let integer_wrap ~width ~signed value =
+  let wide = width + 52 in
+  let absolute = fp_un "fp.abs" value in
+  let safe =
+    ite
+      (fp_bin "fp.lt" absolute (number_literal (Float.ldexp 1. wide)))
+      absolute (number_literal 0.)
+  in
+  let whole =
+    app
+      (List [ atom "_"; atom "fp.to_ubv"; atom (string_of_int wide) ])
+      [ atom "RTZ"; safe ]
+  in
+  let low =
+    app
+      (List
+         [
+           atom "_"; atom "extract"; atom (string_of_int (width - 1)); atom "0";
+         ])
+      [ whole ]
+  in
+  let wrapped = ite (fp_un "fp.isNegative" value) (app_ "bvneg" [ low ]) low in
+  let conversion = if signed then "to_fp" else "to_fp_unsigned" in
+  let modular =
+    app
+      (List [ atom "_"; atom conversion; atom "11"; atom "53" ])
+      [ rne; wrapped ]
+  in
+  (* The nonnegative in-range case is ordinary IEEE truncation. Exposing it
+     avoids an 84-bit conversion proof for each native array index. *)
+  let in_range =
+    bool_and
+      (fp_bin "fp.leq" (number_literal 0.) value)
+      (fp_bin "fp.lt" value
+         (number_literal (Float.ldexp 1. (if signed then width - 1 else width))))
+  in
+  let truncated = app_ "fp.roundToIntegral" [ atom "RTZ"; value ] in
+  ite in_range
+    (ite (fp_un "fp.isZero" truncated) (number_literal 0.) truncated)
+    modular
 
 module Variant = struct
   module type S = sig
@@ -318,6 +373,11 @@ let exists (vars : (string * sexp) list) (s : sexp) : sexp =
   exists' vars s
 
 let t_seq t = list [ atom "Seq"; t ]
+
+(* GIL strings are byte strings. A native sequence preserves their contents
+   without imposing a UTF-16 interpretation on generic GIL operations. *)
+let t_byte : sexp = List [ atom "_"; atom "BitVec"; atom "8" ]
+let t_bytes = t_seq t_byte
 let seq_len s = atom "seq.len" <| s
 let seq_extract s offset length = atom "seq.extract" $$ [ s; offset; length ]
 let seq_nth s offset = atom "seq.nth" $$ [ s; offset ]
@@ -445,7 +505,7 @@ module Lit_operations = struct
   module Bool = (val un "Bool" "bValue" t_bool : Unary)
   module Int = (val un "Int" "iValue" t_int : Unary)
   module Num = (val un "Num" "nValue" t_number : Unary)
-  module String = (val un "String" "sValue" t_int : Unary)
+  module String = (val un "String" "sValue" t_bytes : Unary)
   module Loc = (val un "Loc" "locValue" t_int : Unary)
   module Type = (val un "Type" "tValue" t_gil_type : Unary)
   module List = (val un "List" "listValue" (t_seq t_gil_literal) : Unary)
@@ -485,7 +545,8 @@ let t_gil_literal_set = t_set t_gil_literal
 let native_sort_of_type =
   let open Type in
   function
-  | IntType | StringType | ObjectType -> t_int
+  | IntType | ObjectType -> t_int
+  | StringType -> t_bytes
   | ListType ->
       require_definition def_gil_literal;
       t_gil_literal_list
@@ -591,16 +652,15 @@ module Ext_lit_operations = struct
 end
 
 module Axiomatised_operations = struct
-  let slen, def_slen = mk_fun_decl "s-len" [ t_int ] t_number
+  let slen, def_slen = mk_fun_decl "s-len" [ t_bytes ] t_number
 
   let llen, def_llen =
     mk_fun_decl ~depends_on:[ def_gil_literal ] "l-len" [ t_gil_literal_list ]
       t_int
 
-  let num2str, def_num2str = mk_fun_decl "num2str" [ t_number ] t_int
-  let str2num, def_str2num = mk_fun_decl "str2num" [ t_int ] t_number
-  let num2int, def_num2int = mk_fun_decl "num2int" [ t_number ] t_number
-  let snth, def_snth = mk_fun_decl "s-nth" [ t_int; t_number ] t_int
+  let num2str, def_num2str = mk_fun_decl "num2str" [ t_number ] t_bytes
+  let str2num, def_str2num = mk_fun_decl "str2num" [ t_bytes ] t_number
+  let snth, def_snth = mk_fun_decl "s-nth" [ t_bytes; t_number ] t_bytes
 
   let lrev, def_lrev =
     mk_fun_decl ~depends_on:[ def_gil_literal ] "l-rev" [ t_gil_literal_list ]
@@ -610,20 +670,25 @@ end
 let t_gil_ext_literal = Ext_lit_operations.t_gil_ext_literal
 let def_gil_ext_literal = Ext_lit_operations.def_gil_ext_literal
 let str_codes = Hashtbl.create 1000
-let str_codes_inv = Hashtbl.create 1000
 let str_counter = ref 0
 
-(** We only check for string equality; each unique string is assigned a code,
-    and the solver can check for equality by checking equality of the codes. *)
-let encode_string s =
+(* Location and user-datatype identities remain opaque, distinct codes. *)
+let encode_symbol s =
   match Hashtbl.find_opt str_codes s with
   | Some code -> int_k code
   | None ->
       let code = int_k !str_counter in
       let () = Hashtbl.add str_codes s !str_counter in
-      let () = Hashtbl.add str_codes_inv !str_counter s in
       let () = incr str_counter in
       code
+
+let encode_string s =
+  if String.length s = 0 then as_type (atom "seq.empty") t_bytes
+  else
+    String.to_seq s |> List.of_seq
+    |> List.map (fun byte ->
+           seq_unit (atom (Printf.sprintf "#x%02x" (Char.code byte))))
+    |> seq_concat
 
 let encode_type (t : Type.t) =
   require_definition def_gil_type;
@@ -642,7 +707,7 @@ let encode_type (t : Type.t) =
     | TypeType -> Type_operations.Type.construct
     | SetType -> Type_operations.Set.construct
     | DatatypeType name ->
-        name |> encode_string |> Type_operations.Datatype.construct
+        name |> encode_symbol |> Type_operations.Datatype.construct
   with _ -> exceptf "DEATH: encode_type with arg: %a" Type.pp t
 
 module Encoding = struct
@@ -656,6 +721,9 @@ module Encoding = struct
     consts : (string * sexp) Hashset.t; [@default Hashset.empty ()]
     kind : kind;
     extra_asrts : sexp list;
+    facts : sexp list;
+        (** Intrinsic primitive facts, separate from expression domain guards.
+        *)
     expr : sexp; [@main]
   }
   [@@deriving make]
@@ -692,7 +760,8 @@ module Encoding = struct
     let enc' = f enc in
     let consts = merge_consts enc.consts enc'.consts in
     let extra_asrts = enc.extra_asrts @ enc'.extra_asrts in
-    { enc' with consts; extra_asrts }
+    let facts = enc.facts @ enc'.facts in
+    { enc' with consts; extra_asrts; facts }
 
   let ( let>-- ) (encs : t list) (f : t list -> t) =
     let enc' = f encs in
@@ -700,7 +769,8 @@ module Encoding = struct
     let extra_asrts =
       List.concat_map (fun e -> e.extra_asrts) encs @ enc'.extra_asrts
     in
-    { enc' with consts; extra_asrts }
+    let facts = List.concat_map (fun e -> e.facts) encs @ enc'.facts in
+    { enc' with consts; extra_asrts; facts }
 
   let get_native
       ~accessor
@@ -928,15 +998,27 @@ let rec encode_lit (lit : Literal.t) : Encoding.t =
     | Bool b -> bool_k b >- BooleanType
     | Int i -> int_zk i >- IntType
     | Num n -> number_literal n >- NumberType
-    | String s -> encode_string s >- StringType
-    | Loc l -> encode_string l >- ObjectType
+    | String s ->
+        require_definition Axiomatised_operations.def_str2num;
+        let encoded = encode_string s in
+        (* Ground parser facts must travel with literals even when they occur
+           inside native sets/sequences. Otherwise formatter roundtrip facts
+           still permit, for example, an integer key to equal "push". *)
+        let parsed = Axiomatised_operations.str2num <| encoded in
+        let value = number_literal (Arith_utils.string_to_number s) in
+        native ~facts:[ eq parsed value ] StringType encoded
+    | Loc l -> encode_symbol l >- ObjectType
     | Type t -> encode_type t >- TypeType
     | LList lits ->
         require_definition def_gil_literal;
         let>-- args = List.map (fun lit -> simple_wrap (encode_lit lit)) lits in
         let args = List.map (fun arg -> arg.expr) args in
         list args >- ListType
-    | Constant _ -> raise (Exceptions.Unsupported "Z3 encoding: constants")
+    | Constant c -> (
+        match Literal.static_constant c with
+        | Some value -> encode_lit value
+        | None ->
+            raise (Exceptions.Unsupported "Z3 encoding: dynamic constants"))
   with Failure msg -> exceptf "DEATH: encode_lit %a. %s" Literal.pp lit msg
 
 let wrapped_equality a b =
@@ -1007,11 +1089,12 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
   | IDiv ->
       let>- p1 = get_int p1 in
       let>- p2 = get_int p2 in
-      num_div p1.expr p2.expr >- IntType
+      integer_quotient p1.expr p2.expr >- IntType
   | IMod ->
       let>- p1 = get_int p1 in
       let>- p2 = get_int p2 in
-      num_mod p1.expr p2.expr >- IntType
+      num_sub p1.expr (num_mul p2.expr (integer_quotient p1.expr p2.expr))
+      >- IntType
   | ILessThan ->
       let>- p1 = get_int p1 in
       let>- p2 = get_int p2 in
@@ -1044,6 +1127,12 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in
       fp_bin "fp.leq" p1.expr p2.expr >- BooleanType
+  | ValueEqual ->
+      (* Native datatype equality is reflexive at NaN and distinguishes zeros,
+         including numbers nested inside sequences or constructors. *)
+      let>- p1 = extend_wrap p1 in
+      let>- p2 = extend_wrap p2 in
+      eq p1.expr p2.expr >- BooleanType
   | Equal -> encode_equality p1 p2
   | Or ->
       let>- p1 = get_bool p1 in
@@ -1078,6 +1167,10 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- x = simple_wrap p1 in
       let>- n = get_int p2 in
       RepeatCache.get x.expr n.expr
+  | StrCat ->
+      let>- left = get_string p1 in
+      let>- right = get_string p2 in
+      seq_concat [ left.expr; right.expr ] >- StringType
   | StrNth ->
       require_definition Axiomatised_operations.def_snth;
       let>- str' = get_string p1 in
@@ -1105,8 +1198,7 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
   | SignedRightShiftF
   | UnsignedRightShiftF
   | M_atan2
-  | M_pow
-  | StrCat ->
+  | M_pow ->
       exceptf "SMT encoding: Costruct not supported yet - binop: %s"
         (BinOp.str op)
 
@@ -1132,22 +1224,72 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
         | _ -> seq_len le.expr
       in
       enc >- IntType
+  | StrToBytes ->
+      require_definition def_gil_literal;
+      let>- bytes = get_string le in
+      let byte = atom "byte_value" in
+      let value =
+        Lit_operations.Num.construct
+          (app
+             (List [ atom "_"; atom "to_fp_unsigned"; atom "11"; atom "53" ])
+             [ rne; byte ])
+      in
+      let mapping =
+        list [ atom "lambda"; list [ list [ byte; t_byte ] ]; value ]
+      in
+      app_ "seq.map" [ mapping; bytes.expr ] >- ListType
   | StrLen ->
       require_definition def_slen;
       let>- le = get_string le in
       slen <| le.expr >- NumberType
   | ToStringOp ->
       require_definition def_num2str;
+      require_definition def_str2num;
       let>- le = get_num le in
-      Axiomatised_operations.num2str <| le.expr >- StringType
+      (* JavaScript formatting identifies the two zeros. Leaving zero in the
+         uninterpreted remainder would distinguish IEEE-equal property keys.
+         Nonzero finite formatting remains an over-approximation. *)
+      let formatted =
+        ite
+          (fp_un "fp.isZero" le.expr)
+          (encode_string "0")
+          (ite (fp_un "fp.isNaN" le.expr) (encode_string "NaN")
+             (ite
+                (fp_un "fp.isInfinite" le.expr)
+                (ite
+                   (fp_un "fp.isNegative" le.expr)
+                   (encode_string "-Infinity")
+                   (encode_string "Infinity"))
+                (Axiomatised_operations.num2str <| le.expr)))
+      in
+      (* Every formatter-produced spelling parses back to the same number;
+         numeric equality identifies signed zeros, and NaN needs its own test.
+         Keep this fact with the encoded term so native set/sequence reasoning
+         can distinguish numeric keys without reconstructing the formatter. *)
+      let parsed = Axiomatised_operations.str2num <| formatted in
+      let roundtrip =
+        bool_or
+          (fp_bin "fp.eq" parsed le.expr)
+          (bool_and (fp_un "fp.isNaN" parsed) (fp_un "fp.isNaN" le.expr))
+      in
+      native ~facts:[ roundtrip ] StringType formatted
   | ToNumberOp ->
       require_definition def_str2num;
       let>- le = get_string le in
       Axiomatised_operations.str2num <| le.expr >- NumberType
   | ToIntOp ->
-      require_definition def_num2int;
       let>- le = get_num le in
-      Axiomatised_operations.num2int <| le.expr >- NumberType
+      (* The runtime's ToInteger preserves infinities and signed zero, maps
+         NaN to +0, and otherwise truncates toward zero. *)
+      ite (fp_un "fp.isNaN" le.expr) (number_literal 0.)
+        (app_ "fp.roundToIntegral" [ atom "RTZ"; le.expr ])
+      >- NumberType
+  | ToUint32Op | ToUint16Op | ToInt32Op ->
+      let>- le = get_num le in
+      integer_wrap
+        ~width:(if op = ToUint16Op then 16 else 32)
+        ~signed:(op = ToInt32Op) le.expr
+      >- NumberType
   | Not ->
       let>- le = get_bool le in
       bool_not le.expr >- BooleanType
@@ -1163,18 +1305,21 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       let>- le = get_list le in
       Axiomatised_operations.lrev <| le.expr >- ListType
   | NumToInt ->
-      (* This partial conversion faults on NaN/infinity in CExprEval. Until
-         symbolic execution supplies a finiteness obligation, fail closed
-         instead of using fp.to_real's unspecified non-finite result. *)
+      (* Total-mode execution checks finiteness before evaluating this partial
+         conversion. IEEE truncation followed by exact fp.to_real produces
+         the required integer on finite values. Logical nonfinite terms have
+         an unspecified integer extension; they cannot bypass that execution
+         check. Keep the previous restriction in ordinary mode, whose domain
+         checks have not been audited. Nonfinite literals remain rejected. *)
       (match e with
       | Expr.Lit (Num n) when Float.is_finite n -> ()
+      | Expr.Lit _ ->
+          exceptf "SMT encoding: NumToInt requires a finite concrete operand"
+      | _ when !Config.Verification.total -> ()
       | _ -> exceptf "SMT encoding: NumToInt requires a finite concrete operand");
       let>- le = get_num le in
-      let value = fp_un "fp.to_real" le.expr in
-      ite
-        (num_lt value (real_k Q.zero))
-        (num_neg (real_to_int (num_neg value)))
-        (real_to_int value)
+      real_to_int
+        (fp_un "fp.to_real" (app_ "fp.roundToIntegral" [ atom "RTZ"; le.expr ]))
       >- IntType
   | IntToNum ->
       let>- le = get_int le in
@@ -1191,7 +1336,6 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
   | M_abs ->
       let>- le = get_num le in
       fp_un "fp.abs" le.expr >- NumberType
-  | ToUint32Op
   | BitwiseNot
   | M_acos
   | M_asin
@@ -1206,8 +1350,6 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
   | M_sin
   | M_sqrt
   | M_tan
-  | ToUint16Op
-  | ToInt32Op
   | SetToList ->
       let msg =
         Fmt.str "SMT encoding: Construct not supported yet - unop - %s!"
@@ -1257,7 +1399,12 @@ let encode_bound_expr
   let bound_asrts, extra_asrts =
     List.partition contains_bound_vars encoded.extra_asrts
   in
-  let encoded = { encoded with extra_asrts } in
+  (* Case-bound primitive facts may safely be omitted (losing precision), but
+     must not escape their binder as assertions about unrelated free names. *)
+  let facts =
+    List.filter (fun fact -> not (contains_bound_vars fact)) encoded.facts
+  in
+  let encoded = { encoded with extra_asrts; facts } in
 
   (* Don't declare consts for quantified vars *)
   let bound_vars =
@@ -1285,6 +1432,7 @@ let encode_quantified_expr
        'a ->
        Encoding.t)
     ~mk_quant
+    ~universal
     ~gamma
     ~llen_lvars
     ~list_elem_vars
@@ -1299,10 +1447,10 @@ let encode_quantified_expr
     | _ -> None
   in
   let gamma = copy_extend_gamma gamma quantified_vars in
-  let encoded_assertion, consts, extra_asrts =
+  let encoded_assertion, consts, extra_asrts, facts =
     match encode_expr ~gamma ~llen_lvars ~list_elem_vars assertion with
-    | { kind = Native BooleanType; expr; consts; extra_asrts } ->
-        (expr, consts, extra_asrts)
+    | { kind = Native BooleanType; expr; consts; extra_asrts; facts } ->
+        (expr, consts, extra_asrts, facts)
     | _ -> exceptf "the thing inside forall is not boolean!"
   in
   let quantified_vars =
@@ -1321,7 +1469,18 @@ let encode_quantified_expr
     |> Hashtbl.filter_map_inplace (fun c () ->
            if List.mem c quantified_vars then None else Some ())
   in
-  let expr = mk_quant quantified_vars encoded_assertion in
+  (* Primitive facts hold for every interpretation of the actual operation.
+     Scope them under the binder without treating expression domain guards as
+     intrinsic facts: those guards must not weaken universal assertions. *)
+  let body =
+    match facts with
+    | [] -> encoded_assertion
+    | _ ->
+        let conditions = app_ "and" facts in
+        if universal then app_ "=>" [ conditions; encoded_assertion ]
+        else bool_and conditions encoded_assertion
+  in
+  let expr = mk_quant quantified_vars body in
   native ~consts ~extra_asrts BooleanType expr
 
 let rec encode_logical_expression
@@ -1386,10 +1545,11 @@ let rec encode_logical_expression
       seq_extract lst.expr start.expr len.expr >- ListType
   | Exists (bt, e) ->
       encode_quantified_expr ~encode_expr:encode_logical_expression
-        ~mk_quant:exists ~gamma ~llen_lvars ~list_elem_vars bt e
+        ~mk_quant:exists ~universal:false ~gamma ~llen_lvars ~list_elem_vars bt
+        e
   | ForAll (bt, e) ->
       encode_quantified_expr ~encode_expr:encode_logical_expression
-        ~mk_quant:forall ~gamma ~llen_lvars ~list_elem_vars bt e
+        ~mk_quant:forall ~universal:true ~gamma ~llen_lvars ~list_elem_vars bt e
   | FuncApp (name, les) ->
       let param_types =
         match Function_env.get_function_param_types name with
@@ -1552,7 +1712,8 @@ let encode_assertions_needs_handler (fs : Expr.Set.t) (gamma : typenv) :
   let asrts =
     let extra_asrts = List.concat_map (fun e -> e.extra_asrts) encoded in
     let encoded_asrts = List.map (fun e -> e.expr) encoded in
-    List.map assume (extra_asrts @ encoded_asrts)
+    let facts = List.concat_map (fun e -> e.facts) encoded in
+    List.map assume (extra_asrts @ facts @ encoded_asrts)
   in
   consts @ asrts
 
@@ -1649,6 +1810,10 @@ let exec_sat' (fs : Expr.Set.t) (gamma : typenv) : sexp option =
     match result with
     | Unknown ->
         if !Config.under_approximation then raise SMT_unknown
+        else if !Config.Verification.total then
+          raise
+            (Gillian_result.Exc.Gillian_error
+               (OperationError "Incomplete totality proof: SMT returned unknown"))
         else
           let additional_data =
             [
@@ -1753,6 +1918,34 @@ let lift_model
     try Some (to_z n) with UnexpectedSolverResponse _ -> None
   in
 
+  let recover_string (value : sexp) =
+    let buffer = Buffer.create 32 in
+    let rec append (part : sexp) =
+      match part with
+      | List [ Atom "as"; Atom "seq.empty"; _ ] -> ()
+      | List (Atom "seq.++" :: values) -> List.iter append values
+      | List [ Atom "seq.unit"; byte ] ->
+          let code =
+            match byte with
+            | Atom s when String.starts_with ~prefix:"#x" s ->
+                int_of_string ("0x" ^ String.sub s 2 (String.length s - 2))
+            | Atom s when String.starts_with ~prefix:"#b" s ->
+                int_of_string ("0b" ^ String.sub s 2 (String.length s - 2))
+            | List [ Atom "_"; Atom s; Atom "8" ]
+              when String.starts_with ~prefix:"bv" s ->
+                int_of_string (String.sub s 2 (String.length s - 2))
+            | _ -> raise Exit
+          in
+          if code < 0 || code > 255 then raise Exit;
+          Buffer.add_char buffer (Char.chr code)
+      | _ -> raise Exit
+    in
+    try
+      append value;
+      Some (Buffer.contents buffer)
+    with Exit | Failure _ | Invalid_argument _ -> None
+  in
+
   let lift_val (x : string) : Literal.t option =
     let* gil_type = Hashtbl.find_opt gamma x in
     let* v = get_val x in
@@ -1764,9 +1957,8 @@ let lift_model
         let+ n = recover_int v in
         Literal.Int n
     | StringType ->
-        let* si = recover_int v in
-        let+ str_code = Hashtbl.find_opt str_codes_inv (Z.to_int si) in
-        Literal.String str_code
+        let+ bytes = recover_string v in
+        Literal.String bytes
     | _ -> None
   in
 

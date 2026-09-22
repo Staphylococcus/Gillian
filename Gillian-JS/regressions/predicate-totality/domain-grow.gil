@@ -1,0 +1,4 @@
+spec answer(a)
+[[ (a v== #a) * <Props>(#a, -{ "x" }-;) * <Cell>(#a, "x"; 1i) ]]
+[[ <Props>(#a, -{ "x", "y" }-;) * <Cell>(#a, "x"; 1i) * <Cell>(#a, "y"; none) * (ret == true) ]] normal
+proc answer(a) { ret := true; return };

@@ -1,0 +1,4 @@
+spec answer(n)
+[[ (n == #n) * types(#n : Bool) ]] [[ (ret == 42i) ]] normal
+proc answer(n) { ret := "helper"(n); return };
+proc helper(n) { goto [n] good bad; good: ret := 42i; return; bad: ret := [GetCell](null, "x"); return };

@@ -40,6 +40,7 @@ type 'annot prog = {
   lemma_induction : ProofDependencies.induction option;
   totality : Totality.context option;
   proved_total_procs : SS.t;
+  unsupported_totality_nodes : (string * int, string) Hashtbl.t;
   prog : ('annot, int) Prog.t;
 }
 

@@ -1,0 +1,9 @@
+spec count(n)
+[[ (n == #n) * types(#n : Num) * (is_int(#n)) * (0.0 <= #n) * (#n <= 4294967295.0) ]]
+[[ (0.0 <= ret) * (ret <= 0.0) ]] normal
+proc count(n) {
+head: invariant ((0.0 <= n) * (n <= 4294967295.0) * (is_int(n)) * types(n : Num)) [bind: n] variant(n);
+  goto [n > 0.0] step done;
+step: n := n; goto head;
+done: ret := n; return
+};

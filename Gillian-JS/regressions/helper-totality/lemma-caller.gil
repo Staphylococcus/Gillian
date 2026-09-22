@@ -1,0 +1,10 @@
+lemma Identity(n)
+[[ types(#n : Int) ]] [[ (#n == #n) ]]
+[* apply Other(#n) *]
+spec answer(n)
+[[ (n == #n) * types(#n : Int) ]] [[ (ret == #n) ]] normal
+proc answer(n) { apply Identity(n); ret := n; return };
+
+lemma Other(n)
+[[ types(#n : Int) ]] [[ (#n == #n) ]]
+[* assert (#n == #n) *]

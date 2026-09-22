@@ -17,7 +17,7 @@ type t = TypeDef__.slcmd =
   | GUnfold of string  (** Global Unfold *)
   | ApplyLem of string * Expr.t list * string list  (** Apply lemma *)
   | SepAssert of Asrt.t * string list  (** Assert *)
-  | Invariant of Asrt.t * string list  (** Invariant *)
+  | Invariant of Asrt.t * string list * Expr.t option  (** Invariant *)
   | Consume of
       Asrt.t
       * string list (* Consumes an assertion. Warning, not frame-preserving *)
@@ -35,7 +35,8 @@ let map (f_a : Asrt.t -> Asrt.t) (f_e : Expr.t -> Expr.t) : t -> t = function
   | GUnfold name -> GUnfold name
   | ApplyLem (s, l, existentials) -> ApplyLem (s, List.map f_e l, existentials)
   | SepAssert (a, binders) -> SepAssert (f_a a, binders)
-  | Invariant (a, existentials) -> Invariant (f_a a, existentials)
+  | Invariant (a, existentials, rank) ->
+      Invariant (f_a a, existentials, Option.map f_e rank)
   | Consume (a, binders) -> Consume (f_a a, binders)
   | Produce a -> Produce (f_a a)
   | SymbExec -> SymbExec
@@ -52,8 +53,9 @@ let pvars (slcmd : t) : SS.t =
   | GUnfold _ -> SS.empty
   | Package { lhs = _, les1; rhs = _, les2 } ->
       SS.union (pvars_es les1) (pvars_es les2)
-  | SepAssert (a, _) | Invariant (a, _) | Consume (a, _) | Produce a ->
-      Asrt.pvars a
+  | SepAssert (a, _) | Consume (a, _) | Produce a -> Asrt.pvars a
+  | Invariant (a, _, rank) ->
+      SS.union (Asrt.pvars a) (Option.fold ~none:SS.empty ~some:Expr.pvars rank)
   | SymbExec -> SS.empty
 
 let lvars (slcmd : t) : SS.t =
@@ -75,7 +77,9 @@ let lvars (slcmd : t) : SS.t =
   | GUnfold _ -> SS.empty
   | SepAssert (a, binders) | Consume (a, binders) ->
       SS.union (Asrt.lvars a) (SS.of_list binders)
-  | Invariant (a, _) | Produce a -> Asrt.lvars a
+  | Produce a -> Asrt.lvars a
+  | Invariant (a, _, rank) ->
+      SS.union (Asrt.lvars a) (Option.fold ~none:SS.empty ~some:Expr.lvars rank)
   | SymbExec -> SS.empty
 
 let locs (slcmd : t) : SS.t =
@@ -95,8 +99,9 @@ let locs (slcmd : t) : SS.t =
       SS.union (locs_es les1) (locs_es les2)
   | ApplyLem (_, es, _) -> locs_es es
   | GUnfold _ -> SS.empty
-  | SepAssert (a, _) | Invariant (a, _) | Consume (a, _) | Produce a ->
-      Asrt.locs a
+  | SepAssert (a, _) | Consume (a, _) | Produce a -> Asrt.locs a
+  | Invariant (a, _, rank) ->
+      SS.union (Asrt.locs a) (Option.fold ~none:SS.empty ~some:Expr.locs rank)
   | SymbExec -> SS.empty
 
 let pp_folding_info =
@@ -143,7 +148,7 @@ let pp fmt lcmd =
   | Consume (a, binders) ->
       Fmt.pf fmt "@[consume %a %a@]" (Fmt.parens Asrt.pp) a pp_binders binders
   | Produce a -> Fmt.pf fmt "@[produce %a@]" (Fmt.parens Asrt.pp) a
-  | Invariant (a, existentials) ->
+  | Invariant (a, existentials, rank) ->
       let pp_exs f exs =
         match exs with
         | [] -> ()
@@ -152,5 +157,6 @@ let pp fmt lcmd =
               (Fmt.list ~sep:Fmt.comma Fmt.string)
               exs
       in
-      Fmt.pf fmt "invariant %a %a" (Fmt.parens Asrt.pp) a pp_exs existentials
+      Fmt.pf fmt "invariant %a %a" (Fmt.parens Asrt.pp) a pp_exs existentials;
+      Option.iter (fun e -> Fmt.pf fmt " variant(%a)" Expr.pp e) rank
   | SymbExec -> Fmt.pf fmt "symb_exec"

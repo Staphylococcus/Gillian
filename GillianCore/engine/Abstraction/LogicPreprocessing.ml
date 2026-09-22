@@ -447,14 +447,17 @@ let unfold_cmd
       match asrts with
       | [ a ] -> Logic (SL (SepAssert (a, binders)))
       | _ -> Logic (SL (SepAssert (a, binders))))
-  | Logic (SL (Invariant (a, binders))) ->
+  | Logic (SL (Invariant (a, binders, rank))) ->
       let a =
         match auto_unfold preds rec_info a with
         | [ a ] -> a
         | _ -> a
       in
-      let a = remove_equalities_between_binders_and_lvars binders a in
-      Logic (SL (Invariant (a, binders)))
+      let a =
+        if !Config.Verification.total then a
+        else remove_equalities_between_binders_and_lvars binders a
+      in
+      Logic (SL (Invariant (a, binders, rank)))
   | _ -> cmd
 
 let unfold_proc
@@ -680,6 +683,42 @@ let preprocess (prog : ('a, int) Prog.t) (unfold : bool) : ('a, int) Prog.t =
   let preds = prog.preds in
   let lemmas = prog.lemmas in
   let onlyspecs = prog.only_specs in
+
+  (* User facts and purity annotations are proof hints, not axioms for total
+     verification. Keep definitions unchanged. Parameter type facts added below
+     are justified by the same types explicitly added to every definition. *)
+  (if !Config.Verification.total then
+     let rec resource_free seen name =
+       if SS.mem name seen then true
+       else
+         match Hashtbl.find_opt preds name with
+         | None -> false
+         | Some pred
+           when pred.Pred.pred_abstract || Option.is_some pred.pred_guard ->
+             false
+         | Some pred ->
+             let seen = SS.add name seen in
+             List.for_all
+               (fun (_, definition) ->
+                 List.for_all
+                   (function
+                     | Asrt.Emp | Pure _ | Types _ -> true
+                     | CorePred (name, _, _) ->
+                         Option.fold ~none:false ~some:(resource_free seen)
+                           (Asrt.as_user_pred_name name)
+                     | Wand _ -> false)
+                   definition)
+               pred.pred_definitions
+     in
+     Hashtbl.filter_map_inplace
+       (fun name (pred : Pred.t) ->
+         Some
+           {
+             pred with
+             Pred.pred_facts = [];
+             pred_pure = pred.pred_pure && resource_free SS.empty name;
+           })
+       preds);
 
   let procs', preds', lemmas' = explicit_param_types procs preds lemmas in
 

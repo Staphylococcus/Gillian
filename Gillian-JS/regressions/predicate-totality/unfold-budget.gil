@@ -1,0 +1,4 @@
+nounfold pred Chain(n : Int) : (n == 0i), (0i i< n) * Chain(n i- 1i);
+spec answer(n)
+[[ (n == #n) * Chain(#n) ]] [[ (ret == 0i) ]] normal
+proc answer(n) { unfold* Chain(n); ret := 0i; return };

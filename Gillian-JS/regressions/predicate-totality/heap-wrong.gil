@@ -1,0 +1,10 @@
+nounfold pred Cell(obj; value) : <Cell>(obj, "x"; value);
+spec answer(obj)
+[[ (obj v== #obj) * Cell(#obj; 42i) ]] [[ (ret == 7i) * Cell(#obj; 42i) ]] normal
+proc answer(obj) {
+  unfold Cell(obj, 42i);
+  cell := [GetCell](obj, "x");
+  ret := l-nth(cell, 2i);
+  fold Cell(obj, 42i);
+  return
+};

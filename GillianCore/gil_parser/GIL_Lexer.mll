@@ -150,7 +150,7 @@ let digit = ['0'-'9']
 let letter = ['a'-'z''A'-'Z']
 let identifier = letter(letter|digit|'_')*
 
-let float = '-'? digit+ ('.' digit*)?
+let float = '-'? digit+ ('.' digit*)? (['e' 'E'] ['+' '-']? digit+)?
 let int = '-'? digit+ 'i'
 
 let var2 = "_pvar_" (letter|digit|'_')*
@@ -176,6 +176,10 @@ rule read = parse
 (* Constants *)
   | "$$min_float"        { GIL_Parser.MIN_FLOAT     }
   | "$$max_float"        { GIL_Parser.MAX_FLOAT     }
+  | "$$min_value"        { GIL_Parser.MIN_FLOAT     }
+  | "$$max_value"        { GIL_Parser.MAX_FLOAT     }
+  | "$$max_safe_integer" { GIL_Parser.MAX_SAFE_INTEGER }
+  | "$$epsilon"          { GIL_Parser.EPSILON       }
   | "$$random"           { GIL_Parser.RANDOM        }
   | "$$pi"               { GIL_Parser.PI            }
   | "$$UTCTime"          { GIL_Parser.UTCTIME       }
@@ -183,6 +187,7 @@ rule read = parse
 
 (* Binary operators *)
   | "==>"                { GIL_Parser.LIMPLIES   }
+  | "v=="               { GIL_Parser.VALUEEQ }
   | "=="
   | "="                  { GIL_Parser.EQ     }
   | "-*"                 { GIL_Parser.WAND   }
@@ -244,6 +249,7 @@ rule read = parse
   | "l-rev"              { GIL_Parser.LSTREV }
   | "l-sub"              { GIL_Parser.LSTSUB }
   | "s-len"              { GIL_Parser.STRLEN }
+  | "s-bytes"            { GIL_Parser.STRBYTES }
 (* Expression keywords *)
   | "l-nth"              { GIL_Parser.LSTNTH }
   | "l-repeat"           { GIL_Parser.LSTREPEAT }

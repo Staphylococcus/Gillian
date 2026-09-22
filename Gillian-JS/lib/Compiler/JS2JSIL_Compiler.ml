@@ -60,13 +60,13 @@ let add_initial_label cmds lab metadata =
 
 let prefix_lcmds
     (lcmds : LCmd.t list)
-    (invariant : (Asrt.t * string list) option)
+    (invariant : (Asrt.t * string list * Expr.t option) option)
     (cmds : (Annot.Basic.t * string option * LabCmd.t) list) :
     (Annot.Basic.t * string option * LabCmd.t) list =
   let lcmds =
     Option.fold
-      ~some:(fun (inv, binders) ->
-        lcmds @ [ LCmd.SL (Invariant (inv, binders)) ])
+      ~some:(fun (inv, binders, rank) ->
+        lcmds @ [ LCmd.SL (Invariant (inv, binders, rank)) ])
       ~none:lcmds invariant
   in
   let lcmds = List.map (fun lcmd -> LabCmd.LLogic lcmd) lcmds in
@@ -5121,7 +5121,11 @@ and translate_statement tr_ctx e =
   (* Section 12.3 - Empty Statement *)
   | JS_Parser.Syntax.Debugger ->
       (* Section 12.15 - Debugger Statement **)
-      ([], Lit Empty, [], [], [], [])
+      let cmds =
+        if lcmds = [] && Option.is_none invariant then []
+        else annotate_first_cmd [ annotate_cmd (LBasic Skip) None ]
+      in
+      (cmds, Lit Empty, [], [], [], [])
   | JS_Parser.Syntax.Num _
   | JS_Parser.Syntax.String _
   | JS_Parser.Syntax.Null
@@ -5499,15 +5503,23 @@ and translate_statement tr_ctx e =
       (* Place invariant exactly where it's supposed to be *)
       let head_cmds =
         match invariant with
-        | Some (a, binders) ->
+        | Some (a, binders, rank) when !Gillian.Utils.Config.Verification.total ->
+            (* Select the incoming completion value before generalization. *)
             [
-              (Some head, LabCmd.LLogic (LCmd.SL (Invariant (a, binders))));
+              (Some head, cmd_ass_ret_1);
+              (None, LabCmd.LLogic (LCmd.SL (Invariant (a, binders, rank))));
+            ]
+        | Some (a, binders, rank) ->
+            [
+              (Some head, LabCmd.LLogic (LCmd.SL (Invariant (a, binders, rank))));
               (None, cmd_ass_ret_1);
             ]
         | None -> [ (Some head, cmd_ass_ret_1) ]
       in
 
-      let cmds2 = add_initial_label cmds2 body metadata in
+      let cmds2 =
+        add_initial_label cmds2 body (Annot.Basic.set_loop_info new_loops metadata)
+      in
 
       (* Set up the new annotation *)
       let metadata = metadata |> Annot.Basic.set_loop_info new_loops in
@@ -5980,9 +5992,15 @@ and translate_statement tr_ctx e =
       (* Place invariant exactly where it's supposed to be *)
       let head_cmds =
         match invariant with
-        | Some (a, binders) ->
+        | Some (a, binders, rank) when !Gillian.Utils.Config.Verification.total ->
+            (* Select the incoming completion value before generalization. *)
             [
-              (Some head, LabCmd.LLogic (LCmd.SL (Invariant (a, binders))));
+              (Some head, cmd_ass_ret_1);
+              (None, LabCmd.LLogic (LCmd.SL (Invariant (a, binders, rank))));
+            ]
+        | Some (a, binders, rank) ->
+            [
+              (Some head, LabCmd.LLogic (LCmd.SL (Invariant (a, binders, rank))));
               (None, cmd_ass_ret_1);
             ]
         | None -> [ (Some head, cmd_ass_ret_1) ]

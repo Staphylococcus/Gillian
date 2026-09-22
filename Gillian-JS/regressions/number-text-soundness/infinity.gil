@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Num) * (#x == inf) ]]
+[[ (ret == "Infinity") ]] normal
+proc answer(x) { ret := num_to_string(x); return };

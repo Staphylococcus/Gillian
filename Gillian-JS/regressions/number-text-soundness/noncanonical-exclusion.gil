@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Num) ]]
+[[ (ret == false) ]] normal
+proc answer(x) { ret := (num_to_string(x) == "01"); return };

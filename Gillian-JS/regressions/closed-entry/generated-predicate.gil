@@ -1,0 +1,8 @@
+pred Forbidden(value): (not (value == $loc_0));
+spec main()
+[[ emp ]] [[ Forbidden(ret) ]] normal
+proc main() {
+ fresh := [Alloc]($lclosed, null);
+ ret := l-nth(fresh, 0i);
+ return
+};

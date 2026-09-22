@@ -1,0 +1,4 @@
+spec zero() [[ emp ]] [[ (ret v== -0.0) ]] normal
+proc zero() { ret := -0.0; return };
+spec answer() [[ emp ]] [[ (ret == -inf) ]] normal
+proc answer() { n := "zero"(); ret := 1.0 / n; return };

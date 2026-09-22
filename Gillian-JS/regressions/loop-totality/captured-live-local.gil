@@ -1,0 +1,13 @@
+spec count(n)
+[[ (n == #n) * types(#n : Int) * (0i i<= #n) ]]
+[[ (ret == #n) ]] normal
+proc count(n) {
+  acc := 0i;
+head: invariant ((0i i<= n) * types(n : Int, acc : Int) * (acc i+ n == #n)) [bind: n, acc] variant(n);
+  goto [n i> 0i] step done;
+step: acc := acc i+ 1i;
+  n := n i- 1i;
+  goto head;
+done: ret := acc;
+  return
+};

@@ -35,7 +35,7 @@ let clocs (x : t) : SS.t =
 let assertions (x : t) : Expr.t list =
   fold x
     (fun x le (assertions : Expr.t list) ->
-      Expr.BinOp (PVar x, Equal, le) :: assertions)
+      Expr.BinOp (PVar x, ValueEqual, le) :: assertions)
     []
 
 let is_well_formed (_ : t) : bool = true

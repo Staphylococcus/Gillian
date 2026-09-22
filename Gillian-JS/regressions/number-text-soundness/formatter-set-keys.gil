@@ -1,0 +1,5 @@
+spec answer(x, y, keys, tail)
+[[ (x == #x) * (y == #y) * (keys == #keys) * (tail == #tail) * types(#x : Num, #y : Num, #keys : Set, #tail : Set) * (#x < #y) *
+   (#keys == -u-(-{num_to_string(#x)}-, #tail)) * (!(num_to_string(#y) -e- #tail)) ]]
+[[ (ret == true) * (!(num_to_string(#y) -e- #keys)) ]] normal
+proc answer(x, y, keys, tail) { ret := true; return };

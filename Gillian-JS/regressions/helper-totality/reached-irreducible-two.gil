@@ -1,0 +1,10 @@
+spec answer(flag)
+[[ (flag == #flag) * types(#flag : Bool) ]] [[ (ret == 42i) ]] normal
+proc answer(flag) { ret := "helper"(2i); return };
+proc helper(flag) {
+  goto [flag == 0i] done choose;
+choose: goto [flag == 1i] one two;
+one: goto two;
+two: goto one;
+done: ret := 42i; return
+};

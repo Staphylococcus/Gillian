@@ -1,0 +1,11 @@
+spec answer(obj)
+[[ (obj == #obj) * <Cell>(#obj, "n"; #initial) * types(#initial : Int) ]]
+[[ <Cell>(#obj, "n"; #initial) * (ret == 42i) ]] normal
+proc answer(obj) { ret := "helper"(obj, 3i); return };
+proc helper(obj, n) {
+ goto [n == 0i] done step;
+step: cell := [GetCell](obj, "n"); value := l-nth(cell, 2i);
+ unused := [SetCell](obj, "n", value i+ 1i);
+ ret := "helper"(obj, n i- 1i); return;
+done: ret := 42i; return
+};

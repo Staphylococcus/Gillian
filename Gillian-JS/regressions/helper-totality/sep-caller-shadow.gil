@@ -1,0 +1,5 @@
+spec answer(a)
+[[ (a v== #a) * <Cell>(#a, "x"; #saved) ]]
+[[ (ret == true) * <Cell>(#a, "x"; #saved) ]] normal
+proc answer(a) { cell := [GetCell](a, "x"); saved := l-nth(cell, 2i); ret := "helper"(); return };
+proc helper() { sep_assert ((#saved == 0i)) [bind: #saved]; ret := true; return };

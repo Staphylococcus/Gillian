@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Num) * (#x == -1.0) ]]
+[[ (ret == -1.0) ]] normal
+proc answer(x) { ret := num_to_uint32(x); return };

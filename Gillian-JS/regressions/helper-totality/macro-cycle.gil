@@ -1,0 +1,4 @@
+macro Check(x): if (x i>= 0i) then { assert(x i>= 0i) } else { Check(x) }
+spec answer(n)
+[[ (n == #n) * types(#n : Int) ]] [[ (ret == 42i) ]] normal
+proc answer(n) { Check(n); ret := 42i; return };

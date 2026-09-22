@@ -1,0 +1,4 @@
+pure nounfold pred Choice(n : Int) : (n == 0i), (n == 1i);
+spec answer(n)
+[[ (n == #n) * Choice(#n) ]] [[ ((ret == 0i) or (ret == 1i)) ]] normal
+proc answer(n) { unfold Choice(n); unfold Choice(n); ret := n; return };

@@ -17,7 +17,7 @@ type t =
   | GUnfold of string  (** Global Unfold *)
   | ApplyLem of string * Expr.t list * string list  (** Apply lemma *)
   | SepAssert of Asrt.t * string list  (** Assert *)
-  | Invariant of Asrt.t * string list  (** Invariant *)
+  | Invariant of Asrt.t * string list * Expr.t option  (** Invariant *)
 
 let pp_folding_info =
   let pp_ui f (v, le) = Fmt.pf f "(%s := %a)" v Expr.pp le in
@@ -52,5 +52,7 @@ let pp fmt (lcmd : t) : unit =
       Fmt.pf fmt "apply %s(%a) %a" lem_name pp_args lparams pp_binders binders
   | SepAssert (a, binders) ->
       Fmt.pf fmt "sep_assert (%a) %a" Asrt.pp a pp_binders binders
-  | Invariant (a, binders) ->
-      Fmt.pf fmt "invariant %a %a" (Fmt.parens Asrt.pp) a pp_binders binders
+  | Invariant (a, binders, rank) ->
+      Fmt.pf fmt "invariant %a %a%a" (Fmt.parens Asrt.pp) a pp_binders binders
+        (Fmt.option (fun fmt e -> Fmt.pf fmt " variant(%a)" Expr.pp e))
+        rank
