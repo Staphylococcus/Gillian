@@ -259,20 +259,40 @@ proc setupInitialHeap () {
       [$larr_proto, "splice"]         := {{ "d", $lap_splice, true, false, true }};
       [$larr_proto, "indexOf"]        := {{ "d", $lap_indexOf, true, false, true }};
       [$larr_proto, "lastIndexOf"]    := {{ "d", $lap_lastIndexOf, true, false, true }};
+      [$larr_proto, "toLocaleString"] := {{ "d", $lap_toLocaleString, true, false, true }};
+      [$larr_proto, "join"]           := {{ "d", $lap_join, true, false, true }};
+      [$larr_proto, "unshift"]        := {{ "d", $lap_unshift, true, false, true }};
+      [$larr_proto, "slice"]          := {{ "d", $lap_slice, true, false, true }};
+      [$larr_proto, "shift"]          := {{ "d", $lap_shift, true, false, true }};
+      [$larr_proto, "every"]          := {{ "d", $lap_every, true, false, true }};
+      [$larr_proto, "some"]           := {{ "d", $lap_some, true, false, true }};
       [$larr_proto, "forEach"]        := {{ "d", $lap_forEach, true, false, true }};
       [$larr_proto, "map"]            := {{ "d", $lap_map, true, false, true }};
+      [$larr_proto, "filter"]         := {{ "d", $lap_filter, true, false, true }};
+      [$larr_proto, "reduce"]         := {{ "d", $lap_reduce, true, false, true }};
+      [$larr_proto, "reduceRight"]    := {{ "d", $lap_reduceRight, true, false, true }};
 
       ret := "create_object_with_call_construct_concrete" ($lap_toString, "AP_toString", empty, 0);
+      ret := "create_object_with_call_construct_concrete" ($lap_toLocaleString, "AP_toLocaleString", empty, 0);
       ret := "create_object_with_call_construct_concrete" ($lap_concat, "AP_concat", empty, 1);
+      ret := "create_object_with_call_construct_concrete" ($lap_join, "AP_join", empty, 1);
       ret := "create_object_with_call_construct_concrete" ($lap_pop, "AP_pop", empty, 0);
       ret := "create_object_with_call_construct_concrete" ($lap_push, "AP_push", empty, 1);
       ret := "create_object_with_call_construct_concrete" ($lap_reverse, "AP_reverse", empty, 0);
+      ret := "create_object_with_call_construct_concrete" ($lap_shift, "AP_shift", empty, 0);
+      ret := "create_object_with_call_construct_concrete" ($lap_slice, "AP_slice", empty, 2);
       ret := "create_object_with_call_construct_concrete" ($lap_sort, "AP_sort", empty, 1);
       ret := "create_object_with_call_construct_concrete" ($lap_splice, "AP_splice", empty, 2);
+      ret := "create_object_with_call_construct_concrete" ($lap_unshift, "AP_unshift", empty, 1);
       ret := "create_object_with_call_construct_concrete" ($lap_indexOf, "AP_indexOf", empty, 1);
       ret := "create_object_with_call_construct_concrete" ($lap_lastIndexOf, "AP_lastIndexOf", empty, 1);
+      ret := "create_object_with_call_construct_concrete" ($lap_every, "AP_every", empty, 1);
+      ret := "create_object_with_call_construct_concrete" ($lap_some, "AP_some", empty, 1);
       ret := "create_object_with_call_construct_concrete" ($lap_forEach, "AP_forEach", empty, 1);
       ret := "create_object_with_call_construct_concrete" ($lap_map, "AP_map", empty, 1);
+      ret := "create_object_with_call_construct_concrete" ($lap_filter, "AP_filter", empty, 1);
+      ret := "create_object_with_call_construct_concrete" ($lap_reduce, "AP_reduce", empty, 1);
+      ret := "create_object_with_call_construct_concrete" ($lap_reduceRight, "AP_reduceRight", empty, 1);
 
       (* String object *)
 
