@@ -2,7 +2,9 @@
 
 Run `GILLIAN_JS=gillian-js python3 Gillian-JS/regressions/predicate-totality/run.py`.
 Expected failures require their exact exit/message; a timeout or unrelated crash
-cannot pass. `observations.json` identifies the tested source and binary.
+cannot pass. The runner prints the directory containing its fresh `results.json`.
+The [historical PoC report](https://github.com/Staphylococcus/fold-cc-poc/blob/12e232b5cf957c4fb886ab245d375003751b161b/experiments/gillian/symbolic-json/predicate-totality-observations.json)
+identifies the source and binary tested in that earlier run.
 
 Total mode admits fold/unfold of defined, unguarded predicates and applications
 of fully checked lemmas. Folding consumes the definition; unfolding produces
