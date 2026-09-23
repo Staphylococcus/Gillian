@@ -1,0 +1,8 @@
+spec answer(xs)
+[[ (xs == #xs) * types(#xs : List) * (l-len(#xs) == 1i) ]]
+[[ (ret == 42i) ]] normal
+proc answer(xs) {
+ sep_assert (types(#tail : List) * (#xs == l+({{ #head, #second }}, #tail))) [bind: #head, #second, #tail];
+ assert (#xs == l+({{ #head, #second }}, #tail));
+ ret := 42i; return
+};

@@ -260,8 +260,28 @@ let rec learn_expr
         in
         let rest = Expr.NOp (LstCat, rest) in
         let rest_base_expr =
-          Expr.LstSub
-            (base_expr, e_length, Expr.Infix.(overall_length - e_length))
+          (* An explicit prefix consumes one tail per element. Its syntax bounds
+             the witness size, without a machine-integer bound on the remaining
+             list length or expansion of an arbitrary numeric length literal.
+             Ordinary matching and original assertion domains still apply. *)
+          let drop_prefix elements =
+            List.fold_left
+              (fun tail _ -> Expr.UnOp (Cdr, tail))
+              base_expr elements
+          in
+          match (e, e_length) with
+          | Expr.EList elements, _ when !Config.Verification.total ->
+              drop_prefix elements
+          | Expr.Lit (LList elements), _ when !Config.Verification.total ->
+              drop_prefix elements
+          | _, Expr.Lit (Int n)
+            when !Config.Verification.total && Z.equal n Z.zero -> base_expr
+          | _, Expr.Lit (Int n)
+            when !Config.Verification.total && Z.equal n Z.one ->
+              Expr.UnOp (Cdr, base_expr)
+          | _ ->
+              Expr.LstSub
+                (base_expr, e_length, Expr.Infix.(overall_length - e_length))
         in
         e_outs @ learn_expr kb' rest_base_expr rest
       else
@@ -525,6 +545,7 @@ let ins_outs_formula (kb : KB.t) (pf : Expr.t) : (KB.t * outs) list =
     List.map (fun ins -> (ins, [])) default_ins
   in
   match pf with
+  | Lit (Bool _) -> [ (KB.empty, []) ]
   | BinOp (e1, (Equal | ValueEqual), e2) -> (
       L.verbose (fun fmt -> fmt "IO Equality: %a" Expr.pp pf);
       L.verbose (fun fmt ->
@@ -576,6 +597,11 @@ let ins_outs_assertion
   in
   match (asrt : Asrt.atom) with
   | Emp -> []
+  | a when Option.is_some (Asrt.as_definedness a) ->
+      (* Ordered after ordinary matching steps, so learned witnesses are
+         available. Do not demand variables in short-circuited operands. The
+         checker proves each domain, and never learns an output or a fact. *)
+      [ (KB.empty, []) ]
   | Pure form -> ins_outs_formula kb form
   | CorePred (_, lie, loe) -> ins_and_outs_from_lists kb lie loe
   (* The types assertion has no outs and requires all ins *)
@@ -647,6 +673,15 @@ let s_init_atoms ~preds kb atoms =
 let s_init ~(preds : (string, int list) Hashtbl.t) (kb : KB.t) (a : Asrt.t) :
     (step list, Asrt.t) result =
   L.verbose (fun m -> m "Entering s-init on: %a\n\nKB: %a\n" Asrt.pp a kb_pp kb);
+  let a =
+    if !Config.Verification.total then
+      List.concat_map
+        (fun atom ->
+          if Option.is_some (Asrt.as_definedness atom) then [ atom ]
+          else Asrt.map Reduction.reduce_lexpr [ atom ])
+        a
+    else a
+  in
   let atoms = simplify_asrts a in
   s_init_atoms ~preds kb atoms
 

@@ -376,6 +376,12 @@ module Make (State : SState.S) :
   let subst_in_expr (subst : SVal.SESubst.t) (le : Expr.t) : Expr.t =
     SVal.SESubst.subst_in_expr subst ~partial:false le
 
+  let domain_subst subst =
+    SVal.SESubst.filter subst (fun e _ ->
+        match e with
+        | Expr.PVar _ | LVar _ | ALoc _ -> true
+        | _ -> false)
+
   module Predicate_selection_strategies = struct
     let print_local_info (i : int) (name : string) (args : Expr.t list) : unit =
       L.verbose (fun m ->
@@ -564,6 +570,10 @@ module Make (State : SState.S) :
     L.verbose (fun m -> m "STATE: %a" pp_astate astate);
 
     match (a : Asrt.atom) with
+    | a when Option.is_some (Asrt.as_definedness a) ->
+        (* Checked together against independently defined original facts by
+           [produce], before any assertion is assumed. *)
+        Res_list.return astate
     | Emp ->
         L.verbose (fun fmt -> fmt "Emp assertion.");
         [ Ok astate ]
@@ -743,7 +753,9 @@ module Make (State : SState.S) :
       try
         State.assume_a ~time:"Produce: final check" ~matching:true state
           [ Expr.true_ ]
-      with _ -> None
+      with
+      | err when !Config.Verification.total -> raise err
+      | _ -> None
     in
     L.verbose (fun fmt -> fmt "Concluded final check");
     match admissible with
@@ -760,6 +772,19 @@ module Make (State : SState.S) :
            -----------------@\n\
            Produce assertion: @[%a@]@]"
           Asrt.pp a);
+    if !Config.Verification.total then (
+      let domains = domain_subst subst in
+      let original = SVal.SESubst.substitute_asrt domains ~partial:false a in
+      (* Share fresh logical witnesses, but keep production's own handling of
+          return values and missing program-variable bindings. *)
+      SVal.SESubst.iter domains (fun e v ->
+          match e with
+          | Expr.PVar _ when not (SVal.SESubst.mem subst e) -> ()
+          | _ -> SVal.SESubst.put subst e v);
+      Totality.check_assertion_production ~evaluate:State.eval_expr
+        ~assertion:(fun st e -> State.assert_a st [ e ])
+        ~assume:(fun st es -> State.assume_a st es)
+        (State.copy astate.state) original);
     let sas = MP.simplify_asrts a in
     produce_asrt_list astate subst sas
 
@@ -780,6 +805,10 @@ module Make (State : SState.S) :
     produce state subst asrt
     |> List.filter_map (function
          | Error err ->
+             if !Config.Verification.total then
+               raise
+                 (Gillian_result.Exc.analysis_failure
+                    (Fmt.str "Postcondition production failed: %a" pp_err_t err));
              L.verbose (fun m -> m "Warning: %a" pp_err_t err);
              None (* Ignoring errors *)
          | Ok state ->
@@ -1170,6 +1199,7 @@ module Make (State : SState.S) :
                      (parens (pair ~sep:comma Expr.pp Expr.full_pp))))
               outs);
         List.iter (fun (u, v) -> SVal.SESubst.put subst u v) outs;
+        let original_eos = eos in
         let eos =
           let+ e = eos in
           match SVal.SESubst.subst_in_expr_opt subst e with
@@ -1184,14 +1214,30 @@ module Make (State : SState.S) :
         in
 
         try
-          List.fold_left2
-            (fun ac vd od ->
-              match ac with
-              | Abort _ | Vanish -> ac
-              | Success state ->
-                  let pf = Expr.BinOp (vd, ValueEqual, od) in
-                  cons_pure state pf)
-            (Success state) vos eos
+          let result =
+            List.fold_left2
+              (fun ac vd od ->
+                match ac with
+                | Abort _ | Vanish -> ac
+                | Success state ->
+                    let pf = Expr.BinOp (vd, ValueEqual, od) in
+                    cons_pure state pf)
+              (Success state) vos eos
+          in
+          (match result with
+          | Success _ when !Config.Verification.total ->
+              (* Resource outputs are available values. Once equality with the
+                 proposed witnesses has been proved, retain those values for
+                 direct logical binders instead of synthesized projections.
+                 This does not introduce a fact or bypass a failed match. *)
+              List.iter2
+                (fun target value ->
+                  match target with
+                  | Expr.LVar _ -> SVal.SESubst.put subst target value
+                  | _ -> ())
+                original_eos vos
+          | _ -> ());
+          result
         with Invalid_argument _ ->
           Fmt.failwith "Invalid amount of args for the following MP step : %a"
             MP.pp_step step)
@@ -1265,6 +1311,16 @@ module Make (State : SState.S) :
         let open Res_list.Syntax in
         let res_list =
           match (p : Asrt.atom) with
+          | a when Option.is_some (Asrt.as_definedness a) ->
+              let fact, e = Option.get (Asrt.as_definedness a) in
+              let e =
+                SVal.SESubst.subst_in_expr (domain_subst subst) ~partial:true e
+              in
+              Totality.check_proof_expression ~context:"Matched assertion"
+                ~evaluate:(State.eval_expr state)
+                ~assertion:(fun e -> State.assert_a state [ e ])
+                (if fact then Expr.UnOp (Not, e) else e);
+              Res_list.return astate
           | CorePred (a_id, e_ins, e_outs)
             when Option.is_none (Asrt.as_user_pred_name a_id) -> (
               let vs_ins = List.map (subst_in_expr_opt astate subst) e_ins in
@@ -1348,6 +1404,16 @@ module Make (State : SState.S) :
                     let* out =
                       SVal.SESubst.subst_in_expr_opt subst out
                       |> Result_utils.of_option ~none:()
+                    in
+                    let out =
+                      (* This is a proposed witness, not authored syntax. Reduce
+                         it to an available value before instantiating the
+                         original assertion. The assertion must still match and
+                         its retained expressions must still be defined; no
+                         assumption is obtained from the proposal itself. *)
+                      if !Config.Verification.total then
+                        State.eval_expr state out
+                      else out
                     in
                     (* Special case: learning len x when we know x *)
                     let discharges =

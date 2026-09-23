@@ -1,0 +1,5 @@
+pure pred Partial(xs : List) : (l-len(l-sub(xs, 1i, 0i)) == 0i);
+spec answer(xs)
+[[ (xs == #xs) * types(#xs : List) ]]
+[[ (ret == 42i) * Partial(#xs) ]] normal
+proc answer(xs) { ret := 42i; return };

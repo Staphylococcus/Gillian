@@ -1,0 +1,8 @@
+pure nounfold pred KnownList(id, value : List; xs : List) : (xs == value);
+spec answer(xs, prefix, suffix)
+[[ (xs == #xs) * (prefix == #prefix) * (suffix == #suffix) * types(#xs : List) * KnownList(0i, #prefix; #prefix) * KnownList(1i, #suffix; #suffix) * (#xs == l+(#prefix, #suffix)) ]]
+[[ (ret == #xs) ]] normal
+proc answer(xs, prefix, suffix) {
+ sep_assert (KnownList(0i, #prefix; #same) * KnownList(1i, #suffix; #same)) [bind: #same];
+ ret := xs; return
+};

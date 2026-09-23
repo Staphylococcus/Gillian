@@ -205,6 +205,8 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
         | UnsignedRightShiftF
         | M_atan2
         | M_pow -> both NumberType
+        | SetMem when proof -> need (typ right SetType)
+        | (SetSub | SetDiff) when proof -> both SetType
         | SetMem | SetSub | SetDiff ->
             unsupported "set expressions in executable code."
         | And | Or | Impl | LstNth | LstRepeat | StrNth | IDiv | IMod ->
@@ -218,7 +220,7 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
     | ESet xs when proof -> children xs
     | EList xs -> children xs
     | Lit _ | PVar _ -> ()
-    | LVar _ | ALoc _ when proof -> ()
+    | (LVar _ | ALoc _) when proof -> ()
     | NOp _
     | ESet _
     | ConstructorApp _
@@ -243,6 +245,77 @@ let check_proof_expression ~context ~evaluate ~assertion expr =
             (Gillian_result.Exc.analysis_failure
                (Fmt.str "%s is not proved defined: %a" context Expr.pp partial)))
       expr
+
+(* Attach obligations before any assertion rewriting or automatic unfolding.
+   Keeping original facts also lets producers establish domains without using
+   the unchecked expression's own (possibly simplified) assumption. *)
+let preserve_assertion_domains a =
+  if not !Config.Verification.total then a
+  else
+    let value e = Asrt.definedness ~fact:false e in
+    let fact e = Asrt.definedness ~fact:true e in
+    let obligations =
+      List.concat_map
+        (function
+          | a when Option.is_some (Asrt.as_definedness a) ->
+              unsupported
+                "internal definedness obligations in input assertions."
+          | Asrt.Emp -> []
+          | Pure e -> [ fact e ]
+          | Types ets ->
+              List.map
+                (fun (e, t) ->
+                  fact (Expr.BinOp (UnOp (TypeOf, e), Equal, Lit (Type t))))
+                ets
+          | CorePred (_, ins, outs) -> List.map value (ins @ outs)
+          | Wand { lhs = _, lhs; rhs = _, rhs } -> List.map value (lhs @ rhs))
+        a
+    in
+    List.sort_uniq Stdlib.compare obligations @ a
+
+exception Pending_domain of Expr.t
+
+(* Work on a disposable state. Only independently defined original facts may
+   enter the domain context; an unchecked fact cannot justify itself or another
+   unchecked fact. A contradictory checked fact is genuine infeasibility. *)
+let check_assertion_production ~evaluate ~assertion ~assume state a =
+  if !Config.Verification.total then
+    let obligations = List.filter_map Asrt.as_definedness a in
+    let facts, values = List.partition fst obligations in
+    let check state (fact, e) =
+      let proves c = assertion state (evaluate state c) in
+      check_expression ~proof:true ~proves ~evaluate:(evaluate state)
+        ~require:(fun partial condition ->
+          if not (proves condition) then raise (Pending_domain partial))
+        (if fact then Expr.UnOp (Not, e) else e)
+    in
+    let rec establish state pending =
+      let ready, deferred =
+        List.fold_left
+          (fun (ready, deferred) ((_, e) as obligation) ->
+            try
+              check state obligation;
+              (* A defined fact already reduced to true adds no information.
+                 Avoid rechecking consistency of the entire scratch context for
+                 batches of such facts (common in matched predicate outputs). *)
+              if Expr.equal (evaluate state e) Expr.true_ then (ready, deferred)
+              else (e :: ready, deferred)
+            with Pending_domain _ -> (ready, obligation :: deferred))
+          ([], []) pending
+      in
+      if ready = [] then List.iter (check state) (List.rev deferred @ values)
+      else
+        (* Batch independently checked facts: no pending fact enters the context,
+           and one consistency query suffices for this round. *)
+        match assume state (List.rev ready) with
+        | None -> ()
+        | Some state -> establish state (List.rev deferred)
+    in
+    try establish state facts
+    with Pending_domain e ->
+      raise
+        (Gillian_result.Exc.analysis_failure
+           (Fmt.str "Produced assertion is not proved defined: %a" Expr.pp e))
 
 let spec (proc : ('a, 'b) Proc.t) =
   match proc.proc_spec with

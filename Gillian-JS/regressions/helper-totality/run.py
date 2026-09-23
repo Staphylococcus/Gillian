@@ -89,7 +89,7 @@ CASES = [
     ("lemma-axiom.gil", ["--total"], (124, "requires a nonempty checked lemma proof")),
     ("lemma-macro-cycle.gil", ["--total"], (124, "cyclic macro expansion")),
     ("lemma-produce.gil", ["--total"], (124, "proof operation outside the totality fragment")),
-    ("lemma-empty-pre.gil", ["--total"], (124, "requires a nonempty checked lemma proof")),
+    ("lemma-empty-pre.gil", ["--total"], (124, "precondition could not be normalized; proof coverage is incomplete")),
     ("lemma-caller.gil", ["--total"], TOTAL),
     ("lemma-recursive.gil", ["--total"], TOTAL),
     ("lemma-no-descent.gil", ["--total"], (124, "has not passed every lemma proof case")),

@@ -37,6 +37,19 @@ let as_user_pred_name (name : string) : string option =
 let pred (name : string) (ins : Expr.t list) (outs : Expr.t list) : atom =
   CorePred (user_pred_name name, ins, outs)
 
+(* Internal proof obligations retain the unreduced expression through logic
+   preprocessing and substitution. They are observations, never heap resources.
+   The Boolean flag distinguishes original pure facts from value expressions. *)
+let definedness_name = "GILLIAN_INTERNAL_DEFINEDNESS"
+
+let definedness ~fact expr =
+  CorePred (definedness_name, [ Expr.Lit (Bool fact); expr ], [])
+
+let as_definedness = function
+  | CorePred (name, [ Expr.Lit (Bool fact); expr ], [])
+    when String.equal name definedness_name -> Some (fact, expr)
+  | _ -> None
+
 let compare x y =
   let cmp = Stdlib.compare in
   match (x, y) with
@@ -73,6 +86,9 @@ let prioritise (a1 : atom) (a2 : atom) =
   in
 
   match (a1, a2) with
+  | a, b when Option.is_some (as_definedness a) ->
+      if Option.is_some (as_definedness b) then Stdlib.compare a b else 1
+  | _, b when Option.is_some (as_definedness b) -> -1
   | Types [ (e, _) ], Types [ (e', _) ] -> lloc_aloc_pvar_lvar e e'
   | Types _, _ -> -1
   | _, Types _ -> 1
@@ -141,6 +157,7 @@ let pure_asrts : t -> Expr.t list =
 
 (* Check if --a-- is a pure assertion *)
 let is_pure_asrt : atom -> bool = function
+  | a when Option.is_some (as_definedness a) -> true
   | CorePred _ | Wand _ -> false
   | _ -> true
 

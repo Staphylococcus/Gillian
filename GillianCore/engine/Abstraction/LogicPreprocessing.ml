@@ -730,6 +730,45 @@ let preprocess (prog : ('a, int) Prog.t) (unfold : bool) : ('a, int) Prog.t =
       lemmas'
   in
 
+  (* Do this after type elaboration but before auto-unfolding can drop an
+     unused argument or reduction can erase a partial subexpression. *)
+  let () =
+    if !Config.Verification.total then (
+      let preserve =
+        object
+          inherit [_] Visitors.endo
+
+          method! visit_assertion () a =
+            (* Invariants and macro assertions need the same declared predicate
+               parameter types already elaborated in specs and definitions. *)
+            let a =
+              match Pred.extend_asrt_pred_types preds' a with
+              | Ok a -> a
+              | Error msg ->
+                  raise
+                    (Gillian_result.Exc.analysis_failure ~is_preprocessing:true
+                       msg)
+            in
+            Totality.preserve_assertion_domains a
+        end
+      in
+      Hashtbl.filter_map_inplace
+        (fun _ p -> Some (preserve#visit_proc () p))
+        procs';
+      Hashtbl.filter_map_inplace
+        (fun _ p -> Some (preserve#visit_pred () p))
+        preds';
+      Hashtbl.filter_map_inplace
+        (fun _ l -> Some (preserve#visit_lemma () l))
+        lemmas';
+      Hashtbl.filter_map_inplace
+        (fun _ s -> Some (preserve#visit_spec () s))
+        onlyspecs;
+      Hashtbl.filter_map_inplace
+        (fun _ m -> Some (preserve#visit_macro () m))
+        prog.macros)
+  in
+
   let preds'', procs'', bi_specs, lemmas'', onlyspecs' =
     match unfold with
     | false -> (preds', procs', prog.bi_specs, lemmas', onlyspecs)

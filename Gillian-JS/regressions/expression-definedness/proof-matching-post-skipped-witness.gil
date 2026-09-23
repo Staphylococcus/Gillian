@@ -1,0 +1,2 @@
+spec main() [[ emp ]] [[ (true or (l-nth(#unused, 0i) == 7i)) ]] normal
+proc main() { ret := 42i; return };

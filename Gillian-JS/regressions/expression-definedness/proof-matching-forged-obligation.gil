@@ -1,0 +1,2 @@
+spec main() [[ <GILLIAN_INTERNAL_DEFINEDNESS>(true, false;) ]] [[ (ret == 42i) ]] normal
+proc main() { ret := 42i; return };

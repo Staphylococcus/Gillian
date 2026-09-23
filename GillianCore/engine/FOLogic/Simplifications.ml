@@ -1060,35 +1060,42 @@ let simplify_implication
   exists
 
 let admissible_assertion (a : Asrt.t) : bool =
-  L.(
-    tmi (fun m ->
-        m "-----------\nAdmissible?\n-----------\n%s"
-          ((Fmt.to_to_string Asrt.full_pp) a)));
+  (* An unchecked partial term must not make a precondition/definition vanish
+     before its original domain obligation reaches a state-aware checker. *)
+  if
+    !Config.Verification.total
+    && List.exists (fun a -> Option.is_some (Asrt.as_definedness a)) a
+  then true
+  else (
+    L.(
+      tmi (fun m ->
+          m "-----------\nAdmissible?\n-----------\n%s"
+            ((Fmt.to_to_string Asrt.full_pp) a)));
 
-  let pfs = PFS.init () in
-  let gamma = Type_env.init () in
+    let pfs = PFS.init () in
+    let gamma = Type_env.init () in
 
-  let a = Asrt.pvars_to_lvars a in
+    let a = Asrt.pvars_to_lvars a in
 
-  let separate : Asrt.atom -> unit = function
-    | Pure f -> PFS.extend pfs f
-    | Types ets ->
-        List.iter
-          (fun (le, t) ->
-            match (le : Expr.t) with
-            | LVar x | PVar x -> Type_env.update gamma x t
-            | _ -> ())
-          ets
-    | _ -> ()
-  in
-  try
-    List.iter separate a;
-    let _ = simplify_pfs_and_gamma ~kill_new_lvars:true pfs gamma in
-    let res = not (PFS.mem pfs Expr.false_) in
-    L.tmi (fun m -> m "Admissible? %b\n" res);
-    res
-  with e ->
-    L.tmi (fun m ->
-        m "Considered not admissible because of exception!! %s"
-          (Printexc.to_string e));
-    false
+    let separate : Asrt.atom -> unit = function
+      | Pure f -> PFS.extend pfs f
+      | Types ets ->
+          List.iter
+            (fun (le, t) ->
+              match (le : Expr.t) with
+              | LVar x | PVar x -> Type_env.update gamma x t
+              | _ -> ())
+            ets
+      | _ -> ()
+    in
+    try
+      List.iter separate a;
+      let _ = simplify_pfs_and_gamma ~kill_new_lvars:true pfs gamma in
+      let res = not (PFS.mem pfs Expr.false_) in
+      L.tmi (fun m -> m "Admissible? %b\n" res);
+      res
+    with e ->
+      L.tmi (fun m ->
+          m "Considered not admissible because of exception!! %s"
+            (Printexc.to_string e));
+      false)

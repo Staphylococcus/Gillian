@@ -2622,6 +2622,9 @@ end
 module ETSet = Set.Make (MyET)
 
 let reduce_types (a : Asrt.t) : Asrt.t =
+  let obligations =
+    List.filter (fun a -> Option.is_some (Asrt.as_definedness a)) a
+  in
   try
     let others, ets =
       List.fold_left
@@ -2642,7 +2645,7 @@ let reduce_types (a : Asrt.t) : Asrt.t =
     | [], ets -> [ Asrt.Types ets ]
     | others, [] -> others
     | others, ets -> Asrt.Types ets :: others
-  with PFSFalse -> [ Asrt.Pure (Lit (Bool false)) ]
+  with PFSFalse -> Asrt.Pure (Lit (Bool false)) :: obligations
 
 (* Reduction of assertions *)
 let reduce_assertion_loop
@@ -2652,6 +2655,7 @@ let reduce_assertion_loop
     (a : Asrt.t) : Asrt.t =
   let fe = reduce_lexpr_loop ~matching pfs gamma in
   let f : Asrt.atom -> Asrt.t = function
+    | a when Option.is_some (Asrt.as_definedness a) -> [ a ]
     (* Empty heap *)
     | Asrt.Emp -> []
     (* Star *)
@@ -2688,7 +2692,8 @@ let reduce_assertion_loop
   let result = List.concat_map f a in
   let result =
     if List.mem (Asrt.Pure (Lit (Bool false))) result then
-      [ Asrt.Pure (Lit (Bool false)) ]
+      Asrt.Pure (Lit (Bool false))
+      :: List.filter (fun a -> Option.is_some (Asrt.as_definedness a)) result
     else result
   in
 
@@ -2790,7 +2795,11 @@ let reduce_assertion
     if Asrt.equal a' a then a' else loop a'
   in
 
-  loop a
+  try loop a
+  with ReductionException (_, message) when !Config.Verification.total ->
+    raise
+      (Gillian_result.Exc.analysis_failure
+         ("Assertion reduction failed: " ^ message))
 
 let is_tautology ?pfs ?gamma formula =
   reduce_lexpr ?pfs ?gamma formula = Lit (Bool true)

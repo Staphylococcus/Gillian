@@ -1,0 +1,5 @@
+pure pred Ignore(n) : emp;
+spec answer(xs)
+[[ (xs == #xs) * types(#xs : List) ]]
+[[ (ret == 42i) * Ignore(l-len(l-sub(#xs, 1i, 0i))) ]] normal
+proc answer(xs) { ret := 42i; return };

@@ -16,6 +16,7 @@ DESCENT = (1, "variant is not a strictly smaller natural integer")
 ENTRY = (1, "entry variant is not a natural integer")
 POST = (1, "Couldn't satisfy postcondition")
 CASES = [
+    ("fabricated-cell.gil", ["--total"], (1, "MIFCell(#obj, \"x\")")),
     ("empty-subset-wrong.gil", ["--total"], POST),
     ("empty-subset.gil", ["--total"], TOTAL),
     ("domain-unknown-difference.gil", ["--total"], (124, "Unsupported property-domain matching")),

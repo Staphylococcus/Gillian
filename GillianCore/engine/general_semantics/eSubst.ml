@@ -319,6 +319,7 @@ module Make (Val : Val.S) : S with type vt = Val.t = struct
       val empty_subst = init []
       val mutable self_subst = init []
       val mutable self_partial = true
+      val mutable in_definedness = false
 
       method init ~partial ~subst =
         self_subst <- subst;
@@ -371,9 +372,17 @@ module Make (Val : Val.S) : S with type vt = Val.t = struct
 
       method! visit_UnOp () this unop e =
         match (unop, e) with
-        | (LstLen, PVar _ | LstLen, LVar _) when mem self_subst this ->
+        | (LstLen, PVar _ | LstLen, LVar _)
+          when (not in_definedness) && mem self_subst this ->
             Val.to_expr (Option.get (get self_subst this))
         | _ -> super#visit_UnOp () this unop e
+
+      method! visit_CorePred () this name ins outs =
+        let previous = in_definedness in
+        in_definedness <- Option.is_some (Asrt.as_definedness this);
+        Fun.protect
+          ~finally:(fun () -> in_definedness <- previous)
+          (fun () -> super#visit_CorePred () this name ins outs)
 
       method! visit_Exists () this bt e =
         let binders = List.to_seq bt |> Seq.map fst in

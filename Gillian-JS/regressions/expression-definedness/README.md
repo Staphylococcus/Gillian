@@ -130,3 +130,45 @@ operators remain outside this checker; no set execution model was added.
 
 Predicate bodies, automatic unfolding, binder-aware assertion matching and
 general pre/postcondition normalization still require separate domain audits.
+
+## Assertion production, matching and automatic unfolding
+
+Total-mode preprocessing now retains each original assertion expression before
+rewriting or automatic unfolding, including otherwise unused predicate arguments.
+An internal obligation accompanies the ordinary assertion; source-written
+obligations are rejected. Substitution preserves the original operator tree and
+cannot replace a list-length expression with a learned compound binding.
+
+Precondition normalization and assertion production check domains in a scratch
+state. Only original facts whose own operations are already defined can supply
+further domain facts; neither self-justification nor circular partial facts are
+accepted. A checked contradictory fact remains infeasible. Matching checks the
+retained expressions after ordinary witness capture, without assuming the target.
+Predicate parameter types are elaborated at invariant and macro assertion sites,
+as they already were for definitions and specifications.
+
+Proposed matching witnesses may be simplified by the existing evaluator. A
+successfully matched resource output can replace an equal proposed logical
+witness. Both choices still require the ordinary match and the original assertion's
+domain checks; they never add assumptions. This avoids retaining synthesized
+whole-list/suffix slices when an actual list value is already available. Authored
+slice bounds remain unchanged. Skipped operands need no fresh witness.
+
+For an explicit list prefix, the matcher proposes one existing `Cdr` operation
+per element, including prefixes longer than one element. Witness size depends
+on the written pattern, not the input length or an arbitrary numeric length
+literal. The two-head controls cover an unbounded valid tail, an incorrect
+tail equality and a too-short input. An explicitly authored tail slice still
+requires its original count bound; synthesized witnesses do not change that rule.
+
+The `proof-matching-*` fixtures cover arbitrary/nonempty preconditions, posts,
+separation assertions, fresh binders, automatic and explicit predicate unfolding,
+unused arguments, a partial precondition alternative, internal-marker rejection,
+and valid/wrong whole-list witness claims. Proof-term units cover independent
+fact closure, preserved substitutions and post-production failure propagation.
+Proof-only membership, subset and difference require their set operands and
+recursively check their elements; executable sets remain unsupported.
+
+These checks complete the current assertion-domain slice. They do not establish
+a whole-JavaScript metatheorem, arbitrary finite JSON admission or the PoC's final
+proof gates. The PoC accepted-semantics audit records those separate obligations.

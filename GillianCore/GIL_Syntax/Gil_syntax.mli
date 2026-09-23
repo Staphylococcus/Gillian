@@ -485,6 +485,11 @@ module Asrt : sig
   (** [pred name ins outs] builds a user-predicate assertion atom. *)
   val pred : string -> Expr.t list -> Expr.t list -> atom
 
+  (** Internal unreduced domain obligations; not heap resources. *)
+  val definedness : fact:bool -> Expr.t -> atom
+
+  val as_definedness : atom -> (bool * Expr.t) option
+
   (** Comparison of assertions *)
   val compare : atom -> atom -> int
 
@@ -718,6 +723,10 @@ module Pred : sig
 
   (** Infers parameter types and makes them explicit in the assertions *)
   val explicit_param_types : (string, t) Hashtbl.t -> t -> (t, string) result
+
+  (** Makes declared predicate parameter types explicit at an assertion site. *)
+  val extend_asrt_pred_types :
+    (string, t) Hashtbl.t -> Asrt.t -> (Asrt.t, string) result
 
   (** Combines a list of ins and a list of outs putting them in the right order
       according to a given predicate. *)

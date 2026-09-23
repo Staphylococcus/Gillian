@@ -1,0 +1,4 @@
+spec answer(xs)
+[[ (xs == #xs) * types(#xs : List) ]]
+[[ (ret == 42i) ]] normal
+proc answer(xs) { sep_assert ((#fresh == #xs) * (l-len(l-sub(#fresh, 1i, 0i)) == 0i)) [bind: #fresh]; ret := 42i; return };

@@ -1,0 +1,5 @@
+pure pred Domain(xs : List) :
+ (xs == {{ }}) * (l-len(l-sub(xs, 1i, 0i)) == 1i),
+ (xs == {{ 7i }});
+spec answer(xs) [[ (xs == #xs) * Domain(#xs) ]] [[ (ret == 42i) ]] normal
+proc answer(xs) { ret := 42i; return };

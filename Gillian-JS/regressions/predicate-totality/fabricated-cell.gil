@@ -1,0 +1,3 @@
+nounfold pred Cell(obj; value) : <Cell>(obj, "x"; value);
+spec answer(obj) [[ (obj == #obj) * types(#obj : Obj) ]] [[ (ret == 42i) ]] normal
+proc answer(obj) { fold Cell(obj, 42i); ret := 42i; return };

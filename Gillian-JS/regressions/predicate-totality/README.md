@@ -25,3 +25,10 @@ natural-induction lemma, false facts, resource duplication through false purity
 and aliases, false folds/posts, guarded predicates and unfolding exhaustion.
 Ordinary verification retains its legacy author-hint behavior. These controls do
 not establish general matcher soundness or the full compiled-JavaScript theorem.
+
+`fabricated-cell.gil` attempts to fold a native cell without owning it and must
+fail with the missing-cell error; `heap-cell.gil` is the valid owned-cell
+consume/read/refold counterpart. Allocation-collision controls alone do not
+establish this resource-consumption property. Total-mode postcondition production
+also retains every error and propagates final consistency-check exceptions;
+proof-term units exercise both an isolated failure and a successful sibling.

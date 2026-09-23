@@ -843,6 +843,20 @@ module Make (SPState : PState.S) = struct
       ?(pvars : SS.t option)
       (a : Asrt.t) : ((SPState.t * SESubst.t) list, string) result =
     let falsePFs pfs = PFS.mem pfs Expr.false_ in
+    (if !Config.Verification.total then
+       let subst =
+         SESubst.init
+           (List.map
+              (fun x -> (Expr.PVar x, Expr.LVar (LVar.alloc ())))
+              (SS.elements (Asrt.pvars a)))
+       in
+       let original = SESubst.substitute_asrt subst ~partial:true a in
+       let state = SPState.init_with_pred_table pred_defs init_data in
+       Totality.check_assertion_production ~evaluate:SPState.eval_expr
+         ~assertion:(fun st e -> SPState.assert_a st [ e ])
+         ~assume:(fun st es -> SPState.assume_a st es)
+         state original);
+    let a = List.filter (fun a -> Option.is_none (Asrt.as_definedness a)) a in
     let a = normalise_a_bit a in
     let svars = SS.filter is_spec_var_name (Asrt.lvars a) in
     L.verbose (fun m ->
