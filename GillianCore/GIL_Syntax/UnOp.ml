@@ -48,6 +48,8 @@ type t = TypeDef__.unop =
   | SetToList  (** From set to list *)
   (* Strings *)
   | StrLen  (** String length *)
+  | NumberToUtf16
+  | Utf16ToNumber
   | Utf16Len  (** Mathematical UTF-16 code-unit length *)
   | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
   (* Integer vs Number *)
@@ -88,6 +90,8 @@ let str = function
   | LstLen -> "l-len"
   | LstRev -> "l-rev"
   | StrLen -> "s-len"
+  | NumberToUtf16 -> "num_to_utf16"
+  | Utf16ToNumber -> "utf16_to_num"
   | Utf16Len -> "u16-len"
   | StrToBytes -> "s-bytes"
   | SetToList -> "set_to_list"

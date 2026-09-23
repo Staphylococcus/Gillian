@@ -5,12 +5,14 @@ let index key =
   | Some n when n >= 0L && n < 4294967295L && Int64.to_string n = key -> Some n
   | _ -> None
 
-let sort keys =
+let sort_by key keys =
   List.stable_sort
     (fun a b ->
-      match (index a, index b) with
+      match (index (key a), index (key b)) with
       | Some a, Some b -> Int64.compare a b
       | Some _, None -> -1
       | None, Some _ -> 1
       | None, None -> 0)
     keys
+
+let sort keys = sort_by Fun.id keys

@@ -1,5 +1,5 @@
 import "javert_internal_functions.jsil", "javert_logic_macros.jsil", "ArrayBuffer.jsil", "ArrayLogic.jsil", "DataView.jsil", "ByteLogic.gil", "Uint8Array.jsil";
 spec answer(a)
-[[ (a == #a) * DataProp(#a, "x"; nan) ]]
-[[ DataProp(#a, "x"; nan) * (ret == true) ]] normal
+[[ (a == #a) * DataProp(#a, u16"x"; nan) ]]
+[[ DataProp(#a, u16"x"; nan) * (ret == true) ]] normal
 proc answer(a) { ret := true; return };

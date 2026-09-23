@@ -666,6 +666,8 @@ module Axiomatised_operations = struct
 
   let num2str, def_num2str = mk_fun_decl "num2str" [ t_number ] t_bytes
   let str2num, def_str2num = mk_fun_decl "str2num" [ t_bytes ] t_number
+  let num2utf16, def_num2utf16 = mk_fun_decl "num2utf16" [ t_number ] Utf16.sort
+  let utf162num, def_utf162num = mk_fun_decl "utf162num" [ Utf16.sort ] t_number
   let snth, def_snth = mk_fun_decl "s-nth" [ t_bytes; t_number ] t_bytes
 
   let lrev, def_lrev =
@@ -1012,7 +1014,13 @@ let rec encode_lit (lit : Literal.t) : Encoding.t =
     | Bool b -> bool_k b >- BooleanType
     | Int i -> int_zk i >- IntType
     | Num n -> number_literal n >- NumberType
-    | Utf16String s -> Utf16.encode (Utils.Utf16.to_canonical s) >- Utf16Type
+    | Utf16String s ->
+        require_definition Axiomatised_operations.def_utf162num;
+        let bytes = Utils.Utf16.to_canonical s in
+        let encoded = Utf16.encode bytes in
+        let parsed = Axiomatised_operations.utf162num <| encoded in
+        let value = number_literal (Arith_utils.string_to_number bytes) in
+        native ~facts:[ eq parsed value ] Utf16Type encoded
     | String s ->
         require_definition Axiomatised_operations.def_str2num;
         let encoded = encode_string s in
@@ -1199,6 +1207,8 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let res = Axiomatised_operations.snth $$ [ str'.expr; index'.expr ] in
       res >- StringType
   | FMod
+  | Utf16Less
+  | Utf16Nth
   | StrLess
   | BitwiseAnd
   | BitwiseOr
@@ -1266,9 +1276,17 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
   | Utf16Len ->
       let>- le = get_utf16 le in
       seq_len le.expr >- IntType
-  | ToStringOp ->
-      require_definition def_num2str;
-      require_definition def_str2num;
+  | ToStringOp | NumberToUtf16 ->
+      let num2str, str2num, encode_string, typ =
+        if op = NumberToUtf16 then (
+          require_definition def_num2utf16;
+          require_definition def_utf162num;
+          (num2utf16, utf162num, Utf16.encode, Type.Utf16Type))
+        else (
+          require_definition def_num2str;
+          require_definition def_str2num;
+          (num2str, str2num, encode_string, Type.StringType))
+      in
       let>- le = get_num le in
       (* JavaScript formatting identifies the two zeros. Leaving zero in the
          uninterpreted remainder would distinguish IEEE-equal property keys.
@@ -1284,19 +1302,23 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
                    (fp_un "fp.isNegative" le.expr)
                    (encode_string "-Infinity")
                    (encode_string "Infinity"))
-                (Axiomatised_operations.num2str <| le.expr)))
+                (num2str <| le.expr)))
       in
       (* Every formatter-produced spelling parses back to the same number;
          numeric equality identifies signed zeros, and NaN needs its own test.
          Keep this fact with the encoded term so native set/sequence reasoning
          can distinguish numeric keys without reconstructing the formatter. *)
-      let parsed = Axiomatised_operations.str2num <| formatted in
+      let parsed = str2num <| formatted in
       let roundtrip =
         bool_or
           (fp_bin "fp.eq" parsed le.expr)
           (bool_and (fp_un "fp.isNaN" parsed) (fp_un "fp.isNaN" le.expr))
       in
-      native ~facts:[ roundtrip ] StringType formatted
+      native ~facts:[ roundtrip ] typ formatted
+  | Utf16ToNumber ->
+      require_definition def_utf162num;
+      let>- le = get_utf16 le in
+      utf162num <| le.expr >- NumberType
   | ToNumberOp ->
       require_definition def_str2num;
       let>- le = get_string le in

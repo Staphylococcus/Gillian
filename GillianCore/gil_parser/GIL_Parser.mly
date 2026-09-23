@@ -148,6 +148,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token SETTOLIST
 %token LSTLEN
 %token STRLEN
+%token NUMTOUTF16 UTF16TONUM UTF16NTH UTF16LESS
 %token UTF16LEN
 %token STRBYTES
 %token INTTONUM
@@ -415,6 +416,8 @@ atomic_expr_target:
         Expr.NOp (nop, les)
      }
 (* s-nth (string, n) *)
+  | UTF16NTH; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
+     { Expr.BinOp (e1, Utf16Nth, e2) }
   | STRNTH; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
      { Expr.BinOp (e1, StrNth, e2) }
 (* (e) *)
@@ -534,6 +537,8 @@ comparison_expr:
     { Expr.BinOp (e2, FLessThan, e1) }
   | e1 = comparison_expr; FGE; e2 = shift_expr
     { Expr.BinOp (e2, FLessThanEqual, e1) }
+  | e1 = comparison_expr; UTF16LESS; e2 = shift_expr
+    { Expr.BinOp (e1, Utf16Less, e2) }
   | e1 = comparison_expr; SLT; e2 = shift_expr
     { Expr.BinOp (e1, StrLess, e2) }
 
@@ -1253,6 +1258,8 @@ unop_target:
   | LSTLEN      { UnOp.LstLen }
   | LSTREV      { UnOp.LstRev }
   | STRLEN      { UnOp.StrLen }
+  | NUMTOUTF16  { UnOp.NumberToUtf16 }
+  | UTF16TONUM  { UnOp.Utf16ToNumber }
   | UTF16LEN    { UnOp.Utf16Len }
   | STRBYTES    { UnOp.StrToBytes }
   | SETTOLIST   { UnOp.SetToList }

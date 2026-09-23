@@ -1,0 +1,2 @@
+spec check() [[ emp ]] [[ (ret == u16"A") ]] normal
+proc check() { ret := u16-nth(u16"A😀", 0.0); return };

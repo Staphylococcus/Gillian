@@ -11,11 +11,11 @@ import tempfile
 ROOT = Path(__file__).resolve().parent
 COMMAND = shlex.split(os.environ.get("GILLIAN_JS", "gillian-js"))
 CASES = [
-    ("call.js", 0, 'SUCCESSFUL TERMINATION: (normal, "concrete call ready")'),
-    ("nested-call.js", 0, 'SUCCESSFUL TERMINATION: (normal, "nested call ready")'),
-    ("loop-call.js", 0, 'SUCCESSFUL TERMINATION: (normal, "loop call ready")'),
-    ("caught-call.js", 0, 'SUCCESSFUL TERMINATION: (normal, "caught call ready")'),
-    ("empty-call.js", 0, 'SUCCESSFUL TERMINATION: (normal, "empty call ready")'),
+    ("call.js", 0, 'SUCCESSFUL TERMINATION: (normal, u16"concrete call ready")'),
+    ("nested-call.js", 0, 'SUCCESSFUL TERMINATION: (normal, u16"nested call ready")'),
+    ("loop-call.js", 0, 'SUCCESSFUL TERMINATION: (normal, u16"loop call ready")'),
+    ("caught-call.js", 0, 'SUCCESSFUL TERMINATION: (normal, u16"caught call ready")'),
+    ("empty-call.js", 0, 'SUCCESSFUL TERMINATION: (normal, u16"empty call ready")'),
     ("call-wrong.js", 1, 'SUCCESSFUL TERMINATION: (error,'),
 ]
 

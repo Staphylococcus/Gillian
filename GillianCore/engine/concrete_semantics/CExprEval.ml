@@ -126,6 +126,9 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
   | M_sin -> unary_num_thing lit sin
   | M_sqrt -> unary_num_thing lit sqrt
   | M_tan -> unary_num_thing lit tan
+  | NumberToUtf16 ->
+      Utf16String (Utf16.of_canonical (float_to_string_inner (as_num lit)))
+  | Utf16ToNumber -> Num (string_to_number (Utf16.to_canonical (as_utf16 lit)))
   | ToStringOp ->
       let n = as_num lit in
       String (float_to_string_inner n)
@@ -291,6 +294,18 @@ let rec evaluate_binop
           let s1 = as_str lit1 in
           let s2 = as_str lit2 in
           String (s1 ^ s2)
+      | Utf16Less -> Bool (Utf16.compare (as_utf16 lit1) (as_utf16 lit2) < 0)
+      | Utf16Nth ->
+          let units = Utf16.code_units (Utf16.to_canonical (as_utf16 lit1)) in
+          let index = as_num lit2 in
+          if
+            (not (Float.is_integer index))
+            || index < 0.
+            || index >= float_of_int (List.length units)
+          then evalerr "UTF-16 index out of bounds";
+          Utf16String
+            (Utf16.of_canonical
+               (Utf16.of_code_units [ List.nth units (int_of_float index) ]))
       | Utf16Cat -> Utf16String (Utf16.concat (as_utf16 lit1) (as_utf16 lit2)))
 
 and evaluate_nop (nop : NOp.t) (ll : Literal.t list) : CVal.M.t =

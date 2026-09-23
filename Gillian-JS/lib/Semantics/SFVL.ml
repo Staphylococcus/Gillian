@@ -62,19 +62,15 @@ let ordered_field_names sfvl =
     | _ -> ()
   in
   check_order fields;
-  let fields =
-    List.map
-      (fun (field, _) ->
-        match field with
-        | Expr.Lit (Literal.String name) -> name
-        | _ ->
-            raise
-              (Gillian.Utils.Exceptions.Unsupported
-                 "Property enumeration needs concrete names"))
-      fields
-  in
-  Javert_utils.Property_order.sort fields
-  |> List.map (fun name -> Expr.Lit (Literal.String name))
+  List.map fst fields
+  |> Javert_utils.Property_order.sort_by (function
+       | Expr.Lit (Literal.String bytes) -> bytes
+       | Expr.Lit (Literal.Utf16String value) ->
+           Gillian.Utils.Utf16.to_canonical value
+       | _ ->
+           raise
+             (Gillian.Utils.Exceptions.Unsupported
+                "Property enumeration needs concrete names"))
 
 let fold f sfvl ac =
   Expr.Map.fold (fun name entry ac -> f name entry.value ac) sfvl ac

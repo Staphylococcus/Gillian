@@ -559,7 +559,10 @@ module M = struct
       if
         not
           (entails
-             (Expr.BinOp (UnOp (TypeOf, prop), Equal, Lit (Type StringType))))
+             (Expr.BinOp
+                ( BinOp (UnOp (TypeOf, prop), Equal, Lit (Type StringType)),
+                  Or,
+                  BinOp (UnOp (TypeOf, prop), Equal, Lit (Type Utf16Type)) )))
       then unsupported "requires a string property key."
     in
     (* Resolve an already owned property once, then pass that exact stored key
@@ -591,7 +594,7 @@ module M = struct
          | Expr.Lit Empty :: _ -> ()
          | Expr.Lit (Loc loc) :: _
            when !Config.Verification.closed_entry
-                && not (Utils.Names.is_lloc_name loc)
+                && (not (Utils.Names.is_lloc_name loc))
                 && not (SHeap.has_loc heap loc) ->
              (* The closed-entry verifier starts at emp and forbids resource
                 production/folding, loop abstraction and summaries. Thus no location
@@ -727,7 +730,7 @@ module M = struct
           let descriptor : Expr.t =
             EList
               [
-                Lit (String "d");
+                Lit (Utf16String (Utf16.of_canonical "d"));
                 v;
                 Lit (Bool true);
                 Lit (Bool true);
@@ -743,9 +746,11 @@ module M = struct
         in
 
         match p with
-        | Lit (String x) when List.mem x prop_abduce_none_in_js ->
+        | Lit (Utf16String x)
+          when List.mem (Utf16.to_canonical x) prop_abduce_none_in_js ->
             [ none_fix () ]
-        | Lit (String x) when List.mem x prop_abduce_both_in_js ->
+        | Lit (Utf16String x)
+          when List.mem (Utf16.to_canonical x) prop_abduce_both_in_js ->
             [ none_fix (); some_fix () ]
         | _ -> [ some_fix () ])
     | FMetadata l ->
@@ -758,15 +763,15 @@ module M = struct
             Asrt.CorePred (JSILNames.aMetadata, [ mloc ], [ Lit Null ]);
             Asrt.CorePred
               ( JSILNames.aCell,
-                [ mloc; Lit (String "@class") ],
-                [ Lit (String "Object") ] );
+                [ mloc; Lit (Utf16String (Utf16.of_canonical "@class")) ],
+                [ Lit (Utf16String (Utf16.of_canonical "Object")) ] );
             Asrt.CorePred
               ( JSILNames.aCell,
-                [ mloc; Lit (String "@extensible") ],
+                [ mloc; Lit (Utf16String (Utf16.of_canonical "@extensible")) ],
                 [ Lit (Bool true) ] );
             Asrt.CorePred
               ( JSILNames.aCell,
-                [ mloc; Lit (String "@proto") ],
+                [ mloc; Lit (Utf16String (Utf16.of_canonical "@proto")) ],
                 [ Lit (Loc JS2JSIL_Helpers.locObjPrototype) ] );
           ];
         ]

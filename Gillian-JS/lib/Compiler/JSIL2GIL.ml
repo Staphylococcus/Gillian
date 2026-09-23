@@ -40,21 +40,36 @@ let reset_generators () =
   reset_else ();
   reset_var ()
 
+(* JSIL strings are JS code-unit values. GIL byte literals still denote bytes.
+   Procedure table identifiers remain host strings; direct calls keep byte names. *)
+let jsil2gil_type = function
+  | Gil.Type.StringType -> Gil.Type.Utf16Type
+  | t -> t
+
 let rec jsil2gil_expr (e : Expr.t) : Expr.t =
   let f = jsil2gil_expr in
   match e with
   | Lit literal ->
       let rec canonical = function
         | Gil.Literal.String string ->
-            Gil.Literal.String (Utf16.canonical string)
+            Gil.Literal.Utf16String
+              (Gillian.Utils.Utf16.of_canonical (Utf16.canonical string))
         | LList literals -> LList (List.map canonical literals)
+        | Type t -> Type (jsil2gil_type t)
         | literal -> literal
       in
       Lit (canonical literal)
   | UnOp (op, e') -> (
+      let op =
+        match op with
+        | Gil.UnOp.ToStringOp -> Gil.UnOp.NumberToUtf16
+        | ToNumberOp -> Utf16ToNumber
+        | StrLen -> Utf16Len
+        | op -> op
+      in
       let e = Expr.UnOp (op, f e') in
       match op with
-      | Gil.UnOp.LstLen -> Expr.int_to_num e
+      | Gil.UnOp.LstLen | Utf16Len -> Expr.int_to_num e
       | _ -> e)
   | BinOp (e1, op, e2) ->
       let e1 = f e1 in
@@ -62,6 +77,13 @@ let rec jsil2gil_expr (e : Expr.t) : Expr.t =
         match op with
         | Gil.BinOp.LstNth -> Expr.num_to_int (f e2)
         | _ -> f e2
+      in
+      let op =
+        match op with
+        | Gil.BinOp.StrCat -> Gil.BinOp.Utf16Cat
+        | StrLess -> Utf16Less
+        | StrNth -> Utf16Nth
+        | op -> op
       in
       BinOp (e1, op, e2)
   | LstSub (lst, start, len) ->
@@ -78,7 +100,22 @@ let rec jsil2gil_expr (e : Expr.t) : Expr.t =
   | ESet es ->
       let es = es |> List.map f in
       ESet es
+  | ForAll (bindings, e) ->
+      ForAll
+        (List.map (fun (x, t) -> (x, Option.map jsil2gil_type t)) bindings, f e)
+  | Exists (bindings, e) ->
+      Exists
+        (List.map (fun (x, t) -> (x, Option.map jsil2gil_type t)) bindings, f e)
   | _ -> e
+
+let jsil2gil_target = function
+  | Expr.Lit (Gil.Literal.String name) ->
+      Expr.Lit (Gil.Literal.String (Utf16.canonical name))
+  | expr -> jsil2gil_expr expr
+
+let jsil2gil_bindings =
+  Option.map (fun (label, bindings) ->
+      (label, List.map (fun (name, expr) -> (name, jsil2gil_expr expr)) bindings))
 
 let rec jsil2gil_asrt (a : Asrt.t) : GAsrt.t =
   let f = jsil2gil_asrt in
@@ -94,11 +131,13 @@ let rec jsil2gil_asrt (a : Asrt.t) : GAsrt.t =
   | Pred (pn, ins, outs) ->
       [ GAsrt.pred pn (List.map fe ins) (List.map fe outs) ]
   | Pure f -> [ Pure (jsil2gil_expr f) ]
-  | Types vts -> [ Types (List.map (fun (v, t) -> (fe v, t)) vts) ]
+  | Types vts ->
+      [ Types (List.map (fun (v, t) -> (fe v, jsil2gil_type t)) vts) ]
 
 let jsil2gil_slcmd (slcmd : SLCmd.t) : GSLCmd.t =
   match slcmd with
-  | Fold (pn, es, info) -> Fold (pn, List.map jsil2gil_expr es, info)
+  | Fold (pn, es, info) ->
+      Fold (pn, List.map jsil2gil_expr es, jsil2gil_bindings info)
   | Unfold (pn, es, info, b) -> Unfold (pn, List.map jsil2gil_expr es, info, b)
   | GUnfold pn -> GUnfold pn
   | ApplyLem (x, es, xs) -> ApplyLem (x, List.map jsil2gil_expr es, xs)
@@ -116,7 +155,7 @@ let rec jsil2gil_lcmd (lcmd : LCmd.t) : GLCmd.t =
   | Macro (x, es) -> Macro (x, List.map fe es)
   | Assert f -> Assert (fe f)
   | Assume f -> Assume (fe f)
-  | AssumeType (x, t) -> AssumeType (fe x, t)
+  | AssumeType (x, t) -> AssumeType (fe x, jsil2gil_type t)
   | FreshSVar x -> FreshSVar x
   | SL slcmd -> SL (jsil2gil_slcmd slcmd)
 
@@ -178,7 +217,8 @@ let jsil2gil_pred (pred : Pred.t) : GPred.t =
     pred_internal = false;
     (* TODO (Alexis): Set depending on module of pred *)
     pred_num_params = pred.num_params;
-    pred_params = pred.params;
+    pred_params =
+      List.map (fun (name, t) -> (name, Option.map jsil2gil_type t)) pred.params;
     ins_number = pred.ins_number;
     pred_definitions =
       List.map (fun (info, asrt) -> (info, jsil2gil_asrt asrt)) pred.definitions;
@@ -460,13 +500,14 @@ let jsil2core (lab : string option) (cmd : LabCmd.t) :
           GCmd.Call
             ( {
                 var_name = x;
-                fun_name = fe e;
+                fun_name = jsil2gil_target e;
                 args = List.map fe es;
-                bindings = subst;
+                bindings = jsil2gil_bindings subst;
               },
               j ) );
       ]
-  | LECall (x, e, es, j) -> [ (lab, GCmd.ECall (x, fe e, List.map fe es, j)) ]
+  | LECall (x, e, es, j) ->
+      [ (lab, GCmd.ECall (x, jsil2gil_target e, List.map fe es, j)) ]
   | LApply (x, e, j) -> [ (lab, GCmd.Apply (x, fe e, j)) ]
   | LArguments x -> [ (lab, GCmd.Arguments x) ]
   | LPhiAssignment es ->

@@ -101,6 +101,8 @@ and binop =
   | LstNth
   | LstRepeat
   | StrCat
+  | Utf16Less
+  | Utf16Nth
   | Utf16Cat
   | StrNth
   | StrLess
@@ -141,6 +143,8 @@ and unop =
   | LstRev
   | SetToList
   | StrLen
+  | NumberToUtf16
+  | Utf16ToNumber
   | Utf16Len
   | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
   | NumToInt

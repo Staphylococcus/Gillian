@@ -1,0 +1,2 @@
+spec check(x) [[ (x == #x) * types(#x : Str) ]] [[ (ret == u16"") ]] normal
+proc check(x) { ret := num_to_utf16(x); return };

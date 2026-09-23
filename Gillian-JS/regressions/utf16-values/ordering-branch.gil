@@ -1,0 +1,9 @@
+spec check(b, s)
+[[ (b == #b) * (s == #s) * types(#b : Bool, #s : Utf16) ]]
+[[ (ret == true) ]] normal
+proc check(b, s) {
+ goto [b] bad good;
+bad: goto [s u16< u16"x"] wrong wrong;
+wrong: ret := false; return;
+good: ret := true; return
+};

@@ -391,7 +391,7 @@ let pp_custom ~pp ft =
   | PVar v | LVar v | ALoc v -> Fmt.string ft v
   | BinOp (e1, op, e2) -> (
       match op with
-      | LstNth | StrNth | LstRepeat ->
+      | LstNth | StrNth | Utf16Nth | LstRepeat ->
           Fmt.pf ft "%s(%a, %a)" (BinOp.str op) pp e1 pp e2
       | Equal -> Fmt.pf ft "@[(%a %s %a)@]" pp e1 (BinOp.str op) pp e2
       | _ -> Fmt.pf ft "(%a %s %a)" pp e1 (BinOp.str op) pp e2)
@@ -571,6 +571,7 @@ let rec is_boolean_expr : t -> bool = function
   | BinOp (_, Equal, _)
   | BinOp (_, ValueEqual, _)
   | BinOp (_, StrLess, _)
+  | BinOp (_, Utf16Less, _)
   | BinOp (_, SetSub, _)
   | UnOp (IsInt, _) -> true
   | UnOp (Not, e') | Exists (_, e') | ForAll (_, e') -> is_boolean_expr e'

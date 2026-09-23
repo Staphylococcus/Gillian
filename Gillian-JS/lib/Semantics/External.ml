@@ -50,8 +50,8 @@ struct
             match opt_lit_code with
             | None ->
                 raise (Failure "Eval statement argument not a literal string")
-            | Some (String code) -> (
-                let code = Utf16.source_text code in
+            | Some (Utf16String code) -> (
+                let code = Utf16.source_text (Utf16.to_canonical code) in
                 let opt_proc_eval =
                   try
                     let e_js =
@@ -140,7 +140,11 @@ struct
       @return Resulting configuration *)
   let execute_function_constructor prog state cs i x v_args j =
     let throw message =
-      let _ = update_store state x (Val.from_literal (String message)) in
+      let _ =
+        update_store state x
+          (Val.from_literal
+             (Utf16String (Utf16.of_canonical (Utf16.canonical message))))
+      in
       [ (state, cs, i, Option.get j) ]
     in
 
@@ -149,9 +153,9 @@ struct
     let body : Literal.t = Option.get (Val.to_literal (List.nth v_args 1)) in
 
     match (params, body) with
-    | String params, String code -> (
-        let params = Utf16.source_text params in
-        let code = Utf16.source_text code in
+    | Utf16String params, Utf16String code -> (
+        let params = Utf16.source_text (Utf16.to_canonical params) in
+        let code = Utf16.source_text (Utf16.to_canonical code) in
         let code =
           "function THISISANELABORATENAME (" ^ params ^ ") {" ^ code ^ "}"
         in
@@ -172,8 +176,17 @@ struct
                       JS2JSIL_Compiler.js2jsil_function_constructor_prop prog
                         cur_proc_id params strictness body
                     in
-                    let fun_name = String new_proc.proc_name in
-                    let params = LList (List.map (fun x -> String x) params) in
+                    let fun_name =
+                      Utf16String (Utf16.of_canonical new_proc.proc_name)
+                    in
+                    let params =
+                      LList
+                        (List.map
+                           (fun x ->
+                             Utf16String
+                               (Utf16.of_canonical (Utf16.canonical x)))
+                           params)
+                    in
                     let return_value = LList [ fun_name; params ] in
                     let _ =
                       update_store state x (Val.from_literal return_value)
@@ -189,9 +202,9 @@ struct
   let execute_string_code_units state cs i x = function
     | [ value ] -> (
         match Val.to_literal value with
-        | Some (String string) ->
+        | Some (Utf16String string) ->
             let units =
-              Utf16.code_units string
+              Utf16.code_units (Utf16.to_canonical string)
               |> List.map (fun unit -> Num (float_of_int unit))
             in
             let state = update_store state x (Val.from_literal (LList units)) in
@@ -228,16 +241,20 @@ struct
           args
       in
       match (pid, literals) with
-      | "ExecuteStringLength", [ Some (String string) ] ->
-          Num (float_of_int (List.length (Utf16.code_units string)))
-      | "ExecuteStringNth", [ Some (String string); Some (Num index) ] ->
-          let units = Utf16.code_units string in
+      | "ExecuteStringLength", [ Some (Utf16String string) ] ->
+          Num
+            (float_of_int
+               (List.length (Utf16.code_units (Utf16.to_canonical string))))
+      | "ExecuteStringNth", [ Some (Utf16String string); Some (Num index) ] ->
+          let units = Utf16.code_units (Utf16.to_canonical string) in
           if
             index < 0.
             || index >= float_of_int (List.length units)
             || Float.floor index <> index
           then unsupported ();
-          String (Utf16.of_code_units [ List.nth units (int_of_float index) ])
+          Utf16String
+            (Utf16.of_canonical
+               (Utf16.of_code_units [ List.nth units (int_of_float index) ]))
       | "ExecuteStringFromCodeUnits", [ Some (LList units) ] ->
           let units =
             List.map
@@ -248,9 +265,10 @@ struct
                 | _ -> unsupported ())
               units
           in
-          String (Utf16.of_code_units units)
-      | "ExecuteStringTrim", [ Some (String string) ] ->
-          String (Utf16.trim string)
+          Utf16String (Utf16.of_canonical (Utf16.of_code_units units))
+      | "ExecuteStringTrim", [ Some (Utf16String string) ] ->
+          Utf16String
+            (Utf16.of_canonical (Utf16.trim (Utf16.to_canonical string)))
       | _ -> unsupported ()
     in
     let state = update_store state x (Val.from_literal result) in

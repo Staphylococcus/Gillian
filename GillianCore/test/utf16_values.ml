@@ -227,6 +227,132 @@ let models () =
   | None -> ()
   | Some path -> Yojson.Safe.to_file path (`List evidence)
 
+let numeric_producers () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let eval = Engine.CExprEval.evaluate_expr store in
+  let check_term ?(exact_smt = true) term expected =
+    Alcotest.(check bool)
+      "typed numeric conversion matches the byte implementation" true
+      (Literal.same_value expected (eval term));
+    Alcotest.(check bool)
+      "ground reduction retains the exact conversion" true
+      (match Reduction.reduce_lexpr term with
+      | Expr.Lit actual -> Literal.same_value expected actual
+      | _ -> false);
+    (* As for bytes, symbolic formatting of finite nonzero numbers is an
+       over-approximation; its literal output is fixed by concrete reduction. *)
+    if exact_smt then
+      check "typed numeric conversion SMT agrees" false
+        [ not_ (bin ValueEqual term (Expr.Lit expected)) ]
+    else
+      check "formatter admits its concrete spelling" true
+        [ bin ValueEqual term (Expr.Lit expected) ]
+  in
+  List.iter
+    (fun number ->
+      let bytes =
+        match eval (Expr.UnOp (ToStringOp, Expr.num number)) with
+        | Literal.String bytes -> bytes
+        | _ -> assert false
+      in
+      check_term
+        ~exact_smt:(number = 0. || not (Float.is_finite number))
+        (Expr.UnOp (NumberToUtf16, Expr.num number))
+        (Literal.Utf16String (Codec.of_canonical bytes)))
+    [
+      0.;
+      -0.;
+      nan;
+      infinity;
+      neg_infinity;
+      1.;
+      0.1;
+      1e-7;
+      1e21;
+      5e-324;
+      Float.max_float;
+    ];
+  List.iter
+    (fun bytes ->
+      let bytes = Codec.canonical bytes in
+      let expected = eval (Expr.UnOp (ToNumberOp, Expr.string bytes)) in
+      check_term
+        (Expr.UnOp
+           ( Utf16ToNumber,
+             Expr.Lit (Literal.Utf16String (Codec.of_canonical bytes)) ))
+        expected)
+    [
+      "";
+      "0";
+      "-0";
+      "01";
+      "  42 ";
+      "0x10";
+      "+Infinity";
+      "NaN";
+      "push";
+      "\xed\xa0\x80";
+      "\xef\xbb\xbf12";
+    ];
+  let number = Expr.LVar "#number" in
+  let types () =
+    let g = Gamma.init () in
+    Gamma.update g "#number" NumberType;
+    g
+  in
+  let formatted = Expr.UnOp (NumberToUtf16, number) in
+  let parsed = Expr.UnOp (Utf16ToNumber, formatted) in
+  check ~types "symbolic formatter/parser preserves non-NaN numeric equality"
+    false
+    [ eq number number; not_ (eq parsed number) ];
+  check ~types "symbolic formatter/parser preserves NaN" false
+    [ not_ (eq number number); eq parsed parsed ];
+  let reduced = Reduction.reduce_lexpr ~gamma:(types ()) parsed in
+  check ~types "roundtrip reduction canonicalizes signed zero" false
+    [ not_ (bin ValueEqual reduced (bin FPlus number (Expr.num 0.))) ];
+  check ~types "numeric keys cannot collide with ordinary property names" false
+    [ eq formatted (value [ 112; 117; 115; 104 ]) ];
+  check ~types "native set keys retain the parser fact" false
+    [ bin SetMem formatted (Expr.ESet [ value [ 112; 117; 115; 104 ] ]) ]
+
+let concrete_legacy_operations () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let eval = Engine.CExprEval.evaluate_expr store in
+  Alcotest.(check bool)
+    "legacy JSIL ordering compares code units" true
+    (Literal.equal
+       (eval (bin Utf16Less (value [ 0xd83d; 0xde00 ]) (value [ 0xe000 ])))
+       (Literal.Bool true));
+  Alcotest.(check bool)
+    "legacy JSIL indexing returns a lone code unit" true
+    (Literal.equal
+       (eval (bin Utf16Nth (value [ 0xd83d; 0xde00 ]) (Expr.num 1.)))
+       (literal [ 0xde00 ]))
+
+let expression_transport () =
+  List.iter
+    (fun units ->
+      let s = value units in
+      List.iter
+        (fun expr ->
+          Alcotest.(check bool)
+            "typed expression survives GIL export and reimport" true
+            (match
+               Parser.parse_expression
+                 (Lexing.from_string (Fmt.str "%a" Expr.pp expr))
+             with
+            | Ok parsed -> Expr.equal expr parsed
+            | Error _ -> false))
+        [
+          bin Utf16Nth s (Expr.num 0.);
+          bin Utf16Less s a;
+          cat s a;
+          length s;
+          Expr.UnOp (Utf16ToNumber, s);
+          Expr.UnOp (NumberToUtf16, Expr.num 1.);
+        ])
+    values
+
 let tests =
   [
     ("literal domain and transport", `Quick, literal_domain);
@@ -234,4 +360,7 @@ let tests =
     ("arbitrary typed sequences", `Quick, arbitrary_values);
     ("wrapped values and type identity", `Quick, wrapped_values);
     ("actual lifted models", `Quick, models);
+    ("typed numeric producers", `Quick, numeric_producers);
+    ("concrete legacy operations", `Quick, concrete_legacy_operations);
+    ("expression transport", `Quick, expression_transport);
   ]

@@ -591,7 +591,8 @@ struct
     let eval_assert f state =
       Totality.check_proof_expression ~context:"Pure assertion"
         ~evaluate:(fun e -> State.eval_expr state e |> Val.to_expr)
-        ~assertion:(fun condition -> State.assert_a state [ condition ]) f;
+        ~assertion:(fun condition -> State.assert_a state [ condition ])
+        f;
       let store_subst = Store.to_ssubst (State.get_store state) in
       let f' = SVal.SESubst.subst_in_expr store_subst ~partial:true f in
       match State.assert_a state [ f' ] with
@@ -657,7 +658,8 @@ struct
     and eval_if e lcmds_t lcmds_e prog annot state eval_expr =
       Totality.check_proof_expression ~context:"Logical condition"
         ~evaluate:(fun e -> eval_expr e |> Val.to_expr)
-        ~assertion:(fun condition -> State.assert_a state [ condition ]) e;
+        ~assertion:(fun condition -> State.assert_a state [ condition ])
+        e;
       let ve = eval_expr e in
       let e = Val.to_expr ve in
       match e with
@@ -805,6 +807,7 @@ struct
         let get_pid_or_error pid state =
           match Val.to_literal pid with
           | Some (String pid) -> pid
+          | Some (Utf16String pid) -> Utf16.to_canonical pid
           | Some _ ->
               let err = [ Exec_err.EProc pid ] in
               raise (Interpreter_error (err, state))
@@ -989,13 +992,14 @@ struct
           let () = Call_graph.add_proc_call call_graph caller pid in
           let args = build_args v_args params in
           let inline = ref false in
-          if !Config.Verification.closed_entry then (
-            (* No entry result is a frameable procedure summary. All callees
+          (if !Config.Verification.closed_entry then
+             (* No entry result is a frameable procedure summary. All callees
                must execute, including calls back into the selected entry. *)
-            match prog.totality with
-            | Some ctx when pid = ctx.name ->
-                Totality.unsupported "closed entry cannot call its own summary."
-            | _ -> ());
+             match prog.totality with
+             | Some ctx when pid = ctx.name ->
+                 Totality.unsupported
+                   "closed entry cannot call its own summary."
+             | _ -> ());
           (match prog.totality with
           | None -> ()
           | Some ctx when pid = ctx.name ->

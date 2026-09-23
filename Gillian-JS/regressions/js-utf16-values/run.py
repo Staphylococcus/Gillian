@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Typed UTF-16 primitives: total proofs and required domain failures."""
+"""Actual JS UTF-16 mapping: arbitrary inputs through compiled runtime bodies."""
 import hashlib
 import json
 import os
@@ -12,40 +12,30 @@ ROOT = Path(__file__).resolve().parent
 COMMAND = shlex.split(os.environ.get('GILLIAN_JS', 'gillian-js'))
 TOTAL = (0, 'All total procedure specs succeeded')
 POST = (1, "Couldn't satisfy postcondition")
-DOMAIN = (1, 'not proved defined')
+ASSERT = (1, 'Assertion failed')
+ORDERING = (125, 'binop: u16<')
 CASES = [
-    ('ordering-branch.gil', ['--total'], (125, 'binop: u16<')),
-    ('format-type.gil', ['--total'], DOMAIN),
-    ('parse-type.gil', ['--total'], DOMAIN),
-    ('index.gil', ['--total'], TOTAL),
-    ('index-oob.gil', ['--total'], DOMAIN),
-
-    ('concat.gil', ['--total'], TOTAL),
-    ('cancellation.gil', ['--total'], TOTAL),
-    ('wrong-order.gil', ['--total'], POST),
-    ('astral.gil', ['--total'], TOTAL),
-    ('wrong-byte-length.gil', ['--total'], POST),
-    ('wrong-code-point-length.gil', ['--total'], POST),
-    ('raw-byte-input.gil', ['--total'], DOMAIN),
-    ('byte-operation.gil', ['--total'], DOMAIN),
-    ('untyped-input.gil', ['--total'], DOMAIN),
-    ('mixed-concat.gil', ['--total'], DOMAIN),
-    ('erased-domain.gil', ['--total'], DOMAIN),
-    ('short-circuit.gil', ['--total'], TOTAL),
-    ('proof-self-support.gil', ['--total'], DOMAIN),
-    ('proof-guarded.gil', ['--total'], TOTAL),
-    ('type-separation.gil', ['--total'], TOTAL),
+    ('ordering-branch.js', ['--total', '--proc=check'], ORDERING),
+    ('ordering-concrete-wrong.js', ['--total', '--proc=check'], POST),
+    ('fold-witness.js', ['--total', '--proc=check'], TOTAL),
+    ('fold-witness-wrong.js', ['--total', '--proc=check'], ASSERT),
+    ('concat.js', ['--total', '--proc=check'], TOTAL),
+    ('cancellation.js', ['--total', '--proc=check'], TOTAL),
+    ('typeof.js', ['--total', '--proc=check'], TOTAL),
+    ('wrong-order.js', ['--total', '--proc=check'], POST),
+    ('property.js', ['--total', '--proc=check'], TOTAL),
+    ('numeric-key.js', ['--total', '--proc=check'], TOTAL),
 ]
 
 if __name__ == '__main__':
-    output = Path(tempfile.mkdtemp(prefix='gillian-utf16-values-',
+    output = Path(tempfile.mkdtemp(prefix='gillian-js-utf16-values-',
                                   dir=os.environ.get('GILLIAN_RESULTS_ROOT')))
     results = []
     for index, (file, options, expected) in enumerate(CASES):
         source = ROOT / file
         directory = output / f'{index:02d}-{source.stem}'
         directory.mkdir()
-        command = COMMAND + ['verify', str(source), '--logging=normal', '-a'] + options
+        command = COMMAND + ['verify', str(source), '--logging=normal'] + options
         record = {'file': file, 'command': command, 'expectedExit': expected[0],
                   'expectedMessage': expected[1],
                   'sourceSha256': hashlib.sha256(source.read_bytes()).hexdigest()}

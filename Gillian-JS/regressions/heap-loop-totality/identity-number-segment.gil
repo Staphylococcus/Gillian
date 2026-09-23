@@ -1,13 +1,13 @@
 import "javert_internal_functions.jsil", "javert_logic_macros.jsil", "ArrayBuffer.jsil", "ArrayLogic.jsil", "DataView.jsil", "ByteLogic.gil", "Uint8Array.jsil";
 nounfold pred NumSegment(a:Obj, start:Num, end:Num; values:List):
   (start == end) * (values == {{ }}),
-  (start < end) * DataProp(a, num_to_string(start); #value) * types(#value : Num) *
+  (start < end) * DataProp(a, num_to_utf16(start); #value) * types(#value : Num) *
   (values == l+({{ #value }}, #rest)) * NumSegment(a, start + 1.0, end; #rest);
 
 lemma AppendNum(a, start, end, values, value) variant(l-len(#values))
 [[ types(#start : Num, #end : Num, #values : List, #value : Num) *
   (is_int(#start)) * (is_int(#end)) * (0.0 <= #start) * (#start <= #end) * (#end < 4294967295.0) *
-  NumSegment(#a, #start, #end; #values) * DataProp(#a, num_to_string(#end); #value) ]]
+  NumSegment(#a, #start, #end; #values) * DataProp(#a, num_to_utf16(#end); #value) ]]
 [[ NumSegment(#a, #start, #end + 1.0; l+(#values, {{#value}})) ]]
 [* unfold NumSegment(#a, #start, #end, #values) [bind: (#rest := #rest)];
    if (#start < #end) then { apply AppendNum(#a, #start + 1.0, #end, #rest, #value) };

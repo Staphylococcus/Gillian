@@ -1,9 +1,14 @@
 open Gillian.Concrete
 
-type t = { fields : (string, Values.t) Hashtbl.t; mutable order : string list }
+type t = {
+  fields : (Gillian.Gil_syntax.Literal.t, Values.t) Hashtbl.t;
+  mutable order : Gillian.Gil_syntax.Literal.t list;
+}
 
 let pp fmt (loc, obj, metadata) =
-  let pp_kv fmt (prop, value) = Fmt.pf fmt "%s: %a" prop Values.pp value in
+  let pp_kv fmt (prop, value) =
+    Fmt.pf fmt "%a: %a" Gillian.Gil_syntax.Literal.pp prop Values.pp value
+  in
   Fmt.pf fmt "@[<h>%s|-> [ %a ], %a@]" loc
     (Fmt.hashtbl ~sep:Fmt.comma pp_kv)
     obj.fields Values.pp metadata
@@ -19,4 +24,10 @@ let remove obj prop =
   Hashtbl.remove obj.fields prop;
   obj.order <- List.filter (( <> ) prop) obj.order
 
-let properties obj = Javert_utils.Property_order.sort (List.rev obj.order)
+let properties obj =
+  Javert_utils.Property_order.sort_by
+    (function
+      | Gillian.Gil_syntax.Literal.String bytes -> bytes
+      | Utf16String value -> Gillian.Utils.Utf16.to_canonical value
+      | _ -> failwith "Invalid concrete property key")
+    (List.rev obj.order)

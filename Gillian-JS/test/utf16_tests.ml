@@ -57,6 +57,40 @@ let canonical () =
       (U.code_units (U.of_code_units [ unit ]))
   done
 
+let lowering () =
+  let open Gillian.Gil_syntax in
+  let module M = Js2jsil_lib.JSIL2GIL in
+  let typed = Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "callee") in
+  Alcotest.(check bool)
+    "JS data and procedure identifiers keep distinct kinds" true
+    (M.jsil2gil_expr (Expr.string "callee") = Expr.Lit typed
+    && M.jsil2gil_target (Expr.string "callee") = Expr.string "callee");
+  Alcotest.(check bool)
+    "nested literal and type annotations use the JS domain" true
+    (M.jsil2gil_expr
+       (Expr.Lit (Literal.LList [ String "callee"; Type StringType ]))
+    = Expr.Lit (Literal.LList [ typed; Type Utf16Type ]));
+  Alcotest.(check bool)
+    "symbolic string admission changes its type" true
+    (M.jsil2gil_lcmd
+       (Jsil_syntax.LCmd.AssumeType (Expr.PVar "value", Type.StringType))
+    = LCmd.AssumeType (Expr.PVar "value", Type.Utf16Type));
+  Alcotest.(check bool)
+    "quantified JS strings use the same type as their bodies" true
+    (M.jsil2gil_expr
+       (Expr.ForAll
+          ( [ ("#s", Some Type.StringType) ],
+            Expr.BinOp
+              ( Expr.UnOp (TypeOf, Expr.LVar "#s"),
+                Equal,
+                Expr.Lit (Type StringType) ) ))
+    = Expr.ForAll
+        ( [ ("#s", Some Type.Utf16Type) ],
+          Expr.BinOp
+            ( Expr.UnOp (TypeOf, Expr.LVar "#s"),
+              Equal,
+              Expr.Lit (Type Utf16Type) ) ))
+
 let () =
   Alcotest.run "JavaScript UTF-16"
     [
@@ -65,5 +99,6 @@ let () =
           ("code units", `Quick, code_units);
           ("malformed", `Quick, malformed);
           ("canonical", `Quick, canonical);
+          ("lowering boundaries", `Quick, lowering);
         ] );
     ]

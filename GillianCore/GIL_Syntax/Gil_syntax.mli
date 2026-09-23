@@ -159,6 +159,8 @@ module UnOp : sig
     | LstRev  (** List reverse *)
     | SetToList  (** From set to list *)
     | StrLen  (** String length *)
+    | NumberToUtf16
+    | Utf16ToNumber
     | Utf16Len  (** Mathematical code-unit length *)
     | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
     (* Integer vs Number *)
@@ -220,6 +222,8 @@ module BinOp : sig
     | LstRepeat
     (* [[a; b]] is the list that contains [b] times the element [a] *)
     | StrCat  (** String concatenation *)
+    | Utf16Less
+    | Utf16Nth
     | Utf16Cat  (** Code-unit concatenation *)
     | StrNth  (** Nth element of a string *)
     | StrLess  (** Less or equal for strings *)
@@ -1481,8 +1485,12 @@ module Visitors : sig
          ; visit_Skip : 'c -> 'f Cmd.t -> 'f Cmd.t
          ; visit_FreshSVar : 'c -> LCmd.t -> string -> LCmd.t
          ; visit_StrCat : 'c -> BinOp.t -> BinOp.t
+         ; visit_Utf16Less : 'c -> BinOp.t -> BinOp.t
+         ; visit_Utf16Nth : 'c -> BinOp.t -> BinOp.t
          ; visit_Utf16Cat : 'c -> BinOp.t -> BinOp.t
          ; visit_StrLen : 'c -> UnOp.t -> UnOp.t
+         ; visit_NumberToUtf16 : 'c -> UnOp.t -> UnOp.t
+         ; visit_Utf16ToNumber : 'c -> UnOp.t -> UnOp.t
          ; visit_Utf16Len : 'c -> UnOp.t -> UnOp.t
          ; visit_StrToBytes : 'c -> UnOp.t -> UnOp.t
          ; visit_StrLess : 'c -> BinOp.t -> BinOp.t
@@ -1758,8 +1766,12 @@ module Visitors : sig
     method visit_Skip : 'c -> 'f Cmd.t -> 'f Cmd.t
     method visit_FreshSVar : 'c -> LCmd.t -> string -> LCmd.t
     method visit_StrCat : 'c -> BinOp.t -> BinOp.t
+    method visit_Utf16Less : 'c -> BinOp.t -> BinOp.t
+    method visit_Utf16Nth : 'c -> BinOp.t -> BinOp.t
     method visit_Utf16Cat : 'c -> BinOp.t -> BinOp.t
     method visit_StrLen : 'c -> UnOp.t -> UnOp.t
+    method visit_NumberToUtf16 : 'c -> UnOp.t -> UnOp.t
+    method visit_Utf16ToNumber : 'c -> UnOp.t -> UnOp.t
     method visit_Utf16Len : 'c -> UnOp.t -> UnOp.t
     method visit_StrToBytes : 'c -> UnOp.t -> UnOp.t
     method visit_StrLess : 'c -> BinOp.t -> BinOp.t
@@ -2027,8 +2039,12 @@ module Visitors : sig
          ; visit_FreshSVar : 'c -> string -> 'f
          ; visit_FuncApp : 'c -> string -> Expr.t list -> 'f
          ; visit_StrCat : 'c -> 'f
+         ; visit_Utf16Less : 'c -> 'f
+         ; visit_Utf16Nth : 'c -> 'f
          ; visit_Utf16Cat : 'c -> 'f
          ; visit_StrLen : 'c -> 'f
+         ; visit_NumberToUtf16 : 'c -> 'f
+         ; visit_Utf16ToNumber : 'c -> 'f
          ; visit_Utf16Len : 'c -> 'f
          ; visit_StrToBytes : 'c -> 'f
          ; visit_StrLess : 'c -> 'f
@@ -2260,8 +2276,12 @@ module Visitors : sig
     method visit_FreshSVar : 'c -> string -> 'f
     method visit_FuncApp : 'c -> string -> Expr.t list -> 'f
     method visit_StrCat : 'c -> 'f
+    method visit_Utf16Less : 'c -> 'f
+    method visit_Utf16Nth : 'c -> 'f
     method visit_Utf16Cat : 'c -> 'f
     method visit_StrLen : 'c -> 'f
+    method visit_NumberToUtf16 : 'c -> 'f
+    method visit_Utf16ToNumber : 'c -> 'f
     method visit_Utf16Len : 'c -> 'f
     method visit_StrToBytes : 'c -> 'f
     method visit_StrLess : 'c -> 'f
@@ -2493,8 +2513,12 @@ module Visitors : sig
          ; visit_FreshSVar : 'c -> string -> unit
          ; visit_FuncApp : 'c -> string -> Expr.t list -> unit
          ; visit_StrCat : 'c -> unit
+         ; visit_Utf16Less : 'c -> unit
+         ; visit_Utf16Nth : 'c -> unit
          ; visit_Utf16Cat : 'c -> unit
          ; visit_StrLen : 'c -> unit
+         ; visit_NumberToUtf16 : 'c -> unit
+         ; visit_Utf16ToNumber : 'c -> unit
          ; visit_Utf16Len : 'c -> unit
          ; visit_StrToBytes : 'c -> unit
          ; visit_StrLess : 'c -> unit
@@ -2730,8 +2754,12 @@ module Visitors : sig
     method visit_FreshSVar : 'c -> string -> unit
     method visit_FuncApp : 'c -> string -> Expr.t list -> unit
     method visit_StrCat : 'c -> unit
+    method visit_Utf16Less : 'c -> unit
+    method visit_Utf16Nth : 'c -> unit
     method visit_Utf16Cat : 'c -> unit
     method visit_StrLen : 'c -> unit
+    method visit_NumberToUtf16 : 'c -> unit
+    method visit_Utf16ToNumber : 'c -> unit
     method visit_Utf16Len : 'c -> unit
     method visit_StrToBytes : 'c -> unit
     method visit_StrLess : 'c -> unit

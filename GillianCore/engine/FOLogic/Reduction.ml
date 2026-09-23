@@ -1352,7 +1352,8 @@ let rec reduce_lexpr_loop
         let fle = f le in
         let def = Expr.UnOp (op, fle) in
         match (op, fle) with
-        | ToNumberOp, UnOp (ToStringOp, number) ->
+        | ToNumberOp, UnOp (ToStringOp, number)
+        | Utf16ToNumber, UnOp (NumberToUtf16, number) ->
             (* ECMAScript's shortest decimal format round-trips every number.
                Adding +0 preserves that number and canonicalizes -0, whose
                formatted spelling is "0". NaN remains NaN. The reverse
@@ -1758,6 +1759,14 @@ let rec reduce_lexpr_loop
           ( BinOp (sl, Equal, Lit (String "")),
             And,
             BinOp (sr, Equal, Lit (String "")) )
+    | BinOp (UnOp (NumberToUtf16, number), Equal, Lit (Utf16String value))
+    | BinOp (Lit (Utf16String value), Equal, UnOp (NumberToUtf16, number)) ->
+        let bytes = Utf16.to_canonical value in
+        let byte_equality =
+          Expr.BinOp (UnOp (ToStringOp, number), Equal, Lit (String bytes))
+        in
+        let reduced = f byte_equality in
+        if Expr.equal reduced byte_equality then le else reduced
     (* Only a canonical formatter output can be inverted. Parsing alone also
        accepts strings such as "01", "+1" and "-0", which formatting never emits. *)
     | BinOp (UnOp (ToStringOp, le1), Equal, Lit (String s))

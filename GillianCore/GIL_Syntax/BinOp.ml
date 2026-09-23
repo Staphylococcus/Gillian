@@ -50,6 +50,8 @@ type t = TypeDef__.binop =
   | LstRepeat (* [[a; b]] is the list that contains [b] times the element [a] *)
   (* Strings *)
   | StrCat  (** String concatenation *)
+  | Utf16Less
+  | Utf16Nth
   | Utf16Cat  (** UTF-16 code-unit concatenation *)
   | StrNth  (** Nth element of a string *)
   | StrLess  (** Less or equal for strings *)
@@ -107,6 +109,8 @@ let str (x : t) =
   | LstNth -> "l-nth"
   | LstRepeat -> "l-repeat"
   | StrCat -> "++"
+  | Utf16Less -> "u16<"
+  | Utf16Nth -> "u16-nth"
   | Utf16Cat -> "u16++"
   | StrNth -> "s-nth"
   | SetDiff -> "-d-"

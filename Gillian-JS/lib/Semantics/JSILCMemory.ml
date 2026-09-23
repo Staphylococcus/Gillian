@@ -24,7 +24,7 @@ module M : Memory_S with type init_data = unit = struct
   let set_cell (heap : t) (loc : vt) (prop : vt) (v : vt option) : action_ret =
     let loc, prop =
       match (loc, prop) with
-      | Loc loc, String prop -> (loc, prop)
+      | Loc loc, ((String _ | Utf16String _) as prop) -> (loc, prop)
       | _ -> raise (Failure "C Heap Update: illegal heap update")
     in
 
@@ -42,7 +42,7 @@ module M : Memory_S with type init_data = unit = struct
       action_ret =
     let loc, prop =
       match (loc, prop) with
-      | Loc loc, String prop -> (loc, prop)
+      | Loc loc, ((String _ | Utf16String _) as prop) -> (loc, prop)
       | _ -> raise (Failure "Illegal get_cell")
     in
 
@@ -54,7 +54,7 @@ module M : Memory_S with type init_data = unit = struct
       | None -> Error ()
       | Some (obj, _) ->
           let v = Option.value ~default:Literal.Nono (CObject.get obj prop) in
-          Ok (heap, [ Loc loc; String prop; v ])
+          Ok (heap, [ Loc loc; prop; v ])
 
   let get_domain ?expected_props:_ ?(remove : bool option) (heap : t) (loc : vt)
       : action_ret =
@@ -72,12 +72,7 @@ module M : Memory_S with type init_data = unit = struct
       | None -> Error ()
       | Some (obj, _) ->
           let props = CObject.properties obj in
-          Ok
-            ( heap,
-              [
-                Loc loc;
-                LList (List.map (fun prop -> Literal.String prop) props);
-              ] )
+          Ok (heap, [ Loc loc; LList props ])
 
   let get_metadata ?(remove = false) (heap : t) (loc : vt) : action_ret =
     let loc =

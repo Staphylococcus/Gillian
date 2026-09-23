@@ -1,63 +1,63 @@
 import "Init.jsil", "javert_internal_functions.jsil";
 
 spec builtin()
-[[ emp ]] [[ JSBIFunction(ret, "Array_isArray", 1.0) ]] normal
+[[ emp ]] [[ JSBIFunction(ret, u16"Array_isArray", 1.0) ]] normal
 proc builtin() {
- ret := "create_object_with_call_construct"("Array_isArray", empty, 1.0);
+ ret := "create_object_with_call_construct"(u16"Array_isArray", empty, 1.0);
  return
 };
 
 spec builtinConfig()
-[[ emp ]] [[ DataPropGen(ret, "length", 1.0, false, false, true) ]] normal
+[[ emp ]] [[ DataPropGen(ret, u16"length", 1.0, false, false, true) ]] normal
 proc builtinConfig() {
- ret := "create_object_with_call_construct"("Array_isArray", empty, 1.0);
+ ret := "create_object_with_call_construct"(u16"Array_isArray", empty, 1.0);
  return
 };
 
 spec builtinFixedWrong()
-[[ emp ]] [[ DataPropGen(ret, "length", 1.0, false, false, false) ]] normal
+[[ emp ]] [[ DataPropGen(ret, u16"length", 1.0, false, false, false) ]] normal
 proc builtinFixedWrong() {
- ret := "create_object_with_call_construct"("Array_isArray", empty, 1.0);
+ ret := "create_object_with_call_construct"(u16"Array_isArray", empty, 1.0);
  return
 };
 
 spec userFunction()
-[[ emp ]] [[ JSFunctionObject(ret, "inner", {{ }}, 2.0, #prototype) ]] normal
+[[ emp ]] [[ JSFunctionObject(ret, u16"inner", {{ }}, 2.0, #prototype) ]] normal
 proc userFunction() {
- ret := "create_function_object"({{ }}, "inner", "inner", {{"a", "b"}});
+ ret := "create_function_object"({{ }}, u16"inner", u16"inner", {{u16"a", u16"b"}});
  return
 };
 
 spec userFixedWrong()
-[[ emp ]] [[ DataPropGen(ret, "length", 2.0, false, false, false) ]] normal
+[[ emp ]] [[ DataPropGen(ret, u16"length", 2.0, false, false, false) ]] normal
 proc userFixedWrong() {
- ret := "create_function_object"({{ }}, "inner", "inner", {{"a", "b"}});
+ ret := "create_function_object"({{ }}, u16"inner", u16"inner", {{u16"a", u16"b"}});
  return
 };
 
 spec userArityWrong()
-[[ emp ]] [[ DataPropGen(ret, "length", 1.0, false, false, true) ]] normal
+[[ emp ]] [[ DataPropGen(ret, u16"length", 1.0, false, false, true) ]] normal
 proc userArityWrong() {
- ret := "create_function_object"({{ }}, "inner", "inner", {{"a", "b"}});
+ ret := "create_function_object"({{ }}, u16"inner", u16"inner", {{u16"a", u16"b"}});
  return
 };
 
 spec constructor()
-[[ emp ]] [[ BIFunctionObject(ret, 1.0, $larr_proto, "Array_call", "Array_construct") ]] normal
+[[ emp ]] [[ BIFunctionObject(ret, 1.0, $larr_proto, u16"Array_call", u16"Array_construct") ]] normal
 proc constructor() {
- obj := "create_object_with_call_construct"("Array_call", "Array_construct", 1.0);
- old := [GetCell](obj, "prototype");
- ignored := [SetCell](obj, "prototype", {{"d", $larr_proto, false, false, false}});
+ obj := "create_object_with_call_construct"(u16"Array_call", u16"Array_construct", 1.0);
+ old := [GetCell](obj, u16"prototype");
+ ignored := [SetCell](obj, u16"prototype", {{u16"d", $larr_proto, false, false, false}});
  ret := obj;
  return
 };
 
 spec constructorPlainWrong()
-[[ emp ]] [[ JSObjGeneral(ret, $lfun_proto, "Function", true) ]] normal
+[[ emp ]] [[ JSObjGeneral(ret, $lfun_proto, u16"Function", true) ]] normal
 proc constructorPlainWrong() {
- obj := "create_object_with_call_construct"("Array_call", "Array_construct", 1.0);
- old := [GetCell](obj, "prototype");
- ignored := [SetCell](obj, "prototype", {{"d", $larr_proto, false, false, false}});
+ obj := "create_object_with_call_construct"(u16"Array_call", u16"Array_construct", 1.0);
+ old := [GetCell](obj, u16"prototype");
+ ignored := [SetCell](obj, u16"prototype", {{u16"d", $larr_proto, false, false, false}});
  ret := obj;
  return
 };
