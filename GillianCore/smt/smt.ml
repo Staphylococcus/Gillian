@@ -1373,7 +1373,24 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       >- IntType
   | IntToNum ->
       let>- le = get_int le in
-      to_number [ rne; int_to_real le.expr ] >- NumberType
+      let general = to_number [ rne; int_to_real le.expr ] in
+      (match e with
+      | Expr.UnOp (Utf16Len, _) ->
+          (* Sequence length is nonnegative. Below 2^16, int2bv preserves it
+             exactly and unsigned BV-to-FP is exact. Keep the general RNE
+             conversion for every larger length, including overflow; this
+             guard is an encoding choice, not a bound on the string domain. *)
+          let small =
+            app (List [ atom "_"; atom "int2bv"; atom "16" ]) [ le.expr ]
+          in
+          ite
+            (num_lt le.expr (int_k 65536))
+            (app
+               (List [ atom "_"; atom "to_fp_unsigned"; atom "11"; atom "53" ])
+               [ rne; small ])
+            general
+      | _ -> general)
+      >- NumberType
   | IsInt ->
       let>- le = get_num le in
       bool_and (fp_finite le.expr)

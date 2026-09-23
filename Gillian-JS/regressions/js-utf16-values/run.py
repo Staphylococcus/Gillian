@@ -15,11 +15,14 @@ POST = (1, "Couldn't satisfy postcondition")
 ASSERT = (1, 'Assertion failed')
 ORDERING = (125, 'binop: u16<')
 CASES = [
-    ('charat-length-unknown.js', ['--total', '--proc=check'],
-     (124, 'Incomplete totality proof: SMT returned unknown')),
+    ('charat-lookup-unsupported.js', ['--total', '--proc=check'],
+     (124, 'Unsupported totality proof: SP_charAt contains an operation outside the totality fragment: ret := extern ExecuteStringNth(')),
+    ('length-branches.js', ['--total', '--proc=check'], TOTAL),
+    ('length-outside-wrong.js', ['--total', '--proc=check'], POST),
+    ('length-inside-wrong.js', ['--total', '--proc=check'], POST),
     ('length.js', ['--total', '--proc=check'], TOTAL),
     ('length-wrong.js', ['--total', '--proc=check'], POST),
-    ('length-zero-unknown.js', ['--total', '--proc=check'], (124, 'Incomplete totality proof: SMT returned unknown')),
+    ('length-zero-wrong.js', ['--total', '--proc=check'], POST),
     ('length-concrete.js', ['--total', '--proc=check'], TOTAL),
     ('length-codepoint-wrong.js', ['--total', '--proc=check'], POST),
     ('length-byte-wrong.js', ['--total', '--proc=check'], POST),

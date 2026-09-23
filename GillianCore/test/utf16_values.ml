@@ -155,11 +155,122 @@ let js_length_conversion () =
         expected)
     [
       ("0", 0.);
+      ("-1", -1.);
+      ("1", 1.);
+      ("65535", 65535.);
+      ("65536", 65536.);
+      (Z.to_string (Z.shift_left Z.one 1024), infinity);
+      (Z.to_string (Z.neg (Z.shift_left Z.one 1024)), neg_infinity);
       ("9007199254740991", 9007199254740991.);
       ("9007199254740992", 9007199254740992.);
       ("9007199254740993", 9007199254740992.);
       ("9007199254740995", 9007199254740996.);
     ]
+
+(* Constrain mathematical lengths, without allocating enormous strings or
+   asking the model decoder to materialize them. Direct SMT exercises the
+   length-specific encoding; literal conversion checks the concrete and
+   reduction paths, including the fallback's rounding and overflow. *)
+let length_conversion_boundaries () =
+  let store = Engine.CExprEval.CStore.init [] in
+  List.iter
+    (fun (integer, expected) ->
+      let integer = Expr.Lit (Literal.Int integer) in
+      let expected = Expr.Lit (Literal.Num expected) in
+      let literal_conversion = Expr.UnOp (IntToNum, integer) in
+      Alcotest.(check bool)
+        "concrete boundary conversion" true
+        (Expr.equal expected
+           (Expr.Lit (Engine.CExprEval.evaluate_expr store literal_conversion)));
+      Alcotest.(check bool)
+        "reduced boundary conversion" true
+        (Expr.equal expected (Reduction.reduce_lexpr literal_conversion));
+      check "symbolic length conversion boundary" false
+        [
+          eq (length a) integer;
+          not_ (bin ValueEqual (Expr.UnOp (IntToNum, length a)) expected);
+        ])
+    (List.map
+       (fun (n, f) -> (Z.of_string n, f))
+       [
+         ("0", 0.);
+         ("1", 1.);
+         ("65535", 65535.);
+         ("65536", 65536.);
+         ("9007199254740991", 9007199254740991.);
+         ("9007199254740992", 9007199254740992.);
+         ("9007199254740993", 9007199254740992.);
+         ("9007199254740995", 9007199254740996.);
+       ]
+    @ [ (Z.shift_left Z.one 1024, infinity) ])
+
+let replay_length_model gamma constraints model =
+  let index = Expr.LVar "#length_index" in
+  let lifted = Hashtbl.create 2 in
+  Smt.lift_model model gamma (Hashtbl.add lifted)
+    (Expr.Set.of_list [ a; index ]);
+  let get name =
+    match Hashtbl.find_opt lifted name with
+    | Some (Expr.Lit value) -> value
+    | _ -> Alcotest.fail "Missing length/index model value"
+  in
+  let units =
+    match get "#utf16_a" with
+    | Utf16String value -> Codec.code_units (Codec.to_canonical value)
+    | _ -> Alcotest.fail "Lost string model type"
+  in
+  let number =
+    match get "#length_index" with
+    | Num value -> value
+    | _ -> Alcotest.fail "Lost numeric model type"
+  in
+  let store =
+    Engine.CExprEval.CStore.init
+      [ ("#utf16_a", get "#utf16_a"); ("#length_index", Num number) ]
+  in
+  let visitor =
+    object
+      inherit [_] Visitors.endo
+      method! visit_LVar () _ name = Expr.PVar name
+    end
+  in
+  List.iter
+    (fun expr ->
+      match
+        Engine.CExprEval.evaluate_expr store (visitor#visit_expr () expr)
+      with
+      | Bool true -> ()
+      | _ -> Alcotest.fail "Length model failed concrete replay")
+    constraints;
+  [
+    ("units", `List (List.map (fun unit -> `Int unit) units));
+    ("indexBits", `String (Printf.sprintf "%016Lx" (Int64.bits_of_float number)));
+  ]
+
+let length_branch_models () =
+  let index = Expr.LVar "#length_index" in
+  let gamma = gamma () in
+  Gamma.update gamma "#length_index" NumberType;
+  let gamma = Gamma.as_hashtbl gamma in
+  let pos = Expr.UnOp (ToIntOp, index) in
+  let nonnegative = not_ (bin FLessThan pos (Expr.num 0.)) in
+  let outside = bin FLessThanEqual (Expr.UnOp (IntToNum, length a)) pos in
+  let models =
+    List.map
+      (fun (id, guard) ->
+        let constraints = [ nonnegative; guard ] in
+        let model =
+          match Smt.exec_sat (Expr.Set.of_list constraints) gamma with
+          | Some model -> model
+          | None -> Alcotest.fail ("Lost feasible length branch: " ^ id)
+        in
+        `Assoc
+          (("id", `String id) :: replay_length_model gamma constraints model))
+      [ ("outside", outside); ("inside", not_ outside) ]
+  in
+  match Sys.getenv_opt "GILLIAN_UTF16_COMPARISON_MODELS" with
+  | None -> ()
+  | Some path -> Yojson.Safe.to_file path (`List models)
 
 (* Use the standard false-first heuristic to expose a known invalid-model
    case on Z3 4.13.3. Only this test changes the search policy; production keeps
@@ -172,7 +283,11 @@ let length_model_validation () =
   let gamma = Gamma.as_hashtbl gamma in
   let pos = Expr.UnOp (ToIntOp, index) in
   let nonnegative = not_ (bin FLessThan pos (Expr.num 0.)) in
-  let outside = bin FLessThanEqual (Expr.UnOp (IntToNum, length a)) pos in
+  (* Exercise the unchanged generic IntToNum encoding: the length-specific
+     fast path can avoid this solver defect. Direct exec_sat does not reduce
+     the syntactic +0 before choosing the conversion encoding. *)
+  let general_length = bin IPlus (length a) (Expr.int 0) in
+  let outside = bin FLessThanEqual (Expr.UnOp (IntToNum, general_length)) pos in
   let run () =
     let model =
       match
@@ -183,42 +298,7 @@ let length_model_validation () =
       | Some model -> model
       | None -> Alcotest.fail "Lost the feasible outside branch"
     in
-    let lifted = Hashtbl.create 2 in
-    Smt.lift_model model gamma (Hashtbl.add lifted)
-      (Expr.Set.of_list [ a; index ]);
-    let get name =
-      match Hashtbl.find_opt lifted name with
-      | Some (Expr.Lit value) -> value
-      | _ -> Alcotest.fail "Missing length/index model value"
-    in
-    let units =
-      match get "#utf16_a" with
-      | Utf16String value -> Codec.code_units (Codec.to_canonical value)
-      | _ -> Alcotest.fail "Lost string model type"
-    in
-    let number =
-      match get "#length_index" with
-      | Num value -> value
-      | _ -> Alcotest.fail "Lost numeric model type"
-    in
-    let store =
-      Engine.CExprEval.CStore.init
-        [ ("#utf16_a", get "#utf16_a"); ("#length_index", Num number) ]
-    in
-    let visitor =
-      object
-        inherit [_] Visitors.endo
-        method! visit_LVar () _ name = Expr.PVar name
-      end
-    in
-    List.iter
-      (fun expr ->
-        match
-          Engine.CExprEval.evaluate_expr store (visitor#visit_expr () expr)
-        with
-        | Bool true -> ()
-        | _ -> Alcotest.fail "Outside model failed concrete replay")
-      [ nonnegative; outside ];
+    let witness = replay_length_model gamma [ nonnegative; outside ] model in
     let rejected =
       try
         ignore
@@ -240,13 +320,9 @@ let length_model_validation () =
       [ eq a (value [ 65 ]) ];
     let evidence =
       `Assoc
-        [
-          ("id", `String "outside");
-          ("units", `List (List.map (fun unit -> `Int unit) units));
-          ( "indexBits",
-            `String (Printf.sprintf "%016Lx" (Int64.bits_of_float number)) );
-          ("invalidInsideModelRejected", `Bool rejected);
-        ]
+        (("id", `String "outside")
+        :: ("invalidInsideModelRejected", `Bool rejected)
+        :: witness)
     in
     match Sys.getenv_opt "GILLIAN_UTF16_LENGTH_MODELS" with
     | None -> ()
@@ -487,6 +563,8 @@ let tests =
     ("concrete and SMT agreement", `Quick, concrete_agreement);
     ("arbitrary typed sequences", `Quick, arbitrary_values);
     ("JS length conversion", `Quick, js_length_conversion);
+    ("length conversion boundaries", `Quick, length_conversion_boundaries);
+    ("length branch models", `Quick, length_branch_models);
     ("length model validation", `Quick, length_model_validation);
     ("wrapped values and type identity", `Quick, wrapped_values);
     ("actual lifted models", `Quick, models);
