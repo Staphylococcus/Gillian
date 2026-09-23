@@ -5,7 +5,7 @@ Covers the P08 filter/callback surface that object-interop (object keys) does no
   - callback return selection (keep/drop),
   - empty array,
   - closure/frame preservation (callback + captured `keep` argument),
-  - invalid-callback replay (wrong count must reject).
+  - wrong-result assertions (wrong count must reject; not a non-callable callback).
 
 Node oracle:
   [1, null, 2].filter((i) => i !== null && i !== undefined).length == 2

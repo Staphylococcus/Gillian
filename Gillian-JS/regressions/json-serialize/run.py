@@ -21,7 +21,7 @@ Node oracle (JSON.stringify):
   -0 -> "0"    NaN/Inf/-Inf -> "null"   5e-324 -> "5e-324"
 
 Positive cases assert the exact Node-oracle text (must prove), including a
-5-deep nested array that defeats any fixed-bounded (stalling) serializer.
+5-deep nested array as a finite-depth regression, not a termination proof.
 The single negative case (neg-escape) asserts an unescaped control char must
 not be emitted raw (must reject with a Pure assertion failure on the Assert
 line, not a cutoff or crash).
