@@ -162,6 +162,7 @@ proc setupInitialHeap () {
       [$lg, "ReferenceError"]     := {{ "d", $lrferr, true, false, true }};
       [$lg, "SyntaxError"]        := {{ "d", $lserr, true, false, true }};
       [$lg, "TypeError"]          := {{ "d", $lterr, true, false, true }};
+      [$lg, "JSON"]               := {{ "d", $ljson, true, false, true }};
 
       ret := "create_object_with_call_construct_concrete" ($lg_eval, "ExecuteEval", empty, 1);
       ret := "create_object_with_call_construct_concrete" ($lg_isNan, "Object_isNan", empty, 1);
@@ -537,7 +538,7 @@ proc setupInitialHeap () {
 
 
 
-      (* JSON object
+      (* JSON object *)
 
       ret := "create_default_object_concrete" ($ljson, $lobj_proto, "JSON", true);
 
@@ -546,8 +547,6 @@ proc setupInitialHeap () {
 
       ret := "create_object_with_call_construct_concrete" ($ljson_parse, "JSON_parse", empty, 2);
       ret := "create_object_with_call_construct_concrete" ($ljson_stringify, "JSON_stringify", empty, 3);
-
-      *)
 
 
 
