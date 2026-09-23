@@ -76,7 +76,7 @@ reuse of partial-correctness results. `--total` does not change the default mode
 Contradictory procedure postconditions now survive preprocessing as false proof
 obligations, producing analysis failures instead of an internal exception.
 
-Run all 65 positive, negative and partial-correctness controls:
+Run all 83 positive, negative and partial-correctness controls:
 
 ```sh
 GILLIAN_JS=gillian-js python3 Gillian-JS/regressions/procedure-totality/run.py
@@ -88,3 +88,17 @@ command, output and expected exit/message; a timeout, crash or unrelated rejecti
 never satisfies a control. `observations.json` preserves the earlier 46-case
 pure-GIL slice. `heap-observations.json` records the subsequent primitive-action
 build, source hashes, 65 controls and lemma/numeric/unit regression runs.
+
+## Proof ordering for resolved dynamic calls
+
+`--proof-dependency=CALLER:CALLEE` adds a scheduling edge between two selected
+total procedure proofs. It uses the existing dependency ordering and does not
+alter the program, select a target, assume a contract or make a failed proof
+available. Every callee case still has to pass in the current run; the actual
+call still resolves its target and checks arity and the precondition. Partial
+mode, closed-entry mode, missing selections, self-edges and cycles reject.
+
+The twelve new controls cover successful repeated dynamic calls, a failed callee
+case, a false caller postcondition, an invalid argument, wrong arity/target and
+invalid scheduling requests. The prior sections retain the initial fragment's
+history; current helper/loop/predicate support is documented in their own suites.

@@ -1,0 +1,14 @@
+spec validate10(n)
+[[ (n == 0i) ]] [[ (ret == 0i) ]] normal;
+[[ (n == 1i) ]] [[ (ret == 1i) ]] normal
+proc validate10(n) { ret := n; return };
+
+spec callTwice()
+[[ emp ]] [[ (ret == 1i) ]] normal
+proc callTwice() {
+ target := "validate10";
+ first := target(0i);
+ second := target(1i);
+ ret := 42i;
+ return
+};

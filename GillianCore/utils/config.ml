@@ -108,6 +108,7 @@ module Verification = struct
 
   let total = ref false
   let closed_entry = ref false
+  let proof_dependencies = ref ([] : (string * string) list)
   let procs_to_verify = ref ([] : string list)
   let lemmas_to_verify = ref ([] : string list)
   let things_to_verify = ref All

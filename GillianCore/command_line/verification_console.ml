@@ -44,6 +44,18 @@ module Make
     let docv = "PROC_NAME" in
     Arg.(value & opt_all string [] & info [ "proc" ] ~doc ~docv)
 
+  let proof_dependency =
+    let doc =
+      "Prove CALLEE before CALLER for a resolved dynamic call. Both must be \
+       selected under --total, without --closed-entry. This only orders \
+       proofs; it does not select procedures, resolve calls or discharge \
+       obligations."
+    in
+    Arg.(
+      value
+      & opt_all (pair ~sep:':' string string) []
+      & info [ "proof-dependency" ] ~doc ~docv:"CALLER:CALLEE")
+
   let lemma_arg =
     let doc =
       "Specifies a procedure or list of lemmas that should be verified. By \
@@ -100,6 +112,16 @@ module Make
 
   let verify files already_compiled outfile_opt no_unfold incremental =
     Gillian_result.try_ @@ fun () ->
+    let* () =
+      if
+        !Config.Verification.proof_dependencies <> []
+        && ((not !Config.Verification.total)
+           || !Config.Verification.closed_entry)
+      then
+        Gillian_result.operation_error
+          "Proof dependencies require --total without --closed-entry."
+      else Ok ()
+    in
     Verification.start_time := Unix.gettimeofday ();
     Fmt.pr "Parsing and compiling...\n@?";
     let* e_prog, init_data, source_files_opt =
@@ -150,12 +172,14 @@ module Make
       procs_only
       total
       closed_entry
+      proof_dependencies
       () =
     (* Attention: if you plan to add UX verification, you must be careful about predicates.
        In our current formalism, they must be stricly exact. *)
     let () = Fmt_tty.setup_std_outputs () in
     let () = Config.Verification.total := total in
     let () = Config.Verification.closed_entry := closed_entry in
+    let () = Config.Verification.proof_dependencies := proof_dependencies in
     let () = Config.stats := stats in
     let () = Config.lemma_proof := not no_lemma_proof in
     let () = Config.current_exec_mode := Verification in
@@ -179,7 +203,7 @@ module Make
     Term.(
       const verify_once $ files $ already_compiled $ output_gil $ no_unfold
       $ stats $ no_lemma_proof $ manual $ incremental $ proc_arg $ lemma_arg
-      $ procs_only $ total $ closed_entry)
+      $ procs_only $ total $ closed_entry $ proof_dependency)
 
   let verify_info =
     let doc = "Verifies a file of the target language" in

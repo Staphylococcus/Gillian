@@ -16,6 +16,18 @@ DESCENT = (1, "variant is not a strictly smaller natural integer")
 ENTRY = (1, "entry variant is not a natural integer")
 POST = (1, "Couldn't satisfy postcondition")
 CASES = [
+    ("proof-order.gil", ["--total", "--proof-dependency=callTwice:validate10"], TOTAL),
+    ("proof-order-failed.gil", ["--total", "--proof-dependency=callTwice:validate10"], (124, "has not passed every totality proof case")),
+    ("proof-order-pre.gil", ["--total", "--proof-dependency=callTwice:validate10"], (1, "Assertion failed: (2i v==")),
+    ("proof-order-wrong.gil", ["--total", "--proof-dependency=callTwice:validate10"], POST),
+    ("proof-order-arity.gil", ["--total", "--proof-dependency=callTwice:validate10"], (124, "requires exact call arity")),
+    ("proof-order-target.gil", ["--total", "--proof-dependency=callTwice:validate10"], (1, "EProc")),
+    ("proof-order.gil", ["--total", "--proc=callTwice", "--proof-dependency=callTwice:validate10"], (124, "require both caller and callee to be selected")),
+    ("proof-order.gil", ["--total", "--proof-dependency=absent:validate10"], (124, "require both caller and callee to be selected")),
+    ("proof-order.gil", ["--total", "--proof-dependency=callTwice:callTwice"], (124, "cannot order a procedure before itself")),
+    ("proof-order-cycle.gil", ["--total", "--proof-dependency=first:second", "--proof-dependency=second:first"], (124, "mutually recursive procedures")),
+    ("proof-order.gil", ["--proof-dependency=callTwice:validate10"], (124, "Proof dependencies require --total without --closed-entry")),
+    ("proof-order.gil", ["--total", "--closed-entry", "--proc=callTwice", "--proof-dependency=callTwice:validate10"], (124, "Proof dependencies require --total without --closed-entry")),
     ("heap-alias-set.gil", ["--total"], TOTAL),
     ("heap-alias-set-wrong.gil", ["--total"], POST),
     ("heap-alias-delete.gil", ["--total"], TOTAL),

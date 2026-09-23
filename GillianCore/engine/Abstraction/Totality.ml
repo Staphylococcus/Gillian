@@ -700,6 +700,17 @@ let order_procs
         unsupported (name ^ " needs a recursive-call variant.");
       Hashtbl.add calls name callees)
     selected;
+  (* Explicit edges only schedule selected proofs. The interpreter still resolves
+     each actual target and checks its proved status, arity and precondition. *)
+  List.iter
+    (fun (caller, callee) ->
+      if not (SS.mem caller selected && SS.mem callee selected) then
+        unsupported
+          "proof dependencies require both caller and callee to be selected.";
+      if caller = callee then
+        unsupported "proof dependencies cannot order a procedure before itself.";
+      Hashtbl.replace calls caller (callee :: Hashtbl.find calls caller))
+    !Config.Verification.proof_dependencies;
   let components =
     Tarjan.tarjan (fun visit -> SS.iter visit selected) (Hashtbl.find calls)
   in

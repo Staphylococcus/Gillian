@@ -1,0 +1,4 @@
+spec first() [[ emp ]] [[ (ret == 42i) ]] normal
+proc first() { target := "second"; ret := target(); return };
+spec second() [[ emp ]] [[ (ret == 42i) ]] normal
+proc second() { target := "first"; ret := target(); return };
