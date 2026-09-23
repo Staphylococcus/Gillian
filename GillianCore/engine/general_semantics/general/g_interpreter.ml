@@ -476,7 +476,14 @@ struct
     | None -> None
     | Some (lab, subst_lst) ->
         let subst_lst' : (string * Val.t) list =
-          List.map (fun (x, e) -> (x, State.eval_expr state e)) subst_lst
+          List.map
+            (fun (x, e) ->
+              Totality.check_proof_expression ~context:"Summary substitution"
+                ~evaluate:(fun e -> State.eval_expr state e |> Val.to_expr)
+                ~assertion:(fun condition -> State.assert_a state [ condition ])
+                e;
+              (x, State.eval_expr state e))
+            subst_lst
         in
         Some (lab, subst_lst')
 
@@ -989,6 +996,11 @@ struct
               let rank, entry =
                 Totality.call_rank ctx params (List.map Val.to_expr args)
               in
+              Totality.check_proof_expression
+                ~context:"Procedure recursive variant"
+                ~evaluate:(fun e -> State.eval_expr state e |> Val.to_expr)
+                ~assertion:(fun condition -> State.assert_a state [ condition ])
+                rank;
               let value = State.eval_expr state rank in
               if
                 State.get_type state value <> Some Type.IntType

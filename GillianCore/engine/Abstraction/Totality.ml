@@ -33,9 +33,10 @@ let rank_decreases typ rank entry =
   | NumberType -> Expr.BinOp (rank, FLessThan, entry)
   | _ -> Expr.Lit (Bool false)
 
-(* Check executed operator domains before reduction can erase their results.
+(* Check operator domains before reduction can erase their results.
+   Proof values can contain symbolic identities; executable syntax cannot.
    Short-circuit operands are required only on their evaluated paths. *)
-let check_expression ~require ~proves ~evaluate expr =
+let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
   let typ e t = Expr.BinOp (UnOp (TypeOf, e), Equal, Lit (Type t)) in
   let nonnegative e = Expr.BinOp (Lit (Int Z.zero), ILessThanEqual, e) in
   let length e = Expr.UnOp (LstLen, e) in
@@ -213,6 +214,7 @@ let check_expression ~require ~proves ~evaluate expr =
         List.iter (fun x -> need (typ x ListType)) xs
     | EList xs -> children xs
     | Lit _ | PVar _ -> ()
+    | LVar _ | ALoc _ when proof -> ()
     | NOp _
     | ESet _
     | ConstructorApp _
@@ -224,6 +226,19 @@ let check_expression ~require ~proves ~evaluate expr =
     | Cases _ -> unsupported "logical-only expressions in executable code."
   in
   check (Expr.Lit (Bool true)) expr
+
+(* Share domain rules with executed expressions, without changing legacy proof
+   evaluation or assuming a missing domain to make a proof go through. *)
+let check_proof_expression ~context ~evaluate ~assertion expr =
+  if !Config.Verification.total then
+    let proves condition = assertion (evaluate condition) in
+    check_expression ~proof:true ~proves ~evaluate
+      ~require:(fun partial condition ->
+        if not (proves condition) then
+          raise
+            (Gillian_result.Exc.analysis_failure
+               (Fmt.str "%s is not proved defined: %a" context Expr.pp partial)))
+      expr
 
 let spec (proc : ('a, 'b) Proc.t) =
   match proc.proc_spec with

@@ -1,0 +1,9 @@
+pure nounfold pred Counted(n : Int) : (n == 0i), (0i i< n) * Counted(n i- 1i);
+lemma Count(n, xs) variant(#n)
+[[ types(#n : Int, #xs : List) * (0i i<= #n) ]]
+[[ Counted(#n) ]]
+[* if (#n i> 0i) then { apply Count((#n i- 1i) i+ l-len(l-sub(#xs, 1i, 0i)), #xs) }; fold Counted(#n) *]
+spec answer(n, xs)
+[[ (n == #n) * (xs == #xs) * types(#n : Int, #xs : List) * (0i i<= #n) ]]
+[[ (ret == 0i) * Counted(#n) ]] normal
+proc answer(n, xs) { apply Count(n, xs); ret := 0i; return };

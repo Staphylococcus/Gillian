@@ -149,6 +149,10 @@ struct
         Option.map
           (fun rank ->
             let rank = SSubst.subst_in_expr subst ~partial:true rank in
+            Totality.check_proof_expression ~context:"Entry variant"
+              ~evaluate:(SPState.eval_expr ss_pre)
+              ~assertion:(fun condition -> SPState.assert_a ss_pre [ condition ])
+              rank;
             SPState.eval_expr ss_pre rank)
           entry_rank
       in

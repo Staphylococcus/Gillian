@@ -44,4 +44,23 @@ Three proof-term fixtures also run in ordinary total and closed-entry modes:
 evaluation, required-operand error propagation, and the distinction between
 failed assumption reduction and genuinely infeasible assumptions. These repairs
 apply to total mode. They do not establish definedness for every symbolic proof
-term; summary substitutions and entry/recursive ranks remain separate gaps.
+term; summary substitutions and entry/recursive ranks were separate gaps,
+addressed in the next slice below.
+
+## Proof-value domains (23 September)
+
+Total verification now shares the executed-expression domain checker with
+labelled substitutions and termination measures. Proof values admit logical
+variables and abstract locations; executable syntax retains its leaf restrictions.
+Missing domains raise an analysis failure before reduction can erase a partial
+operation. Checks cover procedure entry/calls, loop abstraction/revisit, lemma
+entry/induction reuse, and lemma arguments before rank instantiation.
+
+Seventeen new GIL fixtures provide 18 controls, including a legacy-mode control.
+They cover arbitrary/nonempty lists, program/logical substitutions, guarded and
+skipped operands, valid-entry/invalid-call measures, weak loop generalization,
+and an erased partial lemma argument. Failures must identify the intended
+domain boundary. Four additional `proof_terms_tests` controls exercise shared
+admission and direct invalid/valid loop-revisit states independently of entry.
+These tests do not establish general assertion/matching definedness or full-fold
+correctness; fold/unfold arguments and the broader proof-language audit remain open.

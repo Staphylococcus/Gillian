@@ -716,8 +716,13 @@ module Make (State : SState.S) :
     | Some (variant, Some (typ, entry)) ->
         let rank =
           SVal.SESubst.subst_in_expr subst' ~partial:true variant
-          |> State.eval_expr new_state.state
         in
+        Totality.check_proof_expression ~context:"Loop revisit variant"
+          ~evaluate:(State.eval_expr new_state.state)
+          ~assertion:(fun condition ->
+            State.assert_a new_state.state [ condition ])
+          rank;
+        let rank = State.eval_expr new_state.state rank in
         if
           State.get_type new_state.state rank <> Some typ
           || not
@@ -842,6 +847,10 @@ module Make (State : SState.S) :
             match measure with
             | Some (variant, None) ->
                 let state = invariant_state.state in
+                Totality.check_proof_expression ~context:"Loop entry variant"
+                  ~evaluate:(State.eval_expr state)
+                  ~assertion:(fun condition -> State.assert_a state [ condition ])
+                  variant;
                 let rank = State.eval_expr state variant in
                 let typ =
                   Option.value ~default:Type.UndefinedType
@@ -1213,7 +1222,18 @@ module Make (State : SState.S) :
             | Error _ -> Fmt.failwith "Lemma %s does not exist" lname
             | Ok lemma -> lemma
           in
-          let v_args : vt list = List.map eval_expr args in
+          let v_args : vt list =
+            List.map
+              (fun arg ->
+                (* Validate before argument reduction can erase a partial term
+                   from the subsequently instantiated induction measure. *)
+                Totality.check_proof_expression ~context:"Lemma argument"
+                  ~evaluate:eval_expr
+                  ~assertion:(fun condition -> assert_a astate [ condition ])
+                  arg;
+                eval_expr arg)
+              args
+          in
           (* Check before consuming the precondition or producing any conclusion:
              the induction hypothesis is available only at smaller arguments. *)
           let** () =
@@ -1227,6 +1247,10 @@ module Make (State : SState.S) :
                   let rank =
                     ProofDependencies.instantiate_variant lemma.data v_args
                   in
+                  Totality.check_proof_expression
+                    ~context:"Lemma recursive variant" ~evaluate:eval_expr
+                    ~assertion:(fun condition -> assert_a astate [ condition ])
+                    rank;
                   if
                     get_type astate rank = Some Type.IntType
                     && assert_a astate
