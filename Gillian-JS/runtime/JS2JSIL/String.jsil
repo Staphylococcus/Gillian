@@ -46,7 +46,7 @@ proc s__getOwnProperty (l, prop) {
 
 	index:	m := metadata(l);
 					str := [m, "@primitiveValue"];
-					len := extern ExecuteStringLength (str);
+					len := s-len (str);
 					goto [len <= idx] r_uf rtrn;
 
 	rtrn: rstr := extern ExecuteStringNth (str, idx);
@@ -92,7 +92,7 @@ proc String_construct (xsc, vthis, s) {
 					m := metadata(ret);
 					[m, "@primitiveValue"] := pv;
 
-					len := extern ExecuteStringLength (pv);
+					len := s-len (pv);
 
 					s := ret;
 					ret := "defineOwnProperty" (s, "length", {{ "d", len, false, false, false }}, true) with elab;
@@ -147,7 +147,7 @@ proc SP_charAt (xsc, vthis, position) {
 				S := ret;
 				ret := "i__toInteger" (position) with elab;
 				pos := ret;
-				size := extern ExecuteStringLength (S);
+				size := s-len (S);
 				goto [pos < 0] empt next;
 
 	next:	goto [size <= pos] empt fll;
@@ -221,7 +221,7 @@ proc SP_indexOf (xsc, vthis, searchString, position) {
 
 	nzero:	ret := "i__toInteger" (position) with elab;
 					pos := ret;
-	leng:		len := extern ExecuteStringLength (S);
+	leng:		len := s-len (S);
 
 					max := pos;
 					goto [0 < pos] min maxz; 
@@ -230,7 +230,7 @@ proc SP_indexOf (xsc, vthis, searchString, position) {
 					goto [len < min] minl st;
 	minl: 	min := len;
 	st:			start := min;
-					slen := extern ExecuteStringLength (sStr);
+					slen := s-len (sStr);
 
 					goto [slen = 0] empts nempt;
 	empts:	ret := start;
@@ -269,7 +269,7 @@ proc SP_lastIndexOf (xsc, vthis, searchString, position) {
 			ret := "i__toString" (vthis) with elab;
 			S := ret;
 
-			len := extern ExecuteStringLength (S);
+			len := s-len (S);
 
 			ret := "i__toString" (searchString) with elab;
 			sStr := ret;
@@ -289,7 +289,7 @@ proc SP_lastIndexOf (xsc, vthis, searchString, position) {
 			max := ret;
 			ret := "M_min" (empty, empty, max, len) with elab;
 			start := ret;
-			slen := extern ExecuteStringLength (sStr);
+			slen := s-len (sStr);
 			fink := -1;
 
 			goto [slen = 0] empts nempt;
@@ -336,7 +336,7 @@ proc SP_slice (xsc, vthis, start, end) {
 			ret := "i__checkObjectCoercible" (vthis) with elab;
 			ret := "i__toString" (vthis) with elab;
 			S := ret;
-			len := extern ExecuteStringLength (S);
+			len := s-len (S);
 
 			goto [start = undefined] sund snull;
 	sund:	start := 0;
@@ -397,7 +397,7 @@ proc SP_substring (xsc, vthis, start, end) {
 			ret := "i__checkObjectCoercible" (vthis) with elab;
 			ret := "i__toString" (vthis) with elab;
 			S := ret;
-			len := extern ExecuteStringLength (S);
+			len := s-len (S);
 
 			ret := "i__toInteger" (start) with elab;
 			intS := ret;

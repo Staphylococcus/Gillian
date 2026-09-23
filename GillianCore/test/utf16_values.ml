@@ -126,6 +126,41 @@ let arbitrary_values () =
   check "length is not code-point length" true
     [ eq a (value [ 0xd83d; 0xde00 ]); not_ (eq (length a) (Expr.int 1)) ]
 
+let js_length_conversion () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let check_term term expected =
+    let literal = Literal.Num expected in
+    Alcotest.(check bool)
+      "JS length conversion agrees with the expected Number" true
+      (Literal.same_value literal (Engine.CExprEval.evaluate_expr store term));
+    Alcotest.(check bool)
+      "reduction retains binary64 rounding" true
+      (Expr.equal (Expr.Lit literal) (Reduction.reduce_lexpr term));
+    check "SMT conversion agrees without concrete reduction" false
+      [ not_ (bin ValueEqual term (Expr.Lit literal)) ]
+  in
+  List.iter
+    (fun units ->
+      check_term
+        (Expr.UnOp (IntToNum, length (value units)))
+        (float_of_int (List.length units)))
+    values;
+  (* The JS String domain ends at 2^53-1; generic GIL integers do not. Keep
+     round-to-nearest/ties-to-even outside that language domain. These are
+     boundary controls, not an enumeration proof of integer exactness. *)
+  List.iter
+    (fun (integer, expected) ->
+      check_term
+        (Expr.UnOp (IntToNum, Expr.Lit (Int (Z.of_string integer))))
+        expected)
+    [
+      ("0", 0.);
+      ("9007199254740991", 9007199254740991.);
+      ("9007199254740992", 9007199254740992.);
+      ("9007199254740993", 9007199254740992.);
+      ("9007199254740995", 9007199254740996.);
+    ]
+
 let wrapped_values () =
   check ~types:Gamma.init "untyped values acquire the same unit view" false
     [
@@ -358,6 +393,7 @@ let tests =
     ("literal domain and transport", `Quick, literal_domain);
     ("concrete and SMT agreement", `Quick, concrete_agreement);
     ("arbitrary typed sequences", `Quick, arbitrary_values);
+    ("JS length conversion", `Quick, js_length_conversion);
     ("wrapped values and type identity", `Quick, wrapped_values);
     ("actual lifted models", `Quick, models);
     ("typed numeric producers", `Quick, numeric_producers);
