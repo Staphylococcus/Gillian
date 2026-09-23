@@ -14,6 +14,10 @@ TOTAL = (0, 'All total procedure specs succeeded')
 POST = (1, "Couldn't satisfy postcondition")
 DOMAIN = (1, 'not proved defined')
 CASES = [
+    ('erased-rounded-length.gil', ['--total'], DOMAIN),
+    ('erased-position.gil', ['--total'], DOMAIN),
+    ('proof-partial-rounded-length.gil', ['--total'], DOMAIN),
+    ('proof-partial-position.gil', ['--total'], DOMAIN),
     ('ordering-branch.gil', ['--total'], (125, 'binop: u16<')),
     ('format-type.gil', ['--total'], DOMAIN),
     ('parse-type.gil', ['--total'], DOMAIN),

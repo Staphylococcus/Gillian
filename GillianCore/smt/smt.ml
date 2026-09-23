@@ -1576,6 +1576,17 @@ let rec encode_logical_expression
   | ALoc var -> native_const ObjectType var
   | PVar _ -> exceptf "HORROR: Program variable in pure formula"
   | UnOp (op, le) -> encode_unop ~llen_lvars ~e:le op (f le)
+  | BinOp ((UnOp (IntToNum, UnOp (Utf16Len, _)) as len), FLessThanEqual, pos) ->
+      let>- len = get_num (f len) in
+      let>- pos = get_num (f pos) in
+      (* Rounded sequence lengths are nonnegative, including overflow. This
+         redundant conjunct exposes the impossible negative-position case
+         without restricting any input or adding facts to other expressions.
+         NaN still makes the original comparison false; operand guards remain. *)
+      bool_and
+        (bool_not (fp_bin "fp.lt" pos.expr (number_literal 0.)))
+        (fp_bin "fp.leq" len.expr pos.expr)
+      >- BooleanType
   | BinOp (le1, op, le2) -> encode_binop op (f le1) (f le2)
   | NOp (SetUnion, les) ->
       let>-- les = List.map f les in

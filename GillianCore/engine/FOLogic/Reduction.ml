@@ -779,6 +779,47 @@ let find_list_length_eqs (pfs : PFS.t) (e : Expr.t) : Cint.t list =
   in
   List.rev found_lengths
 
+(* ToInteger maps NaN to zero; rounded sequence lengths cannot be NaN,
+   including at overflow. Canonicalize their comparisons without changing
+   signed-zero behavior. Restrict discarded operands to these total operations
+   on typed variables: a type annotation does not make a partial lookup safe. *)
+let reduce_length_index_comparison gamma left op right =
+  let length = function
+    | Expr.UnOp (IntToNum, UnOp (Utf16Len, LVar s)) ->
+        Type_env.get gamma s = Some Type.Utf16Type
+    | _ -> false
+  in
+  let position = function
+    | Expr.UnOp (ToIntOp, LVar x) -> Type_env.get gamma x = Some Type.NumberType
+    | _ -> false
+  in
+  let zero_length e zero =
+    match (e, zero) with
+    | Expr.UnOp (IntToNum, n), Expr.Lit (Num z) when z = 0. && length e ->
+        Some (Expr.BinOp (n, Equal, Expr.zero_i))
+    | _ -> None
+  in
+  (* For nonnegative integers, RNE is zero exactly at zero. Keep the length
+     operand, and identify signed numeric zeros only under IEEE equality. *)
+  let zero =
+    if op <> BinOp.Equal then None
+    else
+      match zero_length left right with
+      | Some _ as result -> result
+      | None -> zero_length right left
+  in
+  if Option.is_some zero then zero
+  else if (length left || position left) && Expr.equal left right then
+    match op with
+    | BinOp.Equal | FLessThanEqual -> Some Expr.true_
+    | FLessThan -> Some Expr.false_
+    | _ -> None
+  else if op = BinOp.FLessThan && position left && length right then
+    (* Both operands are ordered, so complementing <= is exact even for
+       infinities and signed zeros. Keep the native comparison and conversion. *)
+    Some (Expr.UnOp (Not, BinOp (right, FLessThanEqual, left)))
+  else None
+
 (* TODO: can this whole mess be removed since we did sth similar with formulae? *)
 
 (** Reduction of logical expressions
@@ -826,6 +867,14 @@ let rec reduce_lexpr_loop
     match le with
     | BinOp (left, ((And | Or | Impl) as op), right)
       when !Config.Verification.total -> Expr.BinOp (f left, op, right)
+    | _ -> le
+  in
+
+  let le =
+    match le with
+    | BinOp (left, ((Equal | FLessThan | FLessThanEqual) as op), right) ->
+        Option.value ~default:le
+          (reduce_length_index_comparison gamma left op right)
     | _ -> le
   in
 

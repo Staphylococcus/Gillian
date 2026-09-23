@@ -1143,9 +1143,7 @@ proc i__abstractComparison (v1, v2, leftFirst) {
       ret := "i__toNumber" (py) with elab;
       ny := ret;
 
-      goto [(not (nx = nx)) or (not (ny = ny))] ru eq;
-
-  eq:   goto [nx = ny] rf sl;
+      goto [(not (nx = nx)) or (not (ny = ny))] ru sl;
 
   sl:   ret := (nx < ny);
       goto rlab;

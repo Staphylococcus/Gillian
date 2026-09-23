@@ -1,0 +1,4 @@
+spec check(x)
+[[ (x == #x) * types(#x : Str) ]]
+[[ (ret == true) ]] normal
+proc check(x) { ret := (num_to_int(x) == num_to_int(x)); return };

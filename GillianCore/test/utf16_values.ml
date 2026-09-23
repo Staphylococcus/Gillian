@@ -272,6 +272,135 @@ let length_branch_models () =
   | None -> ()
   | Some path -> Yojson.Safe.to_file path (`List models)
 
+(* Replay the actual reduced terms, including exceptional Numbers. The
+   arbitrary-input JS controls separately prove the composed runtime path. *)
+let comparison_reduction () =
+  let gamma = gamma () in
+  Gamma.update gamma "#length_index" NumberType;
+  let index = Expr.LVar "#length_index" in
+  let pos = Expr.UnOp (ToIntOp, index) in
+  let len = Expr.UnOp (IntToNum, length a) in
+  let terms =
+    [
+      eq len len;
+      eq len (Expr.num 0.);
+      eq (Expr.num (-0.)) len;
+      bin FLessThan len len;
+      bin FLessThanEqual len len;
+      eq pos pos;
+      bin FLessThan pos pos;
+      bin FLessThanEqual pos pos;
+      bin FLessThan pos len;
+      eq index index;
+      bin FLessThan index len;
+    ]
+  in
+  let terms =
+    List.map (fun term -> (term, Reduction.reduce_lexpr ~gamma term)) terms
+  in
+  let visitor =
+    object
+      inherit [_] Visitors.endo
+      method! visit_LVar () _ name = Expr.PVar name
+    end
+  in
+  List.iter
+    (fun units ->
+      List.iter
+        (fun n ->
+          let store =
+            Engine.CExprEval.CStore.init
+              [ ("#utf16_a", literal units); ("#length_index", Num n) ]
+          in
+          let eval e =
+            Engine.CExprEval.evaluate_expr store (visitor#visit_expr () e)
+          in
+          List.iter
+            (fun (original, reduced) ->
+              Alcotest.(check bool)
+                "comparison reduction preserves native result" true
+                (Literal.equal (eval original) (eval reduced)))
+            terms)
+        [
+          nan;
+          infinity;
+          neg_infinity;
+          0.;
+          -0.;
+          -1.;
+          -0.5;
+          0.5;
+          1.;
+          1.5;
+          65536.;
+          9007199254740992.;
+          Float.max_float;
+        ])
+    values
+
+let length_comparison_numbers () =
+  List.iter
+    (fun units ->
+      List.iter
+        (fun number ->
+          let condition =
+            bin FLessThanEqual
+              (Expr.UnOp (IntToNum, length a))
+              (Expr.num number)
+          in
+          let expected = float_of_int (List.length units) <= number in
+          let actual = if expected then condition else not_ condition in
+          check "length comparison retains Number outcome" true
+            [ eq a (value units); actual ];
+          check "length comparison rejects opposite outcome" false
+            [ eq a (value units); not_ actual ])
+        [
+          nan;
+          infinity;
+          neg_infinity;
+          0.;
+          -0.;
+          -1.;
+          -0.5;
+          0.5;
+          1.;
+          1.5;
+          65536.;
+          9007199254740992.;
+          Float.max_float;
+        ])
+    [ []; [ 65 ]; [ 0xd83d; 0xde00 ] ]
+
+let composition_models () =
+  let gamma = gamma () in
+  Gamma.update gamma "#length_index" NumberType;
+  let index = Expr.LVar "#length_index" in
+  let pos = Expr.UnOp (ToIntOp, index) in
+  let negative = bin FLessThan pos (Expr.num 0.) in
+  let outside = bin FLessThanEqual (Expr.UnOp (IntToNum, length a)) pos in
+  let models =
+    List.map
+      (fun (id, constraints) ->
+        let model =
+          match
+            Smt.exec_sat (Expr.Set.of_list constraints) (Gamma.as_hashtbl gamma)
+          with
+          | Some model -> model
+          | None -> Alcotest.fail ("Lost feasible composition outcome: " ^ id)
+        in
+        `Assoc
+          (("id", `String id)
+          :: replay_length_model (Gamma.as_hashtbl gamma) constraints model))
+      [
+        ("negative", [ negative; eq a a ]);
+        ("outside", [ not_ negative; outside ]);
+        ("inside", [ not_ negative; not_ outside ]);
+      ]
+  in
+  match Sys.getenv_opt "GILLIAN_UTF16_COMPOSITION_MODELS" with
+  | None -> ()
+  | Some path -> Yojson.Safe.to_file path (`List models)
+
 (* Use the standard false-first heuristic to expose a known invalid-model
    case on Z3 4.13.3. Only this test changes the search policy; production keeps
    the default. The mixed-theory query is feasible, but the returned empty
@@ -565,6 +694,9 @@ let tests =
     ("JS length conversion", `Quick, js_length_conversion);
     ("length conversion boundaries", `Quick, length_conversion_boundaries);
     ("length branch models", `Quick, length_branch_models);
+    ("comparison reduction", `Quick, comparison_reduction);
+    ("length comparison Numbers", `Quick, length_comparison_numbers);
+    ("composition models", `Quick, composition_models);
     ("length model validation", `Quick, length_model_validation);
     ("wrapped values and type identity", `Quick, wrapped_values);
     ("actual lifted models", `Quick, models);

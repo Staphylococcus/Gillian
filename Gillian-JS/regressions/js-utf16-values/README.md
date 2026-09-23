@@ -1,6 +1,6 @@
 # JavaScript UTF-16 value mapping
 
-These sixteen controls compile actual JavaScript and verify its runtime bodies in
+These 28 controls compile actual JavaScript and verify its runtime bodies in
 `--total` mode. They cover arbitrary string concatenation, prefix cancellation,
 `typeof`, symbolic property mutation/read, numeric property keys, and a wrong
 concatenation result. Inputs are arbitrary represented values, not finite choices.
@@ -33,20 +33,33 @@ assume a finite set of strings or a smaller analysis cap. The language string
 domain makes that conversion exact, while generic GIL retains binary64 rounding.
 A wrong constant-one postcondition is refuted; concrete controls reject byte
 and code-point length for an astral pair. Empty/NUL/BMP/astral/lone-surrogate
-parity is checked by the same ordinary JS body. The zero-result query currently
-returns SMT unknown and is tested as incomplete, never as proof or refutation.
-P06 must account for this sequence-length/Number solver limitation as it admits
-indexing and additional comparisons. Core units retain exact boundary and
-ties-to-even rounding controls without globally narrowing the UTF-16 domain.
+parity is checked by the same ordinary JS body. The constant-zero result claim
+is now refuted. Core units retain exact boundary and ties-to-even rounding
+controls without globally narrowing the UTF-16 domain.
 
 Supporting checks also live in the core UTF-16 cases, frontend UTF-16/property
 units, and existing JS code-unit, numeric, object, callback and serializer suites.
 Run `python3 run.py` with `GILLIAN_JS` set to the built backend launcher.
 
-The `charat-length-unknown.js` caller uses the actual builtin name/scope and
+The `charat-lookup-unsupported.js` caller uses the actual builtin name/scope and
 explicit prototype resources. Its arbitrary string/Number proof must remain
-incomplete at the length/index guard; assumed metadata is not initialization
+incomplete at `ExecuteStringNth`; assumed metadata is not initialization
 proof. Core UTF-16 controls separately require native solver model validation:
 a valid outside witness replays, an invalid inside witness aborts analysis,
 and a subsequent ordinary query still succeeds. No symbolic `charAt` theorem
 is claimed by these controls.
+
+The single-comparison and full negative/outside/inside conditional controls
+prove over arbitrary strings and every ToInteger position. Each wrong outcome
+must fail its postcondition. The runtime numeric comparison retains its NaN
+check and coercion order while omitting the redundant equality branch. Separate
+less-than/less-or-equal fixtures prove their Boolean results for all Numbers,
+including NaN, signed zeros and infinities, with wrong-result rejection controls.
+
+The reducer canonicalizes only total length/ToInteger operations on typed
+variables. An equivalent nonnegative-position conjunct in the SMT length
+comparison keeps the earlier single-comparison proof complete. The UTF-16
+primitive suite rejects wrong types and partial proof operands; core tests
+retain conversion boundaries, exceptional-number parity, all three lifted
+outcomes and invalid-model rejection/recovery. No input cap or helper assumption
+is introduced. Initialized `charAt` and checked lookup remain P06.2.

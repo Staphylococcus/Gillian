@@ -1,0 +1,4 @@
+spec check(x)
+[[ (x == #x) * types(#x : List) ]]
+[[ (ret == true) ]] normal
+proc check(x) { assert (num_to_int(l-nth(x, 0i)) == num_to_int(l-nth(x, 0i))); ret := true; return };
