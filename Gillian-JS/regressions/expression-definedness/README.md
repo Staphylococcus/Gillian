@@ -100,3 +100,33 @@ Three additional unit tests cover erasing parents for all three Boolean
 operators, concrete/symbolic substitution parity, required variable failures,
 and a nonliteral guard discharged from path facts. These are bounded repairs;
 pre/postcondition domains in general remain open.
+
+## Explicit Fold/Unfold arguments and Fold bindings
+
+In total mode, explicit `fold`, `unfold` and `unfold*` arguments and Fold's
+additional binding expressions now use the shared proof-value domain checker.
+The check runs on each original expression against the incoming state, before
+evaluation, matching or resource consumption can erase the term or supply its
+missing domain. Unfold's additional bindings only rename variables. Missing
+domains report `Fold argument`, `Unfold argument` or `Fold binding is not proved
+defined`; partial mode retains its previous behavior.
+
+Thirty-six fixtures add 45 controls: program/logical variables, arbitrary/nonempty
+lists, short-circuit guards, enclosing-branch guards, branch-local variables,
+recursive unfolding, legacy mode and a wrong Fold binding value that must still
+fail matching. Concrete empty/nonempty entry procedures also run in ordinary
+total mode. Their six closed-entry counterparts confirm the existing restriction
+on explicit Fold/Unfold commands, for both valid and invalid arguments; they do
+not reach the domain checker. The Unfold closed-entry fixtures reject their
+setup Fold. This slice does not extend closed-entry's admitted proof language.
+
+The initial AJV baseline exposed set literals/unions in existing object-key
+predicates. Proof values now admit these two forms: every element is checked and
+every union operand must have Set type. Six paired controls retain the partial
+slice check inside these wrappers at all three boundaries. Three unit groups
+cover typed/empty unions, duplicate elimination, invalid/untyped operands, hidden
+partial elements and the retained executable-set restriction. Other logical set
+operators remain outside this checker; no set execution model was added.
+
+Predicate bodies, automatic unfolding, binder-aware assertion matching and
+general pre/postcondition normalization still require separate domain audits.

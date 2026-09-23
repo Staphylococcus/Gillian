@@ -1,0 +1,10 @@
+pure nounfold pred Target(n : Bool) : (n == true);
+spec answer(b)
+[[ (b == #b) * types(#b : Bool) * Target(true) ]]
+[[ (ret == 42i) ]] normal
+proc answer(b) {
+  goto [b] init done;
+  init: x := 0i;
+  done: unfold Target(not (b and (x == 1i)));
+  ret := 42i; return
+};

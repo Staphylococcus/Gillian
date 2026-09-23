@@ -212,6 +212,10 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
     | NOp (LstCat, xs) ->
         children xs;
         List.iter (fun x -> need (typ x ListType)) xs
+    | NOp (SetUnion, xs) when proof ->
+        children xs;
+        List.iter (fun x -> need (typ x SetType)) xs
+    | ESet xs when proof -> children xs
     | EList xs -> children xs
     | Lit _ | PVar _ -> ()
     | LVar _ | ALoc _ when proof -> ()

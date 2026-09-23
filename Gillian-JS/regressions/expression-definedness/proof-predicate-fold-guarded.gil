@@ -1,0 +1,5 @@
+pure nounfold pred Target(n : Bool) : (n == true);
+spec answer(xs)
+[[ (xs == #xs) * types(#xs : List) ]]
+[[ (ret == 42i) ]] normal
+proc answer(xs) { fold Target((l-len(xs) == 0i) or (l-len(l-sub(xs, 1i, 0i)) == 0i)); ret := 42i; return };

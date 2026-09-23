@@ -939,17 +939,26 @@ module Make (State : SState.S) :
       with State.Internal_State_Error (errs, _) ->
         raise (Internal_State_Error (errs, astate))
     in
+    let eval_proof_expr context e =
+      (* Check the original term against the incoming state, before reduction
+         or predicate matching can erase it or supply its missing domain. *)
+      Totality.check_proof_expression ~context ~evaluate:eval_expr
+        ~assertion:(fun condition -> assert_a astate [ condition ]) e;
+      eval_expr e
+    in
     let open Res_list.Syntax in
     let** resulting_astate =
       match lcmd with
       | SymbExec -> failwith "Impossible: Untreated SymbExec"
       | Fold (pname, les, fold_info) ->
-          let vs = List.map eval_expr les in
+          let vs = List.map (eval_proof_expr "Fold argument") les in
           let pred = MP.get_pred_def prog.preds pname in
           let additional_bindings =
             Option.fold
               ~some:(fun (_, bindings) ->
-                List.map (fun (x, e) -> (Expr.LVar x, eval_expr e)) bindings)
+                List.map
+                  (fun (x, e) -> (Expr.LVar x, eval_proof_expr "Fold binding" e))
+                  bindings)
               ~none:[] fold_info
           in
           SMatcher.fold ~additional_bindings ~match_kind:LogicCommand
@@ -965,7 +974,7 @@ module Make (State : SState.S) :
             Fmt.failwith "Impossible: Unfold of abstract predicate %s" pname;
           (* 2) We evaluate the arguments, filter to keep only the in-parameters
              (which are sufficient to trigger the unfold) *)
-          let vs = List.map eval_expr les in
+          let vs = List.map (eval_proof_expr "Unfold argument") les in
           let vs_ins = Pred.in_args pred.pred vs in
           let vs = List.map Option.some vs in
           (* FIXME: make sure correct number of params *)

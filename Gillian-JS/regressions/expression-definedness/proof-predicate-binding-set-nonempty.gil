@@ -1,0 +1,5 @@
+pure nounfold pred Target(s : Set) : (s == #w) * (#w == -{0i}-);
+spec answer(xs)
+[[ (xs == #xs) * types(#xs : List) * (0i i< l-len(#xs)) ]]
+[[ (ret == 42i) ]] normal
+proc answer(xs) { fold Target(-{0i}-) [pick with (#w := -u-(-{l-len(l-sub(xs, 1i, 0i))}-, -{0i}-))]; ret := 42i; return };

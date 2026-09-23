@@ -1,0 +1,10 @@
+pure nounfold pred Target(n : Bool) : (n == #w) * (#w == true);
+spec answer(b)
+[[ (b == #b) * types(#b : Bool) ]]
+[[ (ret == 42i) ]] normal
+proc answer(b) {
+  goto [b] init done;
+  init: x := 0i;
+  done: fold Target(true) [pick with (#w := not (b and (x == 1i)))];
+  ret := 42i; return
+};

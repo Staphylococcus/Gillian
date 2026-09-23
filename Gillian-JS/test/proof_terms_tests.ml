@@ -156,6 +156,58 @@ let proof_domain () =
   check (bin And (bin ILessThan (Expr.int 0) (Expr.UnOp (LstLen, xs)))
            (bin Equal (bin LstNth xs (Expr.int 0)) (Expr.int 7)))
 
+let proof_sets () =
+  let keys = Expr.LVar "#keys" in
+  let state = Option.get (State.assume_t (State.init ()) keys Type.SetType) in
+  let check expr =
+    Totality.check_proof_expression ~context:"Test proof set"
+      ~evaluate:(State.eval_expr state)
+      ~assertion:(fun condition -> State.assert_a state [ condition ]) expr
+  in
+  List.iter check
+    [ Expr.ESet []; Expr.ESet [ Expr.int 7 ];
+      Expr.NOp (SetUnion, [ keys; Expr.ESet [ Expr.int 7 ] ]);
+      Expr.NOp (SetUnion, []);
+      Expr.ESet [ bin Or truth invalid ] ];
+  Alcotest.(check bool) "set union preserves elements and removes duplicates" true
+    (Expr.equal
+       (State.eval_expr state
+          (Expr.NOp (SetUnion,
+             [ Expr.ESet [ Expr.int 7 ]; Expr.ESet [ Expr.int 7; Expr.int 8 ] ])))
+       (Expr.ESet [ Expr.int 7; Expr.int 8 ]))
+
+let proof_set_domains () =
+  let state = State.init () in
+  let check expr =
+    Totality.check_proof_expression ~context:"Test proof set"
+      ~evaluate:(State.eval_expr state)
+      ~assertion:(fun condition -> State.assert_a state [ condition ]) expr
+  in
+  List.iter
+    (fun term -> expect_domain_failure "Test proof set is not proved defined:"
+        (fun () -> check term))
+    [ Expr.ESet [ invalid ];
+      Expr.NOp (SetUnion, [ Expr.int 0; Expr.ESet [] ]);
+      Expr.NOp (SetUnion, [ Expr.LVar "#untyped"; Expr.ESet [] ]);
+      (* Both set wrappers and the outer length rewrite must retain the slice. *)
+      Expr.NOp (SetUnion,
+        [ Expr.ESet [ Expr.UnOp (LstLen,
+            Expr.LstSub (Expr.EList [], Expr.int 1, Expr.int 0)) ] ]) ]
+
+let executable_sets () =
+  List.iter
+    (fun expr ->
+      let rejected =
+        try
+          Totality.check_expression ~require:(fun _ _ -> ())
+            ~proves:(fun _ -> false) ~evaluate:Fun.id expr;
+          false
+        with
+        | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true
+      in
+      Alcotest.(check bool) "sets stay forbidden in executable syntax" true rejected)
+    [ Expr.ESet []; Expr.NOp (SetUnion, [ Expr.ESet [] ]) ]
+
 let executable_leaves () =
   List.iter
     (fun expr ->
@@ -203,6 +255,9 @@ let () =
          Alcotest.test_case "failed assumption" `Quick (with_total failed_assumption);
          Alcotest.test_case "infeasible assumption" `Quick (with_total infeasible_assumption);
          Alcotest.test_case "proof domains and guarded operands" `Quick (with_total proof_domain);
+         Alcotest.test_case "proof set literals and union" `Quick (with_total proof_sets);
+         Alcotest.test_case "proof set domains" `Quick (with_total proof_set_domains);
+         Alcotest.test_case "executable set restrictions" `Quick (with_total executable_sets);
          Alcotest.test_case "executable leaf restrictions" `Quick (with_total executable_leaves);
          Alcotest.test_case "invalid loop revisit measure" `Quick (with_total (fun () -> loop_revisit false));
          Alcotest.test_case "valid loop revisit measure" `Quick (with_total (fun () -> loop_revisit true)) ]) ]
