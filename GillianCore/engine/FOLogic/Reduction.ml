@@ -810,6 +810,16 @@ let rec reduce_lexpr_loop
         ~fuel:(fuel - 1) pfs gamma
   in
 
+  (* Total proofs must preserve Boolean evaluation order. Reduce the left
+     operand before any rule can discard it or inspect a skipped right operand.
+     In particular, a failure is not a Boolean value that negation may invert. *)
+  let le =
+    match le with
+    | BinOp (left, ((And | Or | Impl) as op), right)
+      when !Config.Verification.total -> Expr.BinOp (f left, op, right)
+    | _ -> le
+  in
+
   (* L.verbose (fun fmt -> fmt "Reducing Expr: %a" Expr.pp le); *)
   let rec find_lstsub_inn (lst : Expr.t) (start : Expr.t) =
     match lst with
@@ -1923,10 +1933,12 @@ let rec reduce_lexpr_loop
     (* CHECK: FTimes and Div are the same, how does the 'when' scope? *)
     | BinOp (lel, op, ler) -> (
         let open Syntaxes.Option in
-        (* If we're reducing A || B or A && B and either side have a reduction exception, it must be false *)
+        (* Retain the legacy partial-mode behavior only. A reduction failure in
+           total mode cannot establish falsity or make a branch infeasible. *)
         let flel, fler, exn =
           try (f lel, f ler, false) with
-          | ReductionException _ when op = Or || op = And ->
+          | ReductionException _
+            when (not !Config.Verification.total) && (op = Or || op = And) ->
               (Expr.false_, Expr.false_, true)
           | exn -> raise exn
         in

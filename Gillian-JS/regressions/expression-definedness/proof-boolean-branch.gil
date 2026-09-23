@@ -1,0 +1,2 @@
+spec main() [[ emp ]] [[ (ret == 42i) ]] normal
+proc main() { if ((0i i<= 0i) or (l-nth({{}}, 0i) == 1i)) then { assert (false) } else { assert (true) }; ret := 42i; return };

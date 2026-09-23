@@ -330,6 +330,10 @@ module Make (SMemory : SMemory.S) :
       in
       result
     with Reduction.ReductionException (e, msg) ->
+      if !Config.Verification.total then
+        raise
+          (Gillian_result.Exc.analysis_failure
+             (Fmt.str "Proof assumption reduction failed: %a - %s" Expr.pp e msg));
       Logging.verbose (fun m ->
           m "assume_a: Couldn't assume due to an error reducing %a - %s\nps: %a"
             Expr.pp e msg (Fmt.Dump.list Expr.pp) ps);

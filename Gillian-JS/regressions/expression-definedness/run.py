@@ -16,6 +16,12 @@ DESCENT = (1, "variant is not a strictly smaller natural integer")
 ENTRY = (1, "entry variant is not a natural integer")
 POST = (1, "Couldn't satisfy postcondition")
 CASES = [
+    ("proof-boolean-branch.gil", ["--total"], (1, "Pure assertion failed")),
+    ("proof-boolean-branch.gil", ["--total", "--closed-entry", "--proc=main"], (1, "Pure assertion failed")),
+    ("proof-boolean-post.gil", ["--total"], POST),
+    ("proof-boolean-post.gil", ["--total", "--closed-entry", "--proc=main"], POST),
+    ("proof-boolean-short-circuit.gil", ["--total"], TOTAL),
+    ("proof-boolean-short-circuit.gil", ["--total", "--closed-entry", "--proc=main"], (0, "Closed entry postcondition succeeded")),
     ("symbolic-conversion-infinite.gil", ["--total"], (1, "Executed operation is not proved defined")),
     ("symbolic-conversion-nan.gil", ["--total"], (1, "Executed operation is not proved defined")),
     ("symbolic-index-past-end.gil", ["--total"], (1, "Executed operation is not proved defined")),

@@ -28,3 +28,20 @@ check establishes a finite Number. Native IEEE round-to-integral (RTZ) followed
 by exact real/integer conversion models truncation. Ordinary mode retains its
 previous symbolic-conversion restriction. Controls cover list indices, bounds,
 wrong results, NaN and infinity; solver incompleteness remains incompleteness.
+
+## Proof-term failures in total mode
+
+Three proof-term fixtures also run in ordinary total and closed-entry modes:
+
+- `proof-boolean-branch.gil`: a true disjunction must reach the failing assertion,
+  even when its skipped operand contains an invalid list access.
+- `proof-boolean-post.gil`: the negation of that true condition is a false
+  postcondition and must reject.
+- `proof-boolean-short-circuit.gil`: valid skipped operands and both proof
+  branches retain their concrete Boolean behavior.
+
+`Gillian-JS/test/proof_terms_tests.ml` checks the shared reducer against concrete
+evaluation, required-operand error propagation, and the distinction between
+failed assumption reduction and genuinely infeasible assumptions. These repairs
+apply to total mode. They do not establish definedness for every symbolic proof
+term; summary substitutions and entry/recursive ranks remain separate gaps.

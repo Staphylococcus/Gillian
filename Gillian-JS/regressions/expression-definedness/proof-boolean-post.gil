@@ -1,0 +1,2 @@
+spec main() [[ emp ]] [[ (not ((0i i<= 0i) or (l-nth({{}}, 0i) == 1i))) ]] normal
+proc main() { ret := 42i; return };
