@@ -1,6 +1,6 @@
 (executable
  (name run_tests)
- (libraries alcotest gil_syntax_tests gillian smt))
+ (libraries alcotest gil_syntax_tests gillian smt simple_smt sexplib))
 
 (rule
  (alias runtest)

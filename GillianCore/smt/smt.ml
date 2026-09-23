@@ -6,6 +6,7 @@ open Prog_env
 
 (* open Ctx *)
 module L = Logging
+module Utf16 = Utf16_encoding
 
 exception SMT_error of string
 

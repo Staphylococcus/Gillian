@@ -1,4 +1,5 @@
 open Gil_syntax
+module Utf16 : module type of Utf16_encoding
 
 exception SMT_unknown
 exception SMT_error of string
