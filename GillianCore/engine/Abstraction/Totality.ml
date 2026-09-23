@@ -132,6 +132,7 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
         | Not -> need (typ e BooleanType)
         | IUnaryMinus | IntToNum -> need (typ e IntType)
         | StrLen | StrToBytes | ToNumberOp -> need (typ e StringType)
+        | Utf16Len -> need (typ e Utf16Type)
         | LstLen | LstRev -> need (typ e ListType)
         | NumToInt ->
             List.iter need
@@ -190,6 +191,7 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
             both IntType;
             unsupported "integer shift domains are not yet checked."
         | StrCat | StrLess -> both StringType
+        | Utf16Cat -> both Utf16Type
         | FPlus
         | FMinus
         | FTimes

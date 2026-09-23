@@ -38,6 +38,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token INTTYPELIT
 %token NUMTYPELIT
 %token STRTYPELIT
+%token UTF16TYPELIT
 %token OBJTYPELIT
 %token LISTTYPELIT
 %token TYPETYPELIT
@@ -62,6 +63,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token NAN
 %token INFINITY
 %token <string> STRING
+%token UTF16LIT
 %token <string> LOC
 %token LSTNIL
 %token LSTOPEN
@@ -115,6 +117,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token LSTCAT
 %token LSTREV
 %token STRCAT
+%token UTF16CAT
 (* Unary operators *)
 (* Unary minus uses the same token as binary minus: FMINUS *)
 %token NOT
@@ -145,6 +148,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token SETTOLIST
 %token LSTLEN
 %token STRLEN
+%token UTF16LEN
 %token STRBYTES
 %token INTTONUM
 %token NUMTOINT
@@ -275,7 +279,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %left BITWISEOR BITWISEXOR BITWISEAND BITWISEXORL BITWISEORL BITWISEANDL
 %left FPLUS FMINUS IPLUS IMINUS
 %left FTIMES FDIV FMOD ITIMES IDIV IMOD M_POW
-%left M_ATAN2 STRCAT SETDIFF
+%left M_ATAN2 STRCAT UTF16CAT SETDIFF
 %nonassoc SETMEM SETSUB
 
 (***** Types and entry points *****)
@@ -449,6 +453,8 @@ unary_op_expr:
     { Expr.BinOp (e1, M_atan2, e2) }
   | e1 = unary_op_expr; STRCAT; e2 = set_op_expr
     { Expr.BinOp (e1, StrCat, e2) }
+  | e1 = unary_op_expr; UTF16CAT; e2 = set_op_expr
+    { Expr.BinOp (e1, Utf16Cat, e2) }
   | e1 = unary_op_expr; SETDIFF; e2 = set_op_expr
     { Expr.BinOp (e1, SetDiff, e2) }
 
@@ -1201,6 +1207,7 @@ lit_target:
   | NAN                       { Literal.Num nan }
   | INFINITY                  { Literal.Num infinity }
   | STRING                    { Literal.String $1 }
+  | UTF16LIT; s = STRING      { Literal.Utf16String (Utils.Utf16.of_canonical (Utils.Utf16.canonical s)) }
   | LOC                       { Literal.Loc $1 }
   | type_target               { Literal.Type $1 }
   | LSTNIL                    { Literal.LList [] }
@@ -1246,6 +1253,7 @@ unop_target:
   | LSTLEN      { UnOp.LstLen }
   | LSTREV      { UnOp.LstRev }
   | STRLEN      { UnOp.StrLen }
+  | UTF16LEN    { UnOp.Utf16Len }
   | STRBYTES    { UnOp.StrToBytes }
   | SETTOLIST   { UnOp.SetToList }
   | INTTONUM    { UnOp.IntToNum }
@@ -1273,6 +1281,7 @@ type_target:
   | INTTYPELIT   { Type.IntType }
   | NUMTYPELIT   { Type.NumberType }
   | STRTYPELIT   { Type.StringType }
+  | UTF16TYPELIT { Type.Utf16Type }
   | OBJTYPELIT   { Type.ObjectType }
   | LISTTYPELIT  { Type.ListType }
   | TYPETYPELIT  { Type.TypeType }

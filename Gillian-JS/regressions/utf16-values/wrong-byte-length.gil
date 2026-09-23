@@ -1,0 +1,4 @@
+spec size()
+[[ emp ]]
+[[ (ret == 6i) ]] normal
+proc size() { ret := u16-len(u16"😀"); return };

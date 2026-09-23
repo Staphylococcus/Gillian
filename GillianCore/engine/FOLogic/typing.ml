@@ -53,6 +53,7 @@ module Infer_types_to_gamma = struct
     | IntToNum -> tt = NumberType && f le IntType
     | NumToInt -> tt = IntType && f le NumberType
     | StrLen -> tt = NumberType && f le StringType
+    | Utf16Len -> tt = IntType && f le Utf16Type
     | StrToBytes -> tt = ListType && f le StringType
     | SetToList -> tt = ListType && f le SetType
 
@@ -75,6 +76,7 @@ module Infer_types_to_gamma = struct
       | StrLess -> (Some StringType, Some StringType, Some BooleanType)
       | And | Or | Impl -> (Some BooleanType, Some BooleanType, Some BooleanType)
       | StrCat -> (Some StringType, Some StringType, Some StringType)
+      | Utf16Cat -> (Some Utf16Type, Some Utf16Type, Some Utf16Type)
       | SetMem -> (None, Some SetType, Some BooleanType)
       | SetDiff -> (Some SetType, Some SetType, Some SetType)
       | SetSub -> (Some SetType, Some SetType, Some BooleanType)
@@ -408,7 +410,7 @@ module Type_lexpr = struct
         | ToStringOp -> StringType
         | Car | Cdr -> ListType
         | LstRev | SetToList | StrToBytes -> ListType
-        | IUnaryMinus | LstLen | NumToInt -> IntType
+        | IUnaryMinus | LstLen | Utf16Len | NumToInt -> IntType
         | BitwiseNot
         | FUnaryMinus
         | M_abs
@@ -462,6 +464,7 @@ module Type_lexpr = struct
         | SetSub -> infer_type le BooleanType
         | SetDiff -> infer_type le SetType
         | StrCat -> infer_type le StringType
+        | Utf16Cat -> infer_type le Utf16Type
         | IPlus
         | IMinus
         | ITimes

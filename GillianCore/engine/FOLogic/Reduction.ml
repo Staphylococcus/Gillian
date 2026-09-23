@@ -1415,6 +1415,10 @@ let rec reduce_lexpr_loop
         | StrToBytes, _ when lexpr_is_string gamma fle -> def
         | StrToBytes, _ ->
             raise (ReductionException (def, "StrToBytes requires a GIL string"))
+        | Utf16Len, _ when typable gamma fle Utf16Type -> def
+        | Utf16Len, _ ->
+            raise
+              (ReductionException (def, "Utf16Len requires a UTF-16 string"))
         (* String length *)
         | StrLen, _ when lexpr_is_string gamma fle ->
             let len = get_length_of_string fle in

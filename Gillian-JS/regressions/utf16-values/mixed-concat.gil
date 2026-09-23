@@ -1,0 +1,4 @@
+spec join(x)
+[[ (x == #x) * types(#x : Utf16) ]]
+[[ (ret == #x) ]] normal
+proc join(x) { ret := x u16++ ""; return };

@@ -1,0 +1,4 @@
+spec size(x)
+[[ (x == #x) * types(#x : Utf16) ]]
+[[ (ret == 0.0) ]] normal
+proc size(x) { ret := s-len(x); return };

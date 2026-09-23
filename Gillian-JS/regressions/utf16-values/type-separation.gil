@@ -1,0 +1,4 @@
+spec check()
+[[ emp ]]
+[[ (ret == false) ]] normal
+proc check() { ret := (u16"" == ""); return };

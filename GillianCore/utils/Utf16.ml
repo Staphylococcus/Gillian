@@ -39,6 +39,28 @@ let of_code_units units =
 
 let canonical string = of_code_units (code_units string)
 
+(* A typed code-unit value always stores canonical CESU-8. Keep construction
+   private so literal folding and type-based reasoning can rely on this domain. *)
+type t = string
+
+let of_canonical string =
+  if canonical string <> string then
+    raise (Exceptions.Unsupported "UTF-16 value requires canonical CESU-8");
+  string
+
+let to_canonical (value : t) = value
+let equal = String.equal
+let compare = String.compare
+let concat (left : t) (right : t) : t = left ^ right
+let length (value : t) = List.length (code_units value)
+let to_yojson (value : t) = `String value
+
+let of_yojson = function
+  | `String string -> (
+      try Ok (of_canonical string)
+      with Exceptions.Unsupported msg -> Error msg)
+  | _ -> Error "Expected a canonical UTF-16 string"
+
 (* The JS source parser expects Unicode scalar UTF-8 for paired surrogates. *)
 let source_text string =
   let buffer = Buffer.create (String.length string) in

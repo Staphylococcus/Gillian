@@ -9,6 +9,7 @@ type t = TypeDef__.typ =
   | IntType  (** Type of integers *)
   | NumberType  (** Type of floats *)
   | StringType  (** Type of strings *)
+  | Utf16Type  (** Finite UTF-16 code-unit strings, distinct from GIL bytes *)
   | ObjectType  (** Type of objects *)
   | ListType  (** Type of lists *)
   | TypeType  (** Type of types *)
@@ -27,6 +28,7 @@ let str (x : t) =
   | IntType -> "Int"
   | NumberType -> "Num"
   | StringType -> "Str"
+  | Utf16Type -> "Utf16"
   | ObjectType -> "Obj"
   | ListType -> "List"
   | TypeType -> "Type"

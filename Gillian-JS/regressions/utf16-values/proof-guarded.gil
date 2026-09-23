@@ -1,0 +1,4 @@
+spec check(x)
+[[ (x == #x) * ((typeOf #x == Utf16) ==> (0i i<= u16-len(#x))) ]]
+[[ (ret == 0i) ]] normal
+proc check(x) { ret := 0i; return };

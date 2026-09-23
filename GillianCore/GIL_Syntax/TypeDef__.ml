@@ -25,6 +25,7 @@ and typ =
   | IntType
   | NumberType
   | StringType
+  | Utf16Type
   | ObjectType
   | ListType
   | TypeType
@@ -51,6 +52,7 @@ and literal =
       [@equal
         fun a b -> Int64.equal (Int64.bits_of_float a) (Int64.bits_of_float b)])
   | String of string
+  | Utf16String of (Utf16.t[@opaque])
   | Loc of string
   | Type of typ
   | LList of literal list
@@ -99,6 +101,7 @@ and binop =
   | LstNth
   | LstRepeat
   | StrCat
+  | Utf16Cat
   | StrNth
   | StrLess
   | SetDiff
@@ -138,6 +141,7 @@ and unop =
   | LstRev
   | SetToList
   | StrLen
+  | Utf16Len
   | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
   | NumToInt
   | IntToNum

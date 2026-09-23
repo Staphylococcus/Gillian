@@ -1,0 +1,4 @@
+spec size(x)
+[[ (x == #x) * types(#x : Str) ]]
+[[ (ret == 0i) ]] normal
+proc size(x) { ret := u16-len(x); return };

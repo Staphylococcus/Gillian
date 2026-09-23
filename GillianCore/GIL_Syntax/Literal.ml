@@ -14,6 +14,7 @@ type t = TypeDef__.literal =
       (** GIL floats - double-precision 64-bit IEEE 754. Structural identity
           distinguishes signed zeros; GIL Equal uses numeric equality. *)
   | String of string  (** GIL strings *)
+  | Utf16String of (Utf16.t[@opaque])  (** Canonical code-unit strings *)
   | Loc of string  (** GIL object locations *)
   | Type of Type.t  (** GIL types ({!type:Type.t}) *)
   | LList of t list  (** Lists of GIL literals *)
@@ -29,6 +30,7 @@ let rec equal la lb =
   | Num za, Num zb ->
       Int64.equal (Int64.bits_of_float za) (Int64.bits_of_float zb)
   | String sl, String sr | Loc sl, Loc sr -> String.equal sl sr
+  | Utf16String sl, Utf16String sr -> Utf16.equal sl sr
   | Type tl, Type tr -> Type.equal tl tr
   | LList ll, LList lr -> List.for_all2 equal ll lr
   | _ -> false
@@ -70,6 +72,8 @@ let rec pp fmt x =
           | c -> Fmt.char fmt c)
         x;
       Fmt.char fmt '"'
+  | Utf16String value ->
+      Fmt.pf fmt "u16%a" pp (String (Utf16.to_canonical value))
   | Loc loc -> Fmt.string fmt loc
   | Type t -> Fmt.string fmt (Type.str t)
   | LList ll -> Fmt.pf fmt "{{ %a }}" (Fmt.list ~sep:Fmt.comma pp) ll
@@ -85,6 +89,7 @@ let type_of (x : t) : Type.t =
   | Int _ -> IntType
   | Num _ -> NumberType
   | String _ -> StringType
+  | Utf16String _ -> Utf16Type
   | Loc _ -> ObjectType
   | Type _ -> TypeType
   | LList _ -> ListType

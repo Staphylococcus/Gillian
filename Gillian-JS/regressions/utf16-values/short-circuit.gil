@@ -1,0 +1,4 @@
+spec check(x)
+[[ (x == #x) * types(#x : Str) ]]
+[[ (ret == false) ]] normal
+proc check(x) { ret := false and (u16-len(x) == 0i); return };

@@ -1,0 +1,4 @@
+spec check(x)
+[[ (x == #x) * (u16-len(#x) == 0i) ]]
+[[ (ret == 0i) ]] normal
+proc check(x) { ret := 0i; return };

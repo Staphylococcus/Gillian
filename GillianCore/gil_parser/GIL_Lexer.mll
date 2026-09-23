@@ -18,12 +18,14 @@
         "Int",       GIL_Parser.INTTYPELIT;
         "Num",       GIL_Parser.NUMTYPELIT;
         "Str",       GIL_Parser.STRTYPELIT;
+        "Utf16",     GIL_Parser.UTF16TYPELIT;
         "Obj",       GIL_Parser.OBJTYPELIT;
         "List",      GIL_Parser.LISTTYPELIT;
         "Type",      GIL_Parser.TYPETYPELIT;
         "Set",       GIL_Parser.SETTYPELIT;
 
         (* Literals *)
+        "u16",       GIL_Parser.UTF16LIT;
         "undefined", GIL_Parser.UNDEFINED;
         "null",      GIL_Parser.NULL;
         "empty",     GIL_Parser.EMPTY;
@@ -233,6 +235,7 @@ rule read = parse
   | "**"                 { GIL_Parser.M_POW         }
   | "l+"                 { GIL_Parser.LSTCAT        }
   | "++"                 { GIL_Parser.STRCAT        }
+  | "u16++"              { GIL_Parser.UTF16CAT      }
   | "-u-"                { GIL_Parser.SETUNION      }
   | "-i-"                { GIL_Parser.SETINTER      }
   | "-d-"                { GIL_Parser.SETDIFF       }
@@ -249,6 +252,7 @@ rule read = parse
   | "l-rev"              { GIL_Parser.LSTREV }
   | "l-sub"              { GIL_Parser.LSTSUB }
   | "s-len"              { GIL_Parser.STRLEN }
+  | "u16-len"            { GIL_Parser.UTF16LEN }
   | "s-bytes"            { GIL_Parser.STRBYTES }
 (* Expression keywords *)
   | "l-nth"              { GIL_Parser.LSTNTH }

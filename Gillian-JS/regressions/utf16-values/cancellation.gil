@@ -1,0 +1,4 @@
+spec equal(a,b,c)
+[[ (a == #a) * (b == #b) * (c == #c) * types(#a : Utf16, #b : Utf16, #c : Utf16) ]]
+[[ (ret == (#b == #c)) ]] normal
+proc equal(a,b,c) { ret := ((a u16++ b) == (a u16++ c)); return };

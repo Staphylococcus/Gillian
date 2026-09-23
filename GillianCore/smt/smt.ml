@@ -466,6 +466,7 @@ module Type_operations = struct
   module Int = (val nul "IntType" : Nullary)
   module Number = (val nul "NumberType" : Nullary)
   module String = (val nul "StringType" : Nullary)
+  module Utf16String = (val nul "Utf16Type" : Nullary)
   module Object = (val nul "ObjectType" : Nullary)
   module List = (val nul "ListType" : Nullary)
   module Type = (val nul "TypeType" : Nullary)
@@ -483,6 +484,7 @@ module Type_operations = struct
         (module Int : Variant.S);
         (module Number : Variant.S);
         (module String : Variant.S);
+        (module Utf16String : Variant.S);
         (module Object : Variant.S);
         (module List : Variant.S);
         (module Type : Variant.S);
@@ -507,6 +509,7 @@ module Lit_operations = struct
   module Int = (val un "Int" "iValue" t_int : Unary)
   module Num = (val un "Num" "nValue" t_number : Unary)
   module String = (val un "String" "sValue" t_bytes : Unary)
+  module Utf16String = (val un "Utf16String" "u16Value" Utf16.sort : Unary)
   module Loc = (val un "Loc" "locValue" t_int : Unary)
   module Type = (val un "Type" "tValue" t_gil_type : Unary)
   module List = (val un "List" "listValue" (t_seq t_gil_literal) : Unary)
@@ -521,6 +524,7 @@ module Lit_operations = struct
       (module Int : Variant.S);
       (module Num : Variant.S);
       (module String : Variant.S);
+      (module Utf16String : Variant.S);
       (module Loc : Variant.S);
       (module Type : Variant.S);
       (module List : Variant.S);
@@ -548,6 +552,7 @@ let native_sort_of_type =
   function
   | IntType | ObjectType -> t_int
   | StringType -> t_bytes
+  | Utf16Type -> Utf16.sort
   | ListType ->
       require_definition def_gil_literal;
       t_gil_literal_list
@@ -703,6 +708,7 @@ let encode_type (t : Type.t) =
     | IntType -> Type_operations.Int.construct
     | NumberType -> Type_operations.Number.construct
     | StringType -> Type_operations.String.construct
+    | Utf16Type -> Type_operations.Utf16String.construct
     | ObjectType -> Type_operations.Object.construct
     | ListType -> Type_operations.List.construct
     | TypeType -> Type_operations.Type.construct
@@ -822,6 +828,7 @@ module Encoding = struct
           | IntType -> Int.construct
           | NumberType -> Num.construct
           | StringType -> String.construct
+          | Utf16Type -> Utf16String.construct
           | ObjectType -> Loc.construct
           | TypeType -> Type.construct
           | BooleanType -> Bool.construct
@@ -871,6 +878,10 @@ module Encoding = struct
       get_native ~accessor:String.access ~recognizer:String.recognize
         ~typ:StringType
 
+    let get_utf16 =
+      get_native ~accessor:Utf16String.access ~recognizer:Utf16String.recognize
+        ~typ:Utf16Type
+
     let get_loc =
       get_native ~accessor:Loc.access ~recognizer:Loc.recognize ~typ:ObjectType
 
@@ -905,6 +916,7 @@ module Encoding = struct
     | IntType -> get_int
     | NumberType -> get_num
     | StringType -> get_string
+    | Utf16Type -> get_utf16
     | ObjectType -> get_loc
     | ListType -> get_list
     | TypeType -> get_type
@@ -928,6 +940,7 @@ let typeof_simple e =
         (Int.recognize, IntType);
         (Num.recognize, NumberType);
         (String.recognize, StringType);
+        (Utf16String.recognize, Utf16Type);
         (Loc.recognize, ObjectType);
         (Type.recognize, TypeType);
         (List.recognize, ListType);
@@ -999,6 +1012,7 @@ let rec encode_lit (lit : Literal.t) : Encoding.t =
     | Bool b -> bool_k b >- BooleanType
     | Int i -> int_zk i >- IntType
     | Num n -> number_literal n >- NumberType
+    | Utf16String s -> Utf16.encode (Utils.Utf16.to_canonical s) >- Utf16Type
     | String s ->
         require_definition Axiomatised_operations.def_str2num;
         let encoded = encode_string s in
@@ -1054,6 +1068,8 @@ let encode_equality (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t =
       wrapped_equality p1.expr p2.expr >- BooleanType
   | Extended_wrapped, Extended_wrapped ->
       extended_equality p1.expr p2.expr >- BooleanType
+  | Native Utf16Type, Native _ | Native _, Native Utf16Type ->
+      bool_k false >- BooleanType
   | Native _, Native _ -> exceptf "incompatible equality, type error!"
   | Simple_wrapped, Native _ | Native _, Simple_wrapped ->
       let>- p1 = simple_wrap p1 in
@@ -1172,6 +1188,10 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- left = get_string p1 in
       let>- right = get_string p2 in
       seq_concat [ left.expr; right.expr ] >- StringType
+  | Utf16Cat ->
+      let>- left = get_utf16 p1 in
+      let>- right = get_utf16 p2 in
+      seq_concat [ left.expr; right.expr ] >- Utf16Type
   | StrNth ->
       require_definition Axiomatised_operations.def_snth;
       let>- str' = get_string p1 in
@@ -1243,6 +1263,9 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       require_definition def_slen;
       let>- le = get_string le in
       slen <| le.expr >- NumberType
+  | Utf16Len ->
+      let>- le = get_utf16 le in
+      seq_len le.expr >- IntType
   | ToStringOp ->
       require_definition def_num2str;
       require_definition def_str2num;
@@ -1960,6 +1983,9 @@ let lift_model
     | StringType ->
         let+ bytes = recover_string v in
         Literal.String bytes
+    | Utf16Type ->
+        let+ bytes = Utf16.recover v in
+        Literal.Utf16String (Utils.Utf16.of_canonical bytes)
     | _ -> None
   in
 

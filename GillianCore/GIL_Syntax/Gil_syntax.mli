@@ -57,6 +57,7 @@ module Type : sig
     | IntType  (** Type of integers *)
     | NumberType  (** Type of floats *)
     | StringType  (** Type of strings *)
+    | Utf16Type  (** Finite UTF-16 code-unit strings *)
     | ObjectType  (** Type of objects *)
     | ListType  (** Type of lists *)
     | TypeType  (** Type of types *)
@@ -84,6 +85,7 @@ module Literal : sig
     | Int of Z.t  (** GIL integers: TODO: understand size *)
     | Num of float  (** GIL floats - double-precision 64-bit IEEE 754 *)
     | String of string  (** GIL strings *)
+    | Utf16String of (Utf16.t[@opaque])
     | Loc of string  (** GIL locations (uninterpreted symbols) *)
     | Type of Type.t  (** GIL types ({!type:Type.t}) *)
     | LList of t list  (** Lists of GIL literals *)
@@ -157,6 +159,7 @@ module UnOp : sig
     | LstRev  (** List reverse *)
     | SetToList  (** From set to list *)
     | StrLen  (** String length *)
+    | Utf16Len  (** Mathematical code-unit length *)
     | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
     (* Integer vs Number *)
     | NumToInt  (** Number to Integer - actual cast *)
@@ -217,6 +220,7 @@ module BinOp : sig
     | LstRepeat
     (* [[a; b]] is the list that contains [b] times the element [a] *)
     | StrCat  (** String concatenation *)
+    | Utf16Cat  (** Code-unit concatenation *)
     | StrNth  (** Nth element of a string *)
     | StrLess  (** Less or equal for strings *)
     | SetDiff  (** Set difference *)
@@ -1477,7 +1481,9 @@ module Visitors : sig
          ; visit_Skip : 'c -> 'f Cmd.t -> 'f Cmd.t
          ; visit_FreshSVar : 'c -> LCmd.t -> string -> LCmd.t
          ; visit_StrCat : 'c -> BinOp.t -> BinOp.t
+         ; visit_Utf16Cat : 'c -> BinOp.t -> BinOp.t
          ; visit_StrLen : 'c -> UnOp.t -> UnOp.t
+         ; visit_Utf16Len : 'c -> UnOp.t -> UnOp.t
          ; visit_StrToBytes : 'c -> UnOp.t -> UnOp.t
          ; visit_StrLess : 'c -> BinOp.t -> BinOp.t
          ; visit_NumToInt : 'c -> UnOp.t -> UnOp.t
@@ -1485,7 +1491,9 @@ module Visitors : sig
          ; visit_StrLess : 'c -> BinOp.t -> BinOp.t
          ; visit_StrNth : 'c -> BinOp.t -> BinOp.t
          ; visit_String : 'c -> Literal.t -> string -> Literal.t
+         ; visit_Utf16String : 'c -> Literal.t -> Utf16.t -> Literal.t
          ; visit_StringType : 'c -> Type.t -> Type.t
+         ; visit_Utf16Type : 'c -> Type.t -> Type.t
          ; visit_SymbExec : 'c -> SLCmd.t -> SLCmd.t
          ; visit_ToInt32Op : 'c -> UnOp.t -> UnOp.t
          ; visit_ToIntOp : 'c -> UnOp.t -> UnOp.t
@@ -1750,7 +1758,9 @@ module Visitors : sig
     method visit_Skip : 'c -> 'f Cmd.t -> 'f Cmd.t
     method visit_FreshSVar : 'c -> LCmd.t -> string -> LCmd.t
     method visit_StrCat : 'c -> BinOp.t -> BinOp.t
+    method visit_Utf16Cat : 'c -> BinOp.t -> BinOp.t
     method visit_StrLen : 'c -> UnOp.t -> UnOp.t
+    method visit_Utf16Len : 'c -> UnOp.t -> UnOp.t
     method visit_StrToBytes : 'c -> UnOp.t -> UnOp.t
     method visit_StrLess : 'c -> BinOp.t -> BinOp.t
     method visit_IntToNum : 'c -> UnOp.t -> UnOp.t
@@ -1758,7 +1768,9 @@ module Visitors : sig
     method visit_StrLess : 'c -> BinOp.t -> BinOp.t
     method visit_StrNth : 'c -> BinOp.t -> BinOp.t
     method visit_String : 'c -> Literal.t -> string -> Literal.t
+    method visit_Utf16String : 'c -> Literal.t -> Utf16.t -> Literal.t
     method visit_StringType : 'c -> Type.t -> Type.t
+    method visit_Utf16Type : 'c -> Type.t -> Type.t
     method visit_SymbExec : 'c -> SLCmd.t -> SLCmd.t
     method visit_ToInt32Op : 'c -> UnOp.t -> UnOp.t
     method visit_ToIntOp : 'c -> UnOp.t -> UnOp.t
@@ -2015,7 +2027,9 @@ module Visitors : sig
          ; visit_FreshSVar : 'c -> string -> 'f
          ; visit_FuncApp : 'c -> string -> Expr.t list -> 'f
          ; visit_StrCat : 'c -> 'f
+         ; visit_Utf16Cat : 'c -> 'f
          ; visit_StrLen : 'c -> 'f
+         ; visit_Utf16Len : 'c -> 'f
          ; visit_StrToBytes : 'c -> 'f
          ; visit_StrLess : 'c -> 'f
          ; visit_IntToNum : 'c -> 'f
@@ -2023,7 +2037,9 @@ module Visitors : sig
          ; visit_StrLess : 'c -> 'f
          ; visit_StrNth : 'c -> 'f
          ; visit_String : 'c -> string -> 'f
+         ; visit_Utf16String : 'c -> Utf16.t -> 'f
          ; visit_StringType : 'c -> 'f
+         ; visit_Utf16Type : 'c -> 'f
          ; visit_SymbExec : 'c -> 'f
          ; visit_ITimes : 'c -> 'f
          ; visit_FTimes : 'c -> 'f
@@ -2244,7 +2260,9 @@ module Visitors : sig
     method visit_FreshSVar : 'c -> string -> 'f
     method visit_FuncApp : 'c -> string -> Expr.t list -> 'f
     method visit_StrCat : 'c -> 'f
+    method visit_Utf16Cat : 'c -> 'f
     method visit_StrLen : 'c -> 'f
+    method visit_Utf16Len : 'c -> 'f
     method visit_StrToBytes : 'c -> 'f
     method visit_StrLess : 'c -> 'f
     method visit_IntToNum : 'c -> 'f
@@ -2252,7 +2270,9 @@ module Visitors : sig
     method visit_StrLess : 'c -> 'f
     method visit_StrNth : 'c -> 'f
     method visit_String : 'c -> string -> 'f
+    method visit_Utf16String : 'c -> Utf16.t -> 'f
     method visit_StringType : 'c -> 'f
+    method visit_Utf16Type : 'c -> 'f
     method visit_SymbExec : 'c -> 'f
     method visit_ITimes : 'c -> 'f
     method visit_FTimes : 'c -> 'f
@@ -2473,14 +2493,18 @@ module Visitors : sig
          ; visit_FreshSVar : 'c -> string -> unit
          ; visit_FuncApp : 'c -> string -> Expr.t list -> unit
          ; visit_StrCat : 'c -> unit
+         ; visit_Utf16Cat : 'c -> unit
          ; visit_StrLen : 'c -> unit
+         ; visit_Utf16Len : 'c -> unit
          ; visit_StrToBytes : 'c -> unit
          ; visit_StrLess : 'c -> unit
          ; visit_IntToNum : 'c -> unit
          ; visit_NumToInt : 'c -> unit
          ; visit_StrNth : 'c -> unit
          ; visit_String : 'c -> string -> unit
+         ; visit_Utf16String : 'c -> Utf16.t -> unit
          ; visit_StringType : 'c -> unit
+         ; visit_Utf16Type : 'c -> unit
          ; visit_SymbExec : 'c -> unit
          ; visit_ToInt32Op : 'c -> unit
          ; visit_ToIntOp : 'c -> unit
@@ -2706,14 +2730,18 @@ module Visitors : sig
     method visit_FreshSVar : 'c -> string -> unit
     method visit_FuncApp : 'c -> string -> Expr.t list -> unit
     method visit_StrCat : 'c -> unit
+    method visit_Utf16Cat : 'c -> unit
     method visit_StrLen : 'c -> unit
+    method visit_Utf16Len : 'c -> unit
     method visit_StrToBytes : 'c -> unit
     method visit_StrLess : 'c -> unit
     method visit_IntToNum : 'c -> unit
     method visit_NumToInt : 'c -> unit
     method visit_StrNth : 'c -> unit
     method visit_String : 'c -> string -> unit
+    method visit_Utf16String : 'c -> Utf16.t -> unit
     method visit_StringType : 'c -> unit
+    method visit_Utf16Type : 'c -> unit
     method visit_SymbExec : 'c -> unit
     method visit_ToInt32Op : 'c -> unit
     method visit_ToIntOp : 'c -> unit

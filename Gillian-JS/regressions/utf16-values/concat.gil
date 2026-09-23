@@ -1,0 +1,4 @@
+spec size(a,b)
+[[ (a == #a) * (b == #b) * types(#a : Utf16, #b : Utf16) ]]
+[[ (ret == (u16-len(#a) i+ u16-len(#b))) ]] normal
+proc size(a,b) { ret := u16-len(a u16++ b); return };

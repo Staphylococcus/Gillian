@@ -19,6 +19,10 @@ let as_str ?msg = function
   | Literal.String s -> s
   | lit -> typeerr ?msg "string" lit
 
+let as_utf16 = function
+  | Literal.Utf16String s -> s
+  | lit -> typeerr "UTF-16 string" lit
+
 let as_bool ?msg = function
   | Literal.Bool b -> b
   | lit -> typeerr ?msg "boolean" lit
@@ -163,6 +167,7 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
   | StrLen ->
       let s = as_str lit in
       Num (float_of_int (String.length s))
+  | Utf16Len -> Int (Z.of_int (Utf16.length (as_utf16 lit)))
   | M_isNaN ->
       let x = as_num lit in
       Bool (x <> x)
@@ -215,6 +220,7 @@ let rec evaluate_binop
           | Int n1, Int n2 -> Bool (n1 = n2)
           | Num n1, Num n2 -> Bool (n1 = n2)
           | String s1, String s2 -> Bool (s1 = s2)
+          | Utf16String s1, Utf16String s2 -> Bool (Utf16.equal s1 s2)
           | Loc l1, Loc l2 -> Bool (l1 = l2)
           | Type t1, Type t2 -> Bool (t1 = t2)
           | LList _, LList _ -> Bool (Literal.same_value lit1 lit2)
@@ -284,7 +290,8 @@ let rec evaluate_binop
       | StrCat ->
           let s1 = as_str lit1 in
           let s2 = as_str lit2 in
-          String (s1 ^ s2))
+          String (s1 ^ s2)
+      | Utf16Cat -> Utf16String (Utf16.concat (as_utf16 lit1) (as_utf16 lit2)))
 
 and evaluate_nop (nop : NOp.t) (ll : Literal.t list) : CVal.M.t =
   match nop with
