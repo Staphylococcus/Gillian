@@ -161,6 +161,99 @@ let js_length_conversion () =
       ("9007199254740995", 9007199254740996.);
     ]
 
+(* Use the standard false-first heuristic to expose a known invalid-model
+   case on Z3 4.13.3. Only this test changes the search policy; production keeps
+   the default. The mixed-theory query is feasible, but the returned empty
+   string witness violates its inside guard and must never escape the solver. *)
+let length_model_validation () =
+  let index = Expr.LVar "#length_index" in
+  let gamma = gamma () in
+  Gamma.update gamma "#length_index" NumberType;
+  let gamma = Gamma.as_hashtbl gamma in
+  let pos = Expr.UnOp (ToIntOp, index) in
+  let nonnegative = not_ (bin FLessThan pos (Expr.num 0.)) in
+  let outside = bin FLessThanEqual (Expr.UnOp (IntToNum, length a)) pos in
+  let run () =
+    let model =
+      match
+        Smt.exec_sat ~phase_selection:0
+          (Expr.Set.of_list [ nonnegative; outside ])
+          gamma
+      with
+      | Some model -> model
+      | None -> Alcotest.fail "Lost the feasible outside branch"
+    in
+    let lifted = Hashtbl.create 2 in
+    Smt.lift_model model gamma (Hashtbl.add lifted)
+      (Expr.Set.of_list [ a; index ]);
+    let get name =
+      match Hashtbl.find_opt lifted name with
+      | Some (Expr.Lit value) -> value
+      | _ -> Alcotest.fail "Missing length/index model value"
+    in
+    let units =
+      match get "#utf16_a" with
+      | Utf16String value -> Codec.code_units (Codec.to_canonical value)
+      | _ -> Alcotest.fail "Lost string model type"
+    in
+    let number =
+      match get "#length_index" with
+      | Num value -> value
+      | _ -> Alcotest.fail "Lost numeric model type"
+    in
+    let store =
+      Engine.CExprEval.CStore.init
+        [ ("#utf16_a", get "#utf16_a"); ("#length_index", Num number) ]
+    in
+    let visitor =
+      object
+        inherit [_] Visitors.endo
+        method! visit_LVar () _ name = Expr.PVar name
+      end
+    in
+    List.iter
+      (fun expr ->
+        match
+          Engine.CExprEval.evaluate_expr store (visitor#visit_expr () expr)
+        with
+        | Bool true -> ()
+        | _ -> Alcotest.fail "Outside model failed concrete replay")
+      [ nonnegative; outside ];
+    let rejected =
+      try
+        ignore
+          (Smt.exec_sat ~phase_selection:0
+             (Expr.Set.of_list [ nonnegative; not_ outside ])
+             gamma);
+        false
+      with
+      | Gillian.Utils.Gillian_result.Exc.Gillian_internal_error { msg; _ } -> (
+        let contains = Str.regexp_string "an invalid model was generated" in
+        try
+          ignore (Str.search_forward contains msg 0);
+          true
+        with Not_found -> false)
+    in
+    Alcotest.(check bool) "invalid inside model is rejected" true rejected;
+    (* The heartbeat replaces the faulty solver before propagating failure. *)
+    check "solver remains usable after rejected model" true
+      [ eq a (value [ 65 ]) ];
+    let evidence =
+      `Assoc
+        [
+          ("id", `String "outside");
+          ("units", `List (List.map (fun unit -> `Int unit) units));
+          ( "indexBits",
+            `String (Printf.sprintf "%016Lx" (Int64.bits_of_float number)) );
+          ("invalidInsideModelRejected", `Bool rejected);
+        ]
+    in
+    match Sys.getenv_opt "GILLIAN_UTF16_LENGTH_MODELS" with
+    | None -> ()
+    | Some path -> Yojson.Safe.to_file path evidence
+  in
+  run ()
+
 let wrapped_values () =
   check ~types:Gamma.init "untyped values acquire the same unit view" false
     [
@@ -394,6 +487,7 @@ let tests =
     ("concrete and SMT agreement", `Quick, concrete_agreement);
     ("arbitrary typed sequences", `Quick, arbitrary_values);
     ("JS length conversion", `Quick, js_length_conversion);
+    ("length model validation", `Quick, length_model_validation);
     ("wrapped values and type identity", `Quick, wrapped_values);
     ("actual lifted models", `Quick, models);
     ("typed numeric producers", `Quick, numeric_producers);

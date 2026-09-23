@@ -15,6 +15,8 @@ POST = (1, "Couldn't satisfy postcondition")
 ASSERT = (1, 'Assertion failed')
 ORDERING = (125, 'binop: u16<')
 CASES = [
+    ('charat-length-unknown.js', ['--total', '--proc=check'],
+     (124, 'Incomplete totality proof: SMT returned unknown')),
     ('length.js', ['--total', '--proc=check'], TOTAL),
     ('length-wrong.js', ['--total', '--proc=check'], POST),
     ('length-zero-unknown.js', ['--total', '--proc=check'], (124, 'Incomplete totality proof: SMT returned unknown')),

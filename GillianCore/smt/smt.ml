@@ -15,6 +15,10 @@ let exceptf fmt = Fmt.kstr (fun s -> raise (SMT_error s)) fmt
 let z3_config =
   [
     ("model", "true");
+    (* Reject a solver-produced witness that violates the submitted formula.
+       Mixed sequence-length/FP conversions can otherwise return invalid SAT
+       models. The protocol heartbeat propagates the validation error. *)
+    ("model_validate", "true");
     ("proof", "false");
     ("unsat_core", "false");
     ("auto_config", "true");
@@ -1829,7 +1833,8 @@ let reset_solver () =
   let () = RepeatCache.clear () in
   ()
 
-let exec_sat' (fs : Expr.Set.t) (gamma : typenv) : sexp option =
+let exec_sat' ~phase_selection (fs : Expr.Set.t) (gamma : typenv) : sexp option
+    =
   let () =
     L.verbose (fun m ->
         m "@[<v 2>About to check SAT of:@\n%a@]@\nwith gamma:@\n@[%a@]\n"
@@ -1837,6 +1842,11 @@ let exec_sat' (fs : Expr.Set.t) (gamma : typenv) : sexp option =
           fs pp_typenv gamma)
   in
   let () = reset_solver () in
+  (* Reset retains options; restore the default unless this query explicitly
+     requests a different native search policy (e.g. a solver reproducer). *)
+  let () =
+    cmd (set_option ":smt.phase_selection" (string_of_int phase_selection))
+  in
   with_necessary_usr_datatypes @@ fun () ->
   let encoded_assertions, necessary_definitions = encode_assertions fs gamma in
   let () = if !Config.dump_smt then Dump.dump fs gamma encoded_assertions in
@@ -1876,8 +1886,9 @@ let exec_sat' (fs : Expr.Set.t) (gamma : typenv) : sexp option =
   in
   ret
 
-let exec_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
-  try exec_sat' fs gamma
+let exec_sat ?(phase_selection = 3) (fs : Expr.Set.t) (gamma : typenv) :
+    sexp option =
+  try exec_sat' ~phase_selection fs gamma
   with UnexpectedSolverResponse _ as e ->
     let additional_data =
       [

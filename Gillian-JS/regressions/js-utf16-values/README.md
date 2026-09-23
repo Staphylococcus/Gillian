@@ -42,3 +42,11 @@ ties-to-even rounding controls without globally narrowing the UTF-16 domain.
 Supporting checks also live in the core UTF-16 cases, frontend UTF-16/property
 units, and existing JS code-unit, numeric, object, callback and serializer suites.
 Run `python3 run.py` with `GILLIAN_JS` set to the built backend launcher.
+
+The `charat-length-unknown.js` caller uses the actual builtin name/scope and
+explicit prototype resources. Its arbitrary string/Number proof must remain
+incomplete at the length/index guard; assumed metadata is not initialization
+proof. Core UTF-16 controls separately require native solver model validation:
+a valid outside witness replays, an invalid inside witness aborts analysis,
+and a subsequent ordinary query still succeeds. No symbolic `charAt` theorem
+is claimed by these controls.
