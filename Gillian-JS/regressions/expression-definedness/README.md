@@ -64,3 +64,39 @@ domain boundary. Four additional `proof_terms_tests` controls exercise shared
 admission and direct invalid/valid loop-revisit states independently of entry.
 These tests do not establish general assertion/matching definedness or full-fold
 correctness; fold/unfold arguments and the broader proof-language audit remain open.
+
+## Pure assertions and logical conditions
+
+Total verification checks original `assert` expressions before entailment and
+logical `if` conditions before evaluation or branch assumptions. Both reuse the
+proof-value checker against the incoming state: a target assertion or a chosen
+branch cannot establish its own missing domain. Missing domains report `Pure
+assertion is not proved defined` or `Logical condition is not proved defined`.
+
+Sixteen fixtures add 22 controls: program/logical variables, arbitrary/nonempty
+lists, short-circuit guards, a domain established by an enclosing branch, a
+failing symbolic sibling, empty/nonempty closed-entry cases, and legacy partial
+mode. Existing Boolean branch-loss controls remain registered. These checks do
+not cover fold/unfold arguments, separation-assertion matching, predicate bodies,
+or pre/postcondition normalization.
+
+The new checks also exposed eager list normalization below a rewritten Boolean
+wrapper. In total mode that normalization now uses the reducer on the left Boolean
+operand and normalizes the right unless the left proves it is skipped. Required
+reads cannot be erased by a subsequent parent rewrite. Extended proof-term units
+compare nested/negated short-circuit expressions with concrete evaluation and
+retain required-operand failures.
+
+Review adds ten fixtures and 17 controls. Length/reflexivity postconditions reject
+required out-of-bounds reads but accept both skipped reads and valid required
+reads, in ordinary and closed-entry mode. Branch-local variable assertions and
+logical conditions accept skipped reads and reject required reads. The assertion
+also retains its legacy partial-mode result.
+
+Symbolic evaluation now respects total-mode short-circuiting during program
+variable substitution, before touching the right operand. It reduces the left
+operand and can use incoming path facts to prove that the right is skipped.
+Three additional unit tests cover erasing parents for all three Boolean
+operators, concrete/symbolic substitution parity, required variable failures,
+and a nonliteral guard discharged from path facts. These are bounded repairs;
+pre/postcondition domains in general remain open.

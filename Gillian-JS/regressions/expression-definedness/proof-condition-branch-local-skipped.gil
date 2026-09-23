@@ -1,0 +1,9 @@
+spec answer(b)
+[[ (b == #b) * types(#b : Bool) ]]
+[[ (ret == 42i) ]] normal
+proc answer(b) {
+  goto [b] init done;
+  init: x := 0i;
+  done: if (not ((b) and (x == 1i))) then { assert (true) } else { assert (false) };
+  ret := 42i; return
+};

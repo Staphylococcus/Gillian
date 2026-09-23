@@ -58,8 +58,8 @@ let normalise_cat (f : Expr.t -> Expr.t) (les : Expr.t list) : Expr.t =
       n_list ::= {{ E_1,  ..., E_n }} @ E | {{ E_1, ..., E_n }}
   where E is not of the form {{ E_1,  ..., E_n }}
  **)
-let rec normalise_list_expressions (le : Expr.t) : Expr.t =
-  let f = normalise_list_expressions in
+let rec normalise_list_expressions ?(reduce = Fun.id) (le : Expr.t) : Expr.t =
+  let f = normalise_list_expressions ~reduce in
 
   let result =
     let exn msg = ReductionException (le, msg) in
@@ -87,6 +87,15 @@ let rec normalise_list_expressions (le : Expr.t) : Expr.t =
           when Expr.equal len idx -> Expr.list_nth (NOp (LstCat, tl)) 0
         | _, Lit (Num _) -> raise (exn "LstNth with float")
         | le, n -> BinOp (le, LstNth, n))
+    | BinOp (left, ((And | Or | Impl) as op), right)
+      when !Config.Verification.total -> (
+        (* A parent rewrite may erase this expression next. Normalize required
+           operands now, using the reducer to identify skipped operands. *)
+        let left = reduce (f left) in
+        match (op, left) with
+        | And, Lit (Bool false) -> Expr.false_
+        | Or, Lit (Bool true) | Impl, Lit (Bool false) -> Expr.true_
+        | _ -> BinOp (left, op, f right))
     | BinOp (le1, op, le2) -> BinOp (f le1, op, f le2)
     (* Unary Operators **)
     | UnOp (Car, lst) -> (
@@ -2201,7 +2210,7 @@ let rec reduce_lexpr_loop
               | None -> def)
         | _ -> def)
   in
-  let result = normalise_list_expressions result in
+  let result = normalise_list_expressions ~reduce:f result in
   if Expr.equal le result then result
   else (
     L.tmi (fun m -> m "\tReduce_lexpr: %a -> %a" Expr.pp le Expr.pp result);

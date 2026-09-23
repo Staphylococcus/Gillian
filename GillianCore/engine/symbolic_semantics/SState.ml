@@ -258,6 +258,23 @@ module Make (SMemory : SMemory.S) :
             match SStore.get store x with
             | Some v -> v
             | None -> raise (Internal_State_Error ([ EVar x ], state)))
+        | BinOp (left, ((And | Or | Impl) as op), right)
+          when !Config.Verification.total ->
+            (* Substitution is evaluation too: a skipped operand may contain
+               a program variable that is not initialized on this path. *)
+            let left = symb_evaluate_expr left in
+            let skip_value = op = Or in
+            let skips_right =
+              match left with
+              | Lit (Bool value) -> value = skip_value
+              | Lit _ -> false
+              | _ when Expr.is_boolean_expr left ->
+                  FOSolver.check_entailment SS.empty pfs
+                    [ (if skip_value then left else Expr.negate left) ] gamma
+              | _ -> false
+            in
+            if skips_right then Expr.bool (op <> And)
+            else BinOp (left, op, f right)
         | BinOp (e1, op, e2) -> BinOp (f e1, op, f e2)
         (* Unary operators *)
         | UnOp (op, e) -> UnOp (op, f e)

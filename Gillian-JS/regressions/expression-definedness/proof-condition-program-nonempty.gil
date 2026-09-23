@@ -1,0 +1,4 @@
+spec answer(xs)
+[[ (xs == #xs) * types(#xs : List) * (0i i< l-len(#xs)) ]]
+[[ (ret == 42i) ]] normal
+proc answer(xs) { if (l-len(l-sub(xs, 1i, 0i)) == 0i) then { assert (true) } else { assert (false) }; ret := 42i; return };

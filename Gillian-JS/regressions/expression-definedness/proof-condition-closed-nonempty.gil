@@ -1,0 +1,2 @@
+spec main() [[ emp ]] [[ (ret == 42i) ]] normal
+proc main() { xs := {{ 7i }}; if (l-len(l-sub(xs, 1i, 0i)) == 0i) then { assert (true) } else { assert (false) }; ret := 42i; return };

@@ -1,0 +1,2 @@
+spec main() [[ emp ]] [[ (ret == 42i) ]] normal
+proc main() { xs := {{ }}; assert (l-len(l-sub(xs, 1i, 0i)) == 0i); ret := 42i; return };

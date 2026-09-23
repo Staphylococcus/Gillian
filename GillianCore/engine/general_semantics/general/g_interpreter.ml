@@ -589,6 +589,9 @@ struct
       Res_list.return (update_store state' x v)
 
     let eval_assert f state =
+      Totality.check_proof_expression ~context:"Pure assertion"
+        ~evaluate:(fun e -> State.eval_expr state e |> Val.to_expr)
+        ~assertion:(fun condition -> State.assert_a state [ condition ]) f;
       let store_subst = Store.to_ssubst (State.get_store state) in
       let f' = SVal.SESubst.subst_in_expr store_subst ~partial:true f in
       match State.assert_a state [ f' ] with
@@ -652,6 +655,9 @@ struct
 
     (* We have to understand what is the intended semantics of the logic if *)
     and eval_if e lcmds_t lcmds_e prog annot state eval_expr =
+      Totality.check_proof_expression ~context:"Logical condition"
+        ~evaluate:(fun e -> eval_expr e |> Val.to_expr)
+        ~assertion:(fun condition -> State.assert_a state [ condition ]) e;
       let ve = eval_expr e in
       let e = Val.to_expr ve in
       match e with

@@ -1,0 +1,2 @@
+spec main() [[ emp ]] [[ (true ==> ((false and (l-nth({{}}, 0i) == 1i)) == (false and (l-nth({{}}, 0i) == 1i)))) ]] normal
+proc main() { ret := 42i; return };
