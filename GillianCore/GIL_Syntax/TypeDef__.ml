@@ -103,6 +103,7 @@ and binop =
   | StrCat
   | Utf16Less
   | Utf16Nth
+  | Utf16CodeUnit
   | Utf16Cat
   | StrNth
   | StrLess

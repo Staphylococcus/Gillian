@@ -67,3 +67,12 @@ The separate bi-abduction runtime is unchanged. Unbounded symbolic strings,
 order-aware deductive specifications, recursive JSON invariants and full-contract
 termination remain open. General nondecimal Number.toString remains unchanged
 by this work; the JSON implementation does not use it.
+
+P06.3 moves actual `charCodeAt` from its concrete-only list external to checked
+numeric UTF-16 lookup. The unchanged ordinary-mode `symbolic-string.js` still
+cannot complete: it may return native SMT unknown at the preceding length guard
+or reject the total-mode-only lookup encoding. Its `incomplete` control requires
+exit 125, absent path results and the exact analysis diagnostic; successful paths,
+cutoffs and unrelated failures reject. This is an analysis-boundary control, never
+a positive proof or source-program refutation. The seven new total-mode controls
+and direct ordinary-mode primitive gate live in the UTF-16/core suites.

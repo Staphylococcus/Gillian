@@ -295,7 +295,7 @@ let rec evaluate_binop
           let s2 = as_str lit2 in
           String (s1 ^ s2)
       | Utf16Less -> Bool (Utf16.compare (as_utf16 lit1) (as_utf16 lit2) < 0)
-      | Utf16Nth ->
+      | (Utf16Nth | Utf16CodeUnit) as op ->
           let units = Utf16.code_units (Utf16.to_canonical (as_utf16 lit1)) in
           let index = as_num lit2 in
           if
@@ -308,9 +308,9 @@ let rec evaluate_binop
             evalerr "UTF-16 index out of bounds";
           (* The materialized list bounds the host conversion, not the symbolic
              UTF-16 domain. Compare exact integers before converting. *)
-          Utf16String
-            (Utf16.of_canonical
-               (Utf16.of_code_units [ List.nth units (Z.to_int offset) ]))
+          let unit = List.nth units (Z.to_int offset) in
+          if op = Utf16CodeUnit then Num (float_of_int unit)
+          else Utf16String (Utf16.of_canonical (Utf16.of_code_units [ unit ]))
       | Utf16Cat -> Utf16String (Utf16.concat (as_utf16 lit1) (as_utf16 lit2)))
 
 and evaluate_nop (nop : NOp.t) (ll : Literal.t list) : CVal.M.t =

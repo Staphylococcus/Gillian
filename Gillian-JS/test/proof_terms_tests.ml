@@ -247,6 +247,32 @@ let expect_domain_failure prefix f =
   in
   Alcotest.(check bool) "intended definedness failure" true failed
 
+let code_unit_domains () =
+  let string =
+    Expr.Lit
+      (Literal.Utf16String
+         (Gillian.Utils.Utf16.of_canonical
+            (Gillian.Utils.Utf16.of_code_units [ 0xffff ])))
+  in
+  let check term =
+    let state = State.init () in
+    Totality.check_proof_expression ~context:"Code unit"
+      ~evaluate:(State.eval_expr state)
+      ~assertion:(fun e -> State.assert_a state [ e ])
+      term
+  in
+  let term n = bin Utf16CodeUnit string (Expr.num n) in
+  check (term (-0.));
+  List.iter
+    (fun n ->
+      let bad = term n in
+      expect_domain_failure "Code unit is not proved defined:" (fun () ->
+          check (bin Equal bad bad));
+      check (bin Or truth (bin Equal bad bad)))
+    [ nan; infinity; neg_infinity; -1.; 0.5; 1.; Float.max_float ];
+  expect_domain_failure "Code unit is not proved defined:" (fun () ->
+      check (bin Utf16CodeUnit (Expr.num 42.) (Expr.num 0.)))
+
 let proof_domain () =
   let xs = Expr.LVar "#xs" in
   let state = Option.get (State.assume_t (State.init ()) xs Type.ListType) in
@@ -534,6 +560,8 @@ let () =
             (with_total failed_assumption);
           Alcotest.test_case "infeasible assumption" `Quick
             (with_total infeasible_assumption);
+          Alcotest.test_case "numeric code-unit domains" `Quick
+            (with_total code_unit_domains);
           Alcotest.test_case "proof domains and guarded operands" `Quick
             (with_total proof_domain);
           Alcotest.test_case "proof set literals and union" `Quick

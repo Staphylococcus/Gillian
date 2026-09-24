@@ -49,7 +49,7 @@ let rec str (e : t) : string =
   (* (e1 bop e2) *)
   | BinOp (e1, op, e2) -> (
       match op with
-      | LstNth | StrNth ->
+      | LstNth | StrNth | Utf16CodeUnit ->
           Printf.sprintf "%s(%s, %s)" (BinOp.str op) (str e1) (str e2)
       | _ -> Printf.sprintf "(%s %s %s)" (str e1) (BinOp.str op) (str e2))
   (* (uop e) *)

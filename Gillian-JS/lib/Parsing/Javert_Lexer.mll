@@ -236,6 +236,7 @@ rule read = parse
 (* Expression keywords *)
   | "l-nth"              { Javert_Parser.LSTNTH }
   | "s-nth"              { Javert_Parser.STRNTH }
+  | "u16-code"           { Javert_Parser.UTF16CODE }
 (* Command keywords *)
   | ":="                 { Javert_Parser.DEFEQ }
 (* Logic assertions *)

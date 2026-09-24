@@ -52,6 +52,7 @@ type t = TypeDef__.binop =
   | StrCat  (** String concatenation *)
   | Utf16Less
   | Utf16Nth
+  | Utf16CodeUnit
   | Utf16Cat  (** UTF-16 code-unit concatenation *)
   | StrNth  (** Nth element of a string *)
   | StrLess  (** Less or equal for strings *)
@@ -111,6 +112,7 @@ let str (x : t) =
   | StrCat -> "++"
   | Utf16Less -> "u16<"
   | Utf16Nth -> "u16-nth"
+  | Utf16CodeUnit -> "u16-code"
   | Utf16Cat -> "u16++"
   | StrNth -> "s-nth"
   | SetDiff -> "-d-"

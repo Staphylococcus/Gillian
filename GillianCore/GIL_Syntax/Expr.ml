@@ -391,7 +391,7 @@ let pp_custom ~pp ft =
   | PVar v | LVar v | ALoc v -> Fmt.string ft v
   | BinOp (e1, op, e2) -> (
       match op with
-      | LstNth | StrNth | Utf16Nth | LstRepeat ->
+      | LstNth | StrNth | Utf16Nth | Utf16CodeUnit | LstRepeat ->
           Fmt.pf ft "%s(%a, %a)" (BinOp.str op) pp e1 pp e2
       | Equal -> Fmt.pf ft "@[(%a %s %a)@]" pp e1 (BinOp.str op) pp e2
       | _ -> Fmt.pf ft "(%a %s %a)" pp e1 (BinOp.str op) pp e2)

@@ -224,6 +224,7 @@ module BinOp : sig
     | StrCat  (** String concatenation *)
     | Utf16Less
     | Utf16Nth
+    | Utf16CodeUnit
     | Utf16Cat  (** Code-unit concatenation *)
     | StrNth  (** Nth element of a string *)
     | StrLess  (** Less or equal for strings *)
@@ -1486,6 +1487,7 @@ module Visitors : sig
          ; visit_FreshSVar : 'c -> LCmd.t -> string -> LCmd.t
          ; visit_StrCat : 'c -> BinOp.t -> BinOp.t
          ; visit_Utf16Less : 'c -> BinOp.t -> BinOp.t
+         ; visit_Utf16CodeUnit : 'c -> BinOp.t -> BinOp.t
          ; visit_Utf16Nth : 'c -> BinOp.t -> BinOp.t
          ; visit_Utf16Cat : 'c -> BinOp.t -> BinOp.t
          ; visit_StrLen : 'c -> UnOp.t -> UnOp.t
@@ -1767,6 +1769,7 @@ module Visitors : sig
     method visit_FreshSVar : 'c -> LCmd.t -> string -> LCmd.t
     method visit_StrCat : 'c -> BinOp.t -> BinOp.t
     method visit_Utf16Less : 'c -> BinOp.t -> BinOp.t
+    method visit_Utf16CodeUnit : 'c -> BinOp.t -> BinOp.t
     method visit_Utf16Nth : 'c -> BinOp.t -> BinOp.t
     method visit_Utf16Cat : 'c -> BinOp.t -> BinOp.t
     method visit_StrLen : 'c -> UnOp.t -> UnOp.t
@@ -2040,6 +2043,7 @@ module Visitors : sig
          ; visit_FuncApp : 'c -> string -> Expr.t list -> 'f
          ; visit_StrCat : 'c -> 'f
          ; visit_Utf16Less : 'c -> 'f
+         ; visit_Utf16CodeUnit : 'c -> 'f
          ; visit_Utf16Nth : 'c -> 'f
          ; visit_Utf16Cat : 'c -> 'f
          ; visit_StrLen : 'c -> 'f
@@ -2277,6 +2281,7 @@ module Visitors : sig
     method visit_FuncApp : 'c -> string -> Expr.t list -> 'f
     method visit_StrCat : 'c -> 'f
     method visit_Utf16Less : 'c -> 'f
+    method visit_Utf16CodeUnit : 'c -> 'f
     method visit_Utf16Nth : 'c -> 'f
     method visit_Utf16Cat : 'c -> 'f
     method visit_StrLen : 'c -> 'f
@@ -2514,6 +2519,7 @@ module Visitors : sig
          ; visit_FuncApp : 'c -> string -> Expr.t list -> unit
          ; visit_StrCat : 'c -> unit
          ; visit_Utf16Less : 'c -> unit
+         ; visit_Utf16CodeUnit : 'c -> unit
          ; visit_Utf16Nth : 'c -> unit
          ; visit_Utf16Cat : 'c -> unit
          ; visit_StrLen : 'c -> unit
@@ -2755,6 +2761,7 @@ module Visitors : sig
     method visit_FuncApp : 'c -> string -> Expr.t list -> unit
     method visit_StrCat : 'c -> unit
     method visit_Utf16Less : 'c -> unit
+    method visit_Utf16CodeUnit : 'c -> unit
     method visit_Utf16Nth : 'c -> unit
     method visit_Utf16Cat : 'c -> unit
     method visit_StrLen : 'c -> unit

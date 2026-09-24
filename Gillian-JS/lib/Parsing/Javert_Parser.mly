@@ -126,7 +126,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token FRESH_SVAR
 %token LSTNTH
 %token LSTSUB
-%token STRNTH
+%token STRNTH UTF16CODE
 %token BIND
 %token EXISTENTIALS
 %token BRANCH
@@ -438,6 +438,8 @@ expr_target:
      }
   | STRNTH; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
      { Expr.BinOp (e1, StrNth, e2) }
+  | UTF16CODE; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
+     { Expr.BinOp (e1, Utf16CodeUnit, e2) }
   | LBRACE; e=expr_target; RBRACE { e }
   | UNDERSCORE { Expr.LVar (Javert_utils.Js_generators.fresh_lvar ()) }
 
@@ -985,6 +987,8 @@ js_lexpr_target:
 (* s-nth(e1, e2) *)
   | STRNTH; LBRACE; e1=js_lexpr_target; COMMA; e2=js_lexpr_target; RBRACE
     { JSExpr.BinOp (e1, StrNth, e2) }
+  | UTF16CODE; LBRACE; e1=js_lexpr_target; COMMA; e2=js_lexpr_target; RBRACE
+    { JSExpr.BinOp (e1, Utf16CodeUnit, e2) }
 (* l-sub(e1, e2, e3) *)
 | LSTSUB; LBRACE; e1=js_lexpr_target; COMMA; e2=js_lexpr_target; COMMA; e3 = js_lexpr_target; RBRACE
     { JSExpr.LstSub (e1, e2, e3) }

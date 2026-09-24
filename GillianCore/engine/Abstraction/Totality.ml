@@ -204,7 +204,7 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
               "integer shift domains are not yet checked."
         | StrCat | StrLess -> both StringType
         | Utf16Cat | Utf16Less -> both Utf16Type
-        | Utf16Nth ->
+        | Utf16Nth | Utf16CodeUnit ->
             List.iter need
               [
                 typ left Utf16Type;

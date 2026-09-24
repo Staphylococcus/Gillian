@@ -255,6 +255,7 @@ rule read = parse
   | "num_to_utf16"       { GIL_Parser.NUMTOUTF16 }
   | "utf16_to_num"       { GIL_Parser.UTF16TONUM }
   | "u16-nth"            { GIL_Parser.UTF16NTH }
+  | "u16-code"           { GIL_Parser.UTF16CODE }
   | "u16<"               { GIL_Parser.UTF16LESS }
   | "u16-len"            { GIL_Parser.UTF16LEN }
   | "s-bytes"            { GIL_Parser.STRBYTES }

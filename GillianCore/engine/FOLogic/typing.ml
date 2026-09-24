@@ -78,6 +78,7 @@ module Infer_types_to_gamma = struct
       | StrLess -> (Some StringType, Some StringType, Some BooleanType)
       | Utf16Less -> (Some Utf16Type, Some Utf16Type, Some BooleanType)
       | Utf16Nth -> (Some Utf16Type, Some NumberType, Some Utf16Type)
+      | Utf16CodeUnit -> (Some Utf16Type, Some NumberType, Some NumberType)
       | And | Or | Impl -> (Some BooleanType, Some BooleanType, Some BooleanType)
       | StrCat -> (Some StringType, Some StringType, Some StringType)
       | Utf16Cat -> (Some Utf16Type, Some Utf16Type, Some Utf16Type)
@@ -472,6 +473,7 @@ module Type_lexpr = struct
         | StrCat -> infer_type le StringType
         | Utf16Cat | Utf16Nth -> infer_type le Utf16Type
         | Utf16Less -> infer_type le BooleanType
+        | Utf16CodeUnit -> infer_type le NumberType
         | IPlus
         | IMinus
         | ITimes

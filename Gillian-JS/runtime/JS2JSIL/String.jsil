@@ -168,11 +168,10 @@ proc SP_charCodeAt (xsc, vthis, position) {
         str := ret;
         ret := "i__toInteger" (position) with elab;
         pos := ret;
-        units := extern ExecuteStringCodeUnits (str);
-        len := l-len (units);
+        len := s-len (str);
         goto [pos < 0] outside upper;
   upper: goto [len <= pos] outside inside;
-  inside: ret := l-nth (units, pos);
+  inside: ret := u16-code (str, pos);
         return;
   outside: ret := nan;
         return;

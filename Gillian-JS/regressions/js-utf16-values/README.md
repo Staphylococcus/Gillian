@@ -143,3 +143,14 @@ binds 17 ASTs and 3,025 direct independent pairs. Focused frozen acceptance pass
 source-bound evidence. Implementation, runtime and all binary bytes match the
 published full 974-control baseline; this is a fixture/replay-only slice, not a
 new full baseline or full-fold certification. Numeric code units are next.
+
+P06.3 adds `Utf16CodeUnit` (`u16-code`) with the existing checked index domain
+and exact unsigned 16-bit-to-binary64 observation. Actual `SP_charCodeAt` keeps
+coercion, ToInteger and outside NaN while replacing the concrete-only external.
+Seven actual-JS controls cover the unrestricted caller, three wrong-result claims
+and full initialization/concrete calls. Source-bound acceptance passes 986
+controls in 109 jobs, all seven model artifacts and 120/120 PoC tests. All 47,004
+frozen inputs stayed unchanged. The PoC retains the failed concurrent run and
+isolated passes; accepted four-job concurrency preserves all proof budgets. No
+string/schema bound or helper axiom is added. Ranked actual traversal is next;
+full JSON admission, helper composition and final adapters remain open.

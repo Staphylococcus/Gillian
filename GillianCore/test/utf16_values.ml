@@ -678,6 +678,7 @@ let expression_transport () =
             | Error _ -> false))
         [
           bin Utf16Nth s (Expr.num 0.);
+          bin Utf16CodeUnit s (Expr.num 0.);
           bin Utf16Less s a;
           cat s a;
           length s;
@@ -903,8 +904,225 @@ let index_models () =
       | None -> ()
       | Some path -> Yojson.Safe.to_file path (`List models))
 
+let checked_code_unit () =
+  let store = Engine.CExprEval.CStore.init [] in
+  List.iter
+    (fun units ->
+      List.iteri
+        (fun i unit ->
+          let term =
+            bin Utf16CodeUnit (value units) (Expr.num (float_of_int i))
+          in
+          let expected = Expr.num (float_of_int unit) in
+          Alcotest.(check bool)
+            "concrete unsigned code unit" true
+            (Expr.equal expected
+               (Expr.Lit (Engine.CExprEval.evaluate_expr store term)));
+          Alcotest.(check bool)
+            "reduced unsigned code unit" true
+            (Expr.equal expected (Reduction.reduce_lexpr term));
+          with_total (fun () ->
+              check "SMT unsigned code unit" false [ not_ (eq term expected) ]))
+        units;
+      List.iter
+        (fun index ->
+          let term = bin Utf16CodeUnit (value units) (Expr.num index) in
+          let rejected =
+            try
+              ignore (Engine.CExprEval.evaluate_expr store term);
+              false
+            with Engine.CExprEval.EvaluationError _ -> true
+          in
+          Alcotest.(check bool) "invalid code-unit index rejects" true rejected;
+          let rejected =
+            try
+              ignore (Reduction.reduce_lexpr term);
+              false
+            with Reduction.ReductionException _ -> true
+          in
+          Alcotest.(check bool)
+            "invalid code-unit reduction rejects" true rejected)
+        [
+          nan;
+          infinity;
+          neg_infinity;
+          -1.;
+          0.5;
+          float_of_int (List.length units);
+          Float.max_float;
+        ])
+    values;
+  with_total (fun () ->
+      let term = bin Utf16CodeUnit a (Expr.num 0.) in
+      let nonempty = bin ILessThan (Expr.int 0) (length a) in
+      check "symbolic unit is a nonnegative finite integer" false
+        [
+          nonempty;
+          not_
+            (bin And
+               (Expr.UnOp (IsInt, term))
+               (bin And
+                  (bin FLessThanEqual (Expr.num 0.) term)
+                  (bin FLessThanEqual term (Expr.num 65535.))));
+        ]);
+  let old = !Gillian.Utils.Config.Verification.total in
+  Gillian.Utils.Config.Verification.total := false;
+  Fun.protect
+    ~finally:(fun () -> Gillian.Utils.Config.Verification.total := old)
+    (fun () ->
+      let rejected =
+        try
+          ignore
+            (Smt.is_sat
+               (Expr.Set.of_list
+                  [ eq (bin Utf16CodeUnit a (Expr.num 17.)) (Expr.num 4660.) ])
+               (Gamma.as_hashtbl (gamma ())));
+          false
+        with Smt.SMT_error message ->
+          String.starts_with ~prefix:"SMT encoding: symbolic UTF-16 indexing"
+            message
+      in
+      Alcotest.(check bool)
+        "ordinary symbolic mode rejects unchecked unit lookup" true rejected)
+
+let code_unit_models () =
+  with_total (fun () ->
+      let old_dump = !Gillian.Utils.Config.dump_smt in
+      Gillian.Utils.Config.dump_smt :=
+        Option.is_some (Sys.getenv_opt "GILLIAN_UTF16_CODE_MODELS");
+      Fun.protect
+        ~finally:(fun () -> Gillian.Utils.Config.dump_smt := old_dump)
+        (fun () ->
+          let gamma = gamma () in
+          Gamma.update gamma "#unit_index" NumberType;
+          Gamma.update gamma "#unit_result" NumberType;
+          let gamma = Gamma.as_hashtbl gamma in
+          let index = Expr.LVar "#unit_index" in
+          let result = Expr.LVar "#unit_result" in
+          let pos = Expr.UnOp (ToIntOp, index) in
+          let outside =
+            bin Or
+              (bin FLessThan pos (Expr.num 0.))
+              (bin FLessThanEqual (Expr.UnOp (IntToNum, length a)) pos)
+          in
+          let models =
+            List.map
+              (fun (id, inside, extra) ->
+                Format.printf "Numeric code-unit witness: %s@." id;
+                let constraints =
+                  (if inside then
+                     [ not_ outside; eq result (bin Utf16CodeUnit a pos) ]
+                   else [ outside; bin ValueEqual result (Expr.num nan) ])
+                  @ extra
+                in
+                let model =
+                  match Smt.exec_sat (Expr.Set.of_list constraints) gamma with
+                  | Some model -> model
+                  | None -> Alcotest.fail ("Lost numeric unit witness: " ^ id)
+                in
+                let lifted = Hashtbl.create 3 in
+                Smt.lift_model model gamma (Hashtbl.add lifted)
+                  (Expr.Set.of_list [ a; index; result ]);
+                let get name =
+                  match Hashtbl.find_opt lifted name with
+                  | Some (Expr.Lit value) -> value
+                  | _ -> Alcotest.fail "Missing numeric unit model value"
+                in
+                let bindings =
+                  List.map
+                    (fun name -> (name, get name))
+                    [ "#utf16_a"; "#unit_index"; "#unit_result" ]
+                in
+                let store = Engine.CExprEval.CStore.init bindings in
+                let visitor =
+                  object
+                    inherit [_] Visitors.endo
+                    method! visit_LVar () _ name = Expr.PVar name
+                  end
+                in
+                List.iter
+                  (fun e ->
+                    match
+                      Engine.CExprEval.evaluate_expr store
+                        (visitor#visit_expr () e)
+                    with
+                    | Bool true -> ()
+                    | _ ->
+                        Alcotest.fail
+                          "Numeric unit witness failed concrete replay")
+                  constraints;
+                let bits name =
+                  match get name with
+                  | Num n ->
+                      `String (Printf.sprintf "%016Lx" (Int64.bits_of_float n))
+                  | _ -> Alcotest.fail "Numeric unit witness lost Number type"
+                in
+                let units =
+                  match get "#utf16_a" with
+                  | Utf16String s ->
+                      `List
+                        (List.map
+                           (fun x -> `Int x)
+                           (Codec.code_units (Codec.to_canonical s)))
+                  | _ -> Alcotest.fail "Numeric unit witness lost string type"
+                in
+                `Assoc
+                  [
+                    ("id", `String id);
+                    ("units", units);
+                    ("indexBits", bits "#unit_index");
+                    ("resultBits", bits "#unit_result");
+                  ])
+              [
+                ("inside", true, [ bin ValueEqual index (Expr.num 0.) ]);
+                ( "unsigned-max",
+                  true,
+                  [
+                    bin ValueEqual index (Expr.num 0.);
+                    eq result (Expr.num 65535.);
+                  ] );
+                ( "lone-high",
+                  true,
+                  [
+                    eq a (value [ 0xd800 ]); bin ValueEqual index (Expr.num 0.);
+                  ] );
+                ( "low-surrogate",
+                  true,
+                  [
+                    eq a (value [ 0xd83d; 0xde00 ]);
+                    bin ValueEqual index (Expr.num 1.);
+                  ] );
+                ( "nan-index",
+                  true,
+                  [ eq a (value [ 65 ]); bin ValueEqual index (Expr.num nan) ]
+                );
+                ( "negative-fraction",
+                  true,
+                  [
+                    eq a (value [ 65 ]); bin ValueEqual index (Expr.num (-0.5));
+                  ] );
+                ( "empty-string",
+                  false,
+                  [ eq a (value []); bin ValueEqual index (Expr.num 0.) ] );
+                ( "positive-infinity",
+                  false,
+                  [ bin ValueEqual index (Expr.num infinity) ] );
+                ( "negative-infinity",
+                  false,
+                  [ bin ValueEqual index (Expr.num neg_infinity) ] );
+                ( "negative-index",
+                  false,
+                  [ bin ValueEqual index (Expr.num (-1.)) ] );
+              ]
+          in
+          match Sys.getenv_opt "GILLIAN_UTF16_CODE_MODELS" with
+          | None -> ()
+          | Some path -> Yojson.Safe.to_file path (`List models)))
+
 let tests =
   [
+    ("numeric code unit models", `Quick, code_unit_models);
+    ("checked numeric code unit", `Quick, checked_code_unit);
     ("checked index domain and bounds", `Quick, checked_index);
     ("index conversion boundaries", `Quick, index_conversion_boundaries);
     ("indexed unit models", `Quick, index_models);

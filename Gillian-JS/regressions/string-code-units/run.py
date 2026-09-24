@@ -21,7 +21,7 @@ CASES = [
     ("generated-code", "normal", 100),
     ("symbolic-choice", "normal", 100),
     ("wrong-code-point", "assertion", 100),
-    ("symbolic-string", "unsupported", 100),
+    ("symbolic-string", "incomplete", 100),
     ("generated-lone-source", "unsupported", 100),
     ("concrete", "cutoff", 0),
 ]
@@ -60,6 +60,13 @@ def run_case(name, expectation, budget, output):
             p[0] == "RFail" and p[1]["proc"] == "main"
             and p[1]["errors"] == [["EState", ["EPure", ["Lit", ["Bool", False]]]]]
             and p[1]["loc"]["loc_start"]["pos_line"] == 4 for p in paths)
+    elif expectation == "incomplete":
+        # Ordinary symbolic charCodeAt can stop at its length-guard query or
+        # at the explicit total-mode-only indexing gate. Neither is a proof,
+        # a catchable source exception, a normal path, or a cutoff.
+        passed = process.returncode == 125 and paths is None and not cutoff and (
+            "SMT returned unknown" in text or
+            "SMT encoding: symbolic UTF-16 indexing requires total-mode domain checks" in text)
     elif expectation == "unsupported":
         passed = process.returncode != 0 and not normal and not cutoff and (
             any(message in text for message in ("ExecuteStringCodeUnits requires a concrete string", "ExecuteStringLength requires concrete operands", "Lone surrogate in generated JavaScript source")))

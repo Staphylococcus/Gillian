@@ -148,7 +148,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token SETTOLIST
 %token LSTLEN
 %token STRLEN
-%token NUMTOUTF16 UTF16TONUM UTF16NTH UTF16LESS
+%token NUMTOUTF16 UTF16TONUM UTF16NTH UTF16LESS UTF16CODE
 %token UTF16LEN
 %token STRBYTES
 %token INTTONUM
@@ -418,6 +418,8 @@ atomic_expr_target:
 (* s-nth (string, n) *)
   | UTF16NTH; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
      { Expr.BinOp (e1, Utf16Nth, e2) }
+  | UTF16CODE; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
+     { Expr.BinOp (e1, Utf16CodeUnit, e2) }
   | STRNTH; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
      { Expr.BinOp (e1, StrNth, e2) }
 (* (e) *)

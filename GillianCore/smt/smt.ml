@@ -1224,14 +1224,22 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- left = get_utf16 p1 in
       let>- right = get_utf16 p2 in
       seq_concat [ left.expr; right.expr ] >- Utf16Type
-  | Utf16Nth ->
+  | (Utf16Nth | Utf16CodeUnit) as op ->
       if not !Config.Verification.total then
         exceptf
           "SMT encoding: symbolic UTF-16 indexing requires total-mode domain \
            checks";
       let>- str = get_utf16 p1 in
       let>- index = get_num p2 in
-      seq_unit (seq_nth str.expr (number_to_integer index.expr)) >- Utf16Type
+      let unit = seq_nth str.expr (number_to_integer index.expr) in
+      if op = Utf16Nth then seq_unit unit >- Utf16Type
+      else
+        (* Every unsigned 16-bit unit is exactly representable as binary64.
+           The same checked index domain guards both observations. *)
+        app
+          (List [ atom "_"; atom "to_fp_unsigned"; atom "11"; atom "53" ])
+          [ rne; unit ]
+        >- NumberType
   | StrNth ->
       require_definition Axiomatised_operations.def_snth;
       let>- str' = get_string p1 in
