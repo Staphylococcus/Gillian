@@ -29,7 +29,13 @@ let () = Sys.(set_signal sigpipe Signal_ignore)
 
 exception SMT_unknown
 
+(* A model outlives the solver context that produced it, including through the
+   SAT cache. Keep the actual datatype commands, not dynamic declaration
+   builders whose user-datatype set can change on the next query. *)
+type model = { values : sexp; sort_declarations : sexp list }
+
 let pp_sexp = Sexplib.Sexp.pp_hum
+let pp_model fmt model = pp_sexp fmt model.values
 let ( <| ) constr e = app constr [ e ]
 let ( $$ ) constr l = app constr l
 
@@ -1920,18 +1926,20 @@ let encode_assertions_needs_handler (fs : Expr.Set.t) (gamma : typenv) :
   in
   consts @ asrts
 
-(* Returns the SMT commands for [fs] together with the set of prelude
-   definitions they depend on (collected via the [Require_definition] effect
-   while encoding). Both are cached, so the dependency set survives a cache
-   hit -- it cannot be recomputed from the encoded terms without re-encoding. *)
-let encode_assertions (fs : Expr.Set.t) (gamma : typenv) :
-    sexp list * (int, definition) Hashtbl.t =
+(* Cache concrete prelude commands as well as assertions. User datatype
+   declarations are query-dependent: re-running a dynamic declaration builder
+   on a cache hit would lose the datatype set discovered during encoding. *)
+let encode_assertions (fs : Expr.Set.t) (gamma : typenv) : sexp list * sexp list
+    =
   let key = formula_key fs gamma in
   let- () = Formula_cache.find_opt encoding_cache key in
-  let result =
+  let encoded, needed =
     with_necessary_definitions @@ fun () ->
     encode_assertions_needs_handler fs gamma
   in
+  let declarations = ref [] in
+  emit_definitions ~emit:(fun d -> declarations := d :: !declarations) needed;
+  let result = (encoded, List.rev !declarations) in
   let () = Formula_cache.replace encoding_cache key result in
   result
 
@@ -1991,7 +1999,7 @@ let exec_sat'
     ~phase_selection
     ~raw_unknown
     (fs : Expr.Set.t)
-    (gamma : typenv) : sexp option =
+    (gamma : typenv) : model option =
   let () =
     L.verbose (fun m ->
         m "@[<v 2>About to check SAT of:@\n%a@]@\nwith gamma:@\n@[%a@]\n"
@@ -2006,9 +2014,22 @@ let exec_sat'
     cmd (set_option ":smt.phase_selection" (string_of_int phase_selection))
   in
   with_necessary_usr_datatypes @@ fun () ->
-  let encoded_assertions, necessary_definitions = encode_assertions fs gamma in
+  let encoded_assertions, declarations = encode_assertions fs gamma in
   let () = if !Config.dump_smt then Dump.dump fs gamma encoded_assertions in
-  let () = emit_definitions ~emit:cmd necessary_definitions in
+  let sort_declarations = ref [] in
+  let emit (declaration : sexp) =
+    (match declaration with
+    | List
+        (Atom
+           ( "declare-datatypes"
+           | "declare-datatype"
+           | "declare-sort"
+           | "define-sort" )
+        :: _) -> sort_declarations := declaration :: !sort_declarations
+    | _ -> ());
+    cmd declaration
+  in
+  let () = List.iter emit declarations in
   let () = List.iter cmd encoded_assertions in
   L.verbose (fun fmt -> fmt "Reached SMT.");
   let result = check !solver in
@@ -2039,7 +2060,12 @@ let exec_sat'
           raise
             Gillian_result.Exc.(
               internal_error ~additional_data "SMT returned unknown")
-    | Sat -> Some (get_model !solver)
+    | Sat ->
+        Some
+          {
+            values = get_model !solver;
+            sort_declarations = List.rev !sort_declarations;
+          }
     | Unsat -> None
   in
   ret
@@ -2049,7 +2075,7 @@ let run_sat
     ~phase_selection
     ~raw_unknown
     (fs : Expr.Set.t)
-    (gamma : typenv) : sexp option =
+    (gamma : typenv) : model option =
   try exec_sat' ~timeout_ms ~phase_selection ~raw_unknown fs gamma
   with UnexpectedSolverResponse _ as e ->
     let additional_data =
@@ -2195,7 +2221,7 @@ let seeded_model fs gamma =
           [ 1; 2 ]
     | None -> None
 
-let check_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
+let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   let key = formula_key fs gamma in
   match Formula_cache.find_opt sat_cache key with
   | Some result ->
@@ -2223,12 +2249,13 @@ let is_sat (fs : Expr.Set.t) (gamma : typenv) : bool =
   Option.is_some (check_sat fs gamma)
 
 let lift_model
-    (model : sexp)
+    (model : model)
     (gamma : typenv)
     (subst_update : string -> Expr.t -> unit)
     (target_vars : Expr.Set.t) : unit =
   let () = reset_solver () in
-  let model_eval = (model_eval' !solver model).eval [] in
+  let () = List.iter cmd model.sort_declarations in
+  let model_eval = (model_eval' !solver model.values).eval [] in
 
   let get_val x =
     try

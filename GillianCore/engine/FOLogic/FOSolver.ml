@@ -238,7 +238,7 @@ let check_entailment
       let () =
         model
         |> Option.iter (fun model ->
-               L.tmi (fun m -> m "Here's the model:\n%a" Smt.pp_sexp model))
+               L.tmi (fun m -> m "Here's the model:\n%a" Smt.pp_model model))
       in
       (* Utils.Statistics.update_statistics "FOS: CheckEntailment"
          (Unix.gettimeofday () -. t); *)

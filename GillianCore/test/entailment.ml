@@ -362,6 +362,83 @@ let length_only_witness () =
   check "wrapped length does not hide a contradictory full query" false
     (Expr.Set.add (bin Equal size (Expr.int 0)) inside)
 
+let model_declarations () =
+  let make tag n =
+    let name = "ModelContext" ^ tag and cname = "ModelBox" ^ tag in
+    let constructor : Constructor.t =
+      {
+        constructor_name = cname;
+        constructor_source_path = None;
+        constructor_loc = None;
+        constructor_num_fields = 1;
+        constructor_fields = [ Some Type.NumberType ];
+        constructor_datatype = name;
+      }
+    in
+    let datatype : Datatype.t =
+      {
+        datatype_name = name;
+        datatype_source_path = None;
+        datatype_loc = None;
+        datatype_constructors = [ constructor ];
+      }
+    in
+    let table = Hashtbl.create 1 in
+    Hashtbl.add table name datatype;
+    let env = Prog_env.Datatype_env.make' table in
+    let number = Expr.LVar ("#model_number_" ^ tag) in
+    let wrapped = Expr.LVar ("#model_wrapped_" ^ tag) in
+    let value = Expr.LVar ("#model_custom_" ^ tag) in
+    let gamma = Hashtbl.create 1 in
+    (match number with
+    | LVar name -> Hashtbl.add gamma name Type.NumberType
+    | _ -> assert false);
+    let fs =
+      Expr.Set.of_list
+        [
+          bin ValueEqual number (Expr.num n);
+          bin ValueEqual wrapped number;
+          bin Equal value (Expr.ConstructorApp (cname, [ number ]));
+        ]
+    in
+    let run check =
+      Prog_env.Datatype_env.using env (fun () ->
+          match check fs gamma with
+          | Some model -> model
+          | None -> Alcotest.fail "Missing datatype model")
+    in
+    (number, gamma, run, n)
+  in
+  let a, ga, run_a, na = make "A" (-0.) in
+  let b, gb, run_b, nb = make "B" 42. in
+  let ma = run_a Smt.check_sat in
+  let mb = run_b Smt.check_sat in
+  let replay x gamma expected model =
+    let lifted = Hashtbl.create 1 in
+    Smt.lift_model model gamma (Hashtbl.add lifted) (Expr.Set.singleton x);
+    let name =
+      match x with
+      | LVar name -> name
+      | _ -> assert false
+    in
+    let actual =
+      match Hashtbl.find_opt lifted name with
+      | Some (Expr.Lit (Num n)) -> Int64.bits_of_float n
+      | _ -> Alcotest.fail "Missing Number after datatype restoration"
+    in
+    Alcotest.(check int64)
+      "original model survives distinct context and reset"
+      (Int64.bits_of_float expected)
+      actual
+  in
+  replay a ga na ma;
+  replay b gb nb mb;
+  replay a ga na (run_a Smt.check_sat);
+  (* Bypass the SAT cache to exercise cached query encoding with its original
+     custom datatype declarations, then lift outside any datatype handler. *)
+  replay b gb nb (run_b (fun fs gamma -> Smt.exec_sat fs gamma));
+  replay a ga na ma
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -378,4 +455,6 @@ let tests =
       (with_total single_pair_witness);
     Alcotest.test_case "length-only complete-query witnesses" `Quick
       (with_total length_only_witness);
+    Alcotest.test_case "model datatype context survives reset and caches" `Quick
+      (with_total model_declarations);
   ]
