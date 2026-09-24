@@ -14,6 +14,28 @@ TOTAL = (0, 'All total procedure specs succeeded')
 POST = (1, "Couldn't satisfy postcondition")
 DOMAIN = (1, 'not proved defined')
 CASES = [
+    ('index-ordinary-unsupported.gil', [], (1, 'symbolic UTF-16 indexing requires total-mode domain checks')),
+    ('index-bound-partial-position.gil', ['--total'], DOMAIN),
+    ('index-bound-partial-string.gil', ['--total'], DOMAIN),
+    ('index-symbolic.gil', ['--total'], TOTAL),
+    ('index-wrong-unit.gil', ['--total'], POST),
+    ('index-fractional-discarded.gil', ['--total'], DOMAIN),
+    ('index-fractional-erased.gil', ['--total'], DOMAIN),
+    ('index-nan-discarded.gil', ['--total'], DOMAIN),
+    ('index-nan-erased.gil', ['--total'], DOMAIN),
+    ('index-infinite-discarded.gil', ['--total'], DOMAIN),
+    ('index-infinite-erased.gil', ['--total'], DOMAIN),
+    ('index-negative-infinite-discarded.gil', ['--total'], DOMAIN),
+    ('index-negative-infinite-erased.gil', ['--total'], DOMAIN),
+    ('index-negative-discarded.gil', ['--total'], DOMAIN),
+    ('index-negative-erased.gil', ['--total'], DOMAIN),
+    ('index-end-discarded.gil', ['--total'], DOMAIN),
+    ('index-end-erased.gil', ['--total'], DOMAIN),
+    ('index-proof-self.gil', ['--total'], DOMAIN),
+    ('index-proof-end.gil', ['--total'], DOMAIN),
+    ('index-erased-type.gil', ['--total'], DOMAIN),
+    ('index-bound-erased-type.gil', ['--total'], DOMAIN),
+
     ('erased-rounded-length.gil', ['--total'], DOMAIN),
     ('erased-position.gil', ['--total'], DOMAIN),
     ('proof-partial-rounded-length.gil', ['--total'], DOMAIN),

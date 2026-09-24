@@ -1,0 +1,2 @@
+spec check(s,i) [[ (s == #s) * (i v== #i) * types(#s : Utf16, #i : Num) * (u16-nth(#s,#i) == u16-nth(#s,#i)) ]] [[ (ret == true) ]] normal
+proc check(s,i) { ret := true; return };

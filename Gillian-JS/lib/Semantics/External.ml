@@ -248,13 +248,15 @@ struct
       | "ExecuteStringNth", [ Some (Utf16String string); Some (Num index) ] ->
           let units = Utf16.code_units (Utf16.to_canonical string) in
           if
-            index < 0.
-            || index >= float_of_int (List.length units)
-            || Float.floor index <> index
+            (not (Float.is_finite index))
+            || (not (Float.is_integer index))
+            || index < 0.
           then unsupported ();
+          let offset = Z.of_float index in
+          if Z.geq offset (Z.of_int (List.length units)) then unsupported ();
           Utf16String
             (Utf16.of_canonical
-               (Utf16.of_code_units [ List.nth units (int_of_float index) ]))
+               (Utf16.of_code_units [ List.nth units (Z.to_int offset) ]))
       | "ExecuteStringFromCodeUnits", [ Some (LList units) ] ->
           let units =
             List.map

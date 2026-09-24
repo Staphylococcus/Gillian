@@ -686,8 +686,228 @@ let expression_transport () =
         ])
     values
 
+let with_total f =
+  let old = !Gillian.Utils.Config.Verification.total in
+  Gillian.Utils.Config.Verification.total := true;
+  Fun.protect
+    ~finally:(fun () -> Gillian.Utils.Config.Verification.total := old)
+    f
+
+let checked_index () =
+  let store = Engine.CExprEval.CStore.init [] in
+  List.iter
+    (fun units ->
+      List.iteri
+        (fun i unit ->
+          let term = bin Utf16Nth (value units) (Expr.num (float_of_int i)) in
+          Alcotest.(check bool)
+            "concrete indexed unit" true
+            (Literal.equal (literal [ unit ])
+               (Engine.CExprEval.evaluate_expr store term));
+          with_total (fun () ->
+              check "SMT indexed unit" false [ not_ (eq term (value [ unit ])) ]))
+        units;
+      List.iter
+        (fun index ->
+          let rejected =
+            try
+              ignore
+                (Engine.CExprEval.evaluate_expr store
+                   (bin Utf16Nth (value units) (Expr.num index)));
+              false
+            with Engine.CExprEval.EvaluationError _ -> true
+          in
+          Alcotest.(check bool) "invalid concrete index rejected" true rejected)
+        [
+          nan;
+          infinity;
+          neg_infinity;
+          -1.;
+          0.5;
+          float_of_int (List.length units);
+          Float.max_float;
+        ])
+    values;
+  with_total (fun () ->
+      let types () =
+        let g = gamma () in
+        Gamma.update g "#length_index" NumberType;
+        g
+      in
+      let index = Expr.LVar "#length_index" in
+      let pos = Expr.UnOp (ToIntOp, index) in
+      let size = length a in
+      let offset = Expr.UnOp (NumToInt, pos) in
+      let inside =
+        [
+          not_ (bin FLessThan pos (Expr.num 0.));
+          not_ (bin FLessThanEqual (Expr.UnOp (IntToNum, size)) pos);
+        ]
+      in
+      check ~types "rounded guard implies exact index bound" false
+        (inside @ [ not_ (bin ILessThan offset size) ]);
+      check ~types "canonical complement rejects out of range" false
+        (inside @ [ bin ILessThanEqual size offset ]);
+      check ~types "checked lookup produces one unit" false
+        (inside @ [ not_ (eq (length (bin Utf16Nth a pos)) (Expr.int 1)) ]);
+      (* Exercise the refined bound with raw fractional/negative Numbers too.
+       The nonnegative guard is necessary: trunc(-0.5) = 0 when N = 0. *)
+      List.iter
+        (fun (n, p) ->
+          let actual = bin ILessThan (Expr.UnOp (NumToInt, Expr.num p)) size in
+          let expected = Z.lt (Z.of_float p) n in
+          check ~types "exact bound retains rounding boundary" false
+            [
+              eq size (Expr.Lit (Int n));
+              (if expected then not_ actual else actual);
+            ];
+          check ~types "bound complement retains rounding boundary" false
+            [
+              eq size (Expr.Lit (Int n));
+              (let complement =
+                 bin ILessThanEqual size (Expr.UnOp (NumToInt, Expr.num p))
+               in
+               if expected then complement else not_ complement);
+            ])
+        [
+          (Z.zero, -0.5);
+          (Z.zero, -1.);
+          (Z.zero, -0.);
+          (Z.one, 0.5);
+          (Z.of_int 2, 1.5);
+          (Z.of_int 65536, 65535.);
+          (Z.of_string "9007199254740993", 9007199254740992.);
+          (Z.of_string "9007199254740995", 9007199254740996.);
+          (Z.shift_left Z.one 1024, Float.max_float);
+        ])
+
+let index_conversion_boundaries () =
+  let store = Engine.CExprEval.CStore.init [] in
+  List.iter
+    (fun number ->
+      let term = Expr.UnOp (NumToInt, Expr.num number) in
+      let expected = Literal.Int (Z.of_float number) in
+      Alcotest.(check bool)
+        "exact concrete integer conversion" true
+        (Literal.equal expected (Engine.CExprEval.evaluate_expr store term));
+      check "guarded integer conversion keeps boundary" false
+        [ not_ (eq term (Expr.Lit expected)) ])
+    [
+      -.Float.max_float;
+      -65536.5;
+      -1.5;
+      -0.5;
+      -5e-324;
+      -0.;
+      0.;
+      5e-324;
+      0.5;
+      1.5;
+      65535.;
+      65535.5;
+      65536.;
+      65536.5;
+      9007199254740992.;
+      Float.max_float;
+    ]
+
+let index_models () =
+  with_total (fun () ->
+      let gamma = gamma () in
+      Gamma.update gamma "#length_index" NumberType;
+      let gamma = Gamma.as_hashtbl gamma in
+      let index = Expr.LVar "#length_index" in
+      let pos = Expr.UnOp (ToIntOp, index) in
+      let nth = bin Utf16Nth a pos in
+      let inside =
+        [
+          not_ (bin FLessThan pos (Expr.num 0.));
+          not_ (bin FLessThanEqual (Expr.UnOp (IntToNum, length a)) pos);
+        ]
+      in
+      let models =
+        List.map
+          (fun (id, extra) ->
+            Format.printf "Indexed witness: %s@." id;
+            let constraints = inside @ [ eq b nth ] @ extra in
+            let model =
+              match Smt.exec_sat (Expr.Set.of_list constraints) gamma with
+              | Some model -> model
+              | None -> Alcotest.fail ("Lost indexed witness: " ^ id)
+            in
+            let lifted = Hashtbl.create 3 in
+            Smt.lift_model model gamma (Hashtbl.add lifted)
+              (Expr.Set.of_list [ a; b; index ]);
+            let get name =
+              match Hashtbl.find_opt lifted name with
+              | Some (Expr.Lit value) -> value
+              | _ -> Alcotest.fail "Missing indexed model value"
+            in
+            let bindings =
+              List.map
+                (fun name -> (name, get name))
+                [ "#utf16_a"; "#utf16_b"; "#length_index" ]
+            in
+            let store = Engine.CExprEval.CStore.init bindings in
+            let visitor =
+              object
+                inherit [_] Visitors.endo
+                method! visit_LVar () _ name = Expr.PVar name
+              end
+            in
+            List.iter
+              (fun expr ->
+                match
+                  Engine.CExprEval.evaluate_expr store
+                    (visitor#visit_expr () expr)
+                with
+                | Bool true -> ()
+                | _ -> Alcotest.fail "Indexed witness failed concrete replay")
+              constraints;
+            let units name =
+              match get name with
+              | Utf16String v ->
+                  `List
+                    (List.map
+                       (fun u -> `Int u)
+                       (Codec.code_units (Codec.to_canonical v)))
+              | _ -> Alcotest.fail "Indexed witness lost string type"
+            in
+            let number =
+              match get "#length_index" with
+              | Num v -> v
+              | _ -> Alcotest.fail "Indexed witness lost Number type"
+            in
+            `Assoc
+              [
+                ("id", `String id);
+                ("units", units "#utf16_a");
+                ("resultUnits", units "#utf16_b");
+                ( "indexBits",
+                  `String (Printf.sprintf "%016Lx" (Int64.bits_of_float number))
+                );
+              ])
+          [
+            ("inside", []);
+            ( "index-one",
+              [
+                bin ValueEqual index (Expr.num 1.);
+                eq a (value [ 0xd83d; 0xde00 ]);
+              ] );
+            ("lone-high", [ eq b (value [ 0xd800 ]) ]);
+            ("lone-low", [ eq b (value [ 0xdc00 ]) ]);
+            ("wrong-unit", [ not_ (eq b (value [ 65 ])) ]);
+          ]
+      in
+      match Sys.getenv_opt "GILLIAN_UTF16_INDEX_MODELS" with
+      | None -> ()
+      | Some path -> Yojson.Safe.to_file path (`List models))
+
 let tests =
   [
+    ("checked index domain and bounds", `Quick, checked_index);
+    ("index conversion boundaries", `Quick, index_conversion_boundaries);
+    ("indexed unit models", `Quick, index_models);
     ("literal domain and transport", `Quick, literal_domain);
     ("concrete and SMT agreement", `Quick, concrete_agreement);
     ("arbitrary typed sequences", `Quick, arbitrary_values);

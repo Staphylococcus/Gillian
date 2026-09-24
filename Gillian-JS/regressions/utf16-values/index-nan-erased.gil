@@ -1,0 +1,2 @@
+spec check() [[ emp ]] [[ (ret == true) ]] normal
+proc check() { ret := (u16-nth(u16"😀", nan) == u16-nth(u16"😀", nan)); return };

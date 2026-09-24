@@ -193,31 +193,16 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
             unsupported "integer shift domains are not yet checked."
         | StrCat | StrLess -> both StringType
         | Utf16Cat | Utf16Less -> both Utf16Type
-        | Utf16Nth -> (
+        | Utf16Nth ->
             List.iter need
               [
                 typ left Utf16Type;
                 typ right NumberType;
                 Expr.UnOp (IsInt, right);
                 Expr.BinOp (Lit (Num 0.), FLessThanEqual, right);
-              ];
-            let offset =
-              match evaluate right with
-              | Lit (Num n) when Float.is_finite n && Float.is_integer n ->
-                  Expr.Lit (Int (Z.of_float n))
-              | _ ->
-                  unsupported
-                    "symbolic UTF-16 indexing needs the P06 index bridge."
-            in
-            List.iter need
-              [
-                bounded offset;
-                Expr.BinOp (offset, ILessThan, UnOp (Utf16Len, left));
-              ];
-            (* Legacy JSIL indexing stays concrete until the P06 domain proof. *)
-            match evaluate left with
-            | Lit (Utf16String _) -> ()
-            | _ -> unsupported "UTF-16 indexing requires a concrete string.")
+                Expr.BinOp
+                  (UnOp (NumToInt, right), ILessThan, UnOp (Utf16Len, left));
+              ]
         | FPlus
         | FMinus
         | FTimes

@@ -13,9 +13,21 @@ short-circuit operand exercise the existing domain rules. Core units cover all
 code-unit boundaries, wrapped identities, parser/JSON transport, concrete/SMT
 agreement and actual `Smt.lift_model` recovery followed by concrete GIL replay.
 
-This is the typed GIL primitive layer. JS literals, symbolic admission, helpers,
-property keys and runtime `typeof` still use the existing byte-backed JS values.
-Their migration must preserve the same JS identity, not introduce independent
-unit variables. Actual JS `s.length` and its binary64 conversion remain open.
+Actual JS literals, admission, properties, typeof, length and charAt now use
+this typed layer. `u16-nth` is checked in total mode: its index must be finite,
+integral, nonnegative and below the mathematical sequence length. The symbolic
+result is exactly one native code unit. Concrete evaluation compares exact
+integer bounds before host conversion; no symbolic sequence cap is imposed.
+
+The 45 controls include arbitrary valid-index proofs, a wrong unit, invalid
+fractional/NaN/infinite/negative/end indices, discarded/self-compared accesses,
+self-supporting proof terms and partial bound operands. Program-variable and
+logical-variable types are stated explicitly in the positive primitive specs;
+their equality already entails the same types, so this does not narrow inputs.
+Ordinary verification rejects the new SMT encoding because its partial-operation
+domain checks have not been audited. Core controls cover guarded conversion
+boundaries, rounding/overflow, exact negated bounds and five lifted index/unit
+witnesses with concrete replay. Full initialized caller context and the remaining
+string operations stay separate roadmap work.
 
 Run `python3 run.py` with `GILLIAN_JS` set to the built backend launcher.

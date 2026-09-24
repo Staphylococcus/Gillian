@@ -107,6 +107,26 @@ let integer_wrap ~width ~signed value =
     (ite (fp_un "fp.isZero" truncated) (number_literal 0.) truncated)
     modular
 
+(* Exact truncation on finite binary64 values. Partial source operators must
+   establish their domain through Totality before using this SMT extension. *)
+let number_to_integer value =
+  let small =
+    bool_and
+      (fp_bin "fp.leq" (number_literal 0.) value)
+      (fp_bin "fp.lt" value (number_literal 65536.))
+  in
+  (* In this guarded interval unsigned 16-bit RTZ conversion is exact. The
+     fallback retains every other finite Number; this is not an input bound. *)
+  ite small
+    (app_ "bv2int"
+       [
+         app
+           (List [ atom "_"; atom "fp.to_ubv"; atom "16" ])
+           [ atom "RTZ"; value ];
+       ])
+    (real_to_int
+       (fp_un "fp.to_real" (app_ "fp.roundToIntegral" [ atom "RTZ"; value ])))
+
 module Variant = struct
   module type S = sig
     val name : string
@@ -1204,6 +1224,14 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- left = get_utf16 p1 in
       let>- right = get_utf16 p2 in
       seq_concat [ left.expr; right.expr ] >- Utf16Type
+  | Utf16Nth ->
+      if not !Config.Verification.total then
+        exceptf
+          "SMT encoding: symbolic UTF-16 indexing requires total-mode domain \
+           checks";
+      let>- str = get_utf16 p1 in
+      let>- index = get_num p2 in
+      seq_unit (seq_nth str.expr (number_to_integer index.expr)) >- Utf16Type
   | StrNth ->
       require_definition Axiomatised_operations.def_snth;
       let>- str' = get_string p1 in
@@ -1212,7 +1240,6 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       res >- StringType
   | FMod
   | Utf16Less
-  | Utf16Nth
   | StrLess
   | BitwiseAnd
   | BitwiseOr
@@ -1356,9 +1383,9 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       Axiomatised_operations.lrev <| le.expr >- ListType
   | NumToInt ->
       (* Total-mode execution checks finiteness before evaluating this partial
-         conversion. IEEE truncation followed by exact fp.to_real produces
-         the required integer on finite values. Logical nonfinite terms have
-         an unspecified integer extension; they cannot bypass that execution
+         conversion. The guarded native conversion and its exact fp.to_real
+         fallback produce the required integer on finite values. Logical
+         nonfinite terms have an unspecified integer extension; they cannot bypass that execution
          check. Keep the previous restriction in ordinary mode, whose domain
          checks have not been audited. Nonfinite literals remain rejected. *)
       (match e with
@@ -1368,9 +1395,7 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       | _ when !Config.Verification.total -> ()
       | _ -> exceptf "SMT encoding: NumToInt requires a finite concrete operand");
       let>- le = get_num le in
-      real_to_int
-        (fp_un "fp.to_real" (app_ "fp.roundToIntegral" [ atom "RTZ"; le.expr ]))
-      >- IntType
+      number_to_integer le.expr >- IntType
   | IntToNum ->
       let>- le = get_int le in
       let general = to_number [ rne; int_to_real le.expr ] in
@@ -1575,7 +1600,36 @@ let rec encode_logical_expression
       make_const ~typ kind var
   | ALoc var -> native_const ObjectType var
   | PVar _ -> exceptf "HORROR: Program variable in pure formula"
+  | UnOp
+      ( Not,
+        BinOp
+          ( (UnOp (NumToInt, _) as offset),
+            ILessThan,
+            (UnOp (Utf16Len, _) as size) ) ) ->
+      f (BinOp (size, ILessThanEqual, offset))
   | UnOp (op, le) -> encode_unop ~llen_lvars ~e:le op (f le)
+  | BinOp
+      ( (UnOp (Utf16Len, _) as size),
+        ILessThanEqual,
+        (UnOp (NumToInt, pos) as offset) ) ->
+      let>- offset = get_int (f offset) in
+      let>- size_value = get_int (f size) in
+      let>- pos_value = get_num (f pos) in
+      let>- outside =
+        get_bool (f (BinOp (UnOp (IntToNum, size), FLessThanEqual, pos)))
+      in
+      (* If finite nonnegative p < RNE(N), trunc(p) < N: otherwise
+         N <= trunc(p) <= p and monotonic RNE gives RNE(N) <= p.
+         The redundant conjunct exposes this contradiction in negated bound
+         obligations. Positive bounds retain their direct integer encoding. *)
+      bool_and
+        (num_leq size_value.expr offset.expr)
+        (bool_not
+           (bool_and (fp_finite pos_value.expr)
+              (bool_and
+                 (fp_bin "fp.leq" (number_literal 0.) pos_value.expr)
+                 (bool_not outside.expr))))
+      >- BooleanType
   | BinOp ((UnOp (IntToNum, UnOp (Utf16Len, _)) as len), FLessThanEqual, pos) ->
       let>- len = get_num (f len) in
       let>- pos = get_num (f pos) in

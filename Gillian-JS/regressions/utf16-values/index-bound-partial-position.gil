@@ -1,0 +1,2 @@
+spec check(x) [[ (x == #x) * types(#x : List) ]] [[ (ret == true) ]] normal
+proc check(x) { assert ((as_int(l-nth(x,0i)) i< u16-len(u16"")) == (as_int(l-nth(x,0i)) i< u16-len(u16""))); ret := true; return };

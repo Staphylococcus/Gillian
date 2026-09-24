@@ -1,6 +1,6 @@
 # JavaScript UTF-16 value mapping
 
-These 28 controls compile actual JavaScript and verify its runtime bodies in
+These 30 controls compile actual JavaScript and verify its runtime bodies in
 `--total` mode. They cover arbitrary string concatenation, prefix cancellation,
 `typeof`, symbolic property mutation/read, numeric property keys, and a wrong
 concatenation result. Inputs are arbitrary represented values, not finite choices.
@@ -23,9 +23,8 @@ Numeric formatting/parsing reuse the existing concrete routines and sound SMT
 over-approximations in the new domain. Literal parser facts accompany typed
 literals; the formatter roundtrip preserves numeric equality, including the NaN
 case. Symbolic formatting is not claimed to produce an exact decimal spelling.
-Legacy JSIL string ordering/indexing has concrete typed operations; unresolved
-symbolic operations remain unsupported. Actual JS length now uses the typed
-length primitive; character access and trim still have concrete-only externals.
+Actual JS length and charAt use typed checked primitives. Remaining symbolic
+ordering, numeric code-unit, slicing and trim support stay separate obligations.
 
 The length controls explicitly import the actual `String.jsil` runtime body.
 An unrestricted `s.length` proof returns `int_to_num(u16-len(s))`; it does not
@@ -41,13 +40,17 @@ Supporting checks also live in the core UTF-16 cases, frontend UTF-16/property
 units, and existing JS code-unit, numeric, object, callback and serializer suites.
 Run `python3 run.py` with `GILLIAN_JS` set to the built backend launcher.
 
-The `charat-lookup-unsupported.js` caller uses the actual builtin name/scope and
-explicit prototype resources. Its arbitrary string/Number proof must remain
-incomplete at `ExecuteStringNth`; assumed metadata is not initialization
-proof. Core UTF-16 controls separately require native solver model validation:
-a valid outside witness replays, an invalid inside witness aborts analysis,
-and a subsequent ordinary query still succeeds. No symbolic `charAt` theorem
-is claimed by these controls.
+The `charat.js` caller executes the actual builtin with explicit method/scope
+resources. It proves the correct code unit or empty string for arbitrary strings
+and all Numbers, preserving ToInteger coercion and both range branches. Wrong
+empty outcomes and a swapped surrogate claim reject. Initialization and reusable
+metadata context are still P06.2b, not assumed proved by this caller theorem.
+Core controls retain invalid-model rejection/recovery and replay five new
+index/unit witnesses in concrete GIL. The index-one witness fixes a concrete
+surrogate pair; four other queries retain symbolic index/string search. The PoC
+requires native replay of those witnesses and all earlier artifacts. Some broad
+false caller claims remain solver-incomplete and are retained there as diagnostic
+evidence; no unknown result is counted as proof.
 
 The single-comparison and full negative/outside/inside conditional controls
 prove over arbitrary strings and every ToInteger position. Each wrong outcome
@@ -62,4 +65,5 @@ comparison keeps the earlier single-comparison proof complete. The UTF-16
 primitive suite rejects wrong types and partial proof operands; core tests
 retain conversion boundaries, exceptional-number parity, all three lifted
 outcomes and invalid-model rejection/recovery. No input cap or helper assumption
-is introduced. Initialized `charAt` and checked lookup remain P06.2.
+is introduced. Checked lookup is complete; initialized/reusable context remains
+P06.2b. The new symbolic indexing encoding is restricted to total mode.

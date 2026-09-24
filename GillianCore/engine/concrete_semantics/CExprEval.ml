@@ -299,13 +299,18 @@ let rec evaluate_binop
           let units = Utf16.code_units (Utf16.to_canonical (as_utf16 lit1)) in
           let index = as_num lit2 in
           if
-            (not (Float.is_integer index))
+            (not (Float.is_finite index))
+            || (not (Float.is_integer index))
             || index < 0.
-            || index >= float_of_int (List.length units)
           then evalerr "UTF-16 index out of bounds";
+          let offset = Z.of_float index in
+          if Z.geq offset (Z.of_int (List.length units)) then
+            evalerr "UTF-16 index out of bounds";
+          (* The materialized list bounds the host conversion, not the symbolic
+             UTF-16 domain. Compare exact integers before converting. *)
           Utf16String
             (Utf16.of_canonical
-               (Utf16.of_code_units [ List.nth units (int_of_float index) ]))
+               (Utf16.of_code_units [ List.nth units (Z.to_int offset) ]))
       | Utf16Cat -> Utf16String (Utf16.concat (as_utf16 lit1) (as_utf16 lit2)))
 
 and evaluate_nop (nop : NOp.t) (ll : Literal.t list) : CVal.M.t =

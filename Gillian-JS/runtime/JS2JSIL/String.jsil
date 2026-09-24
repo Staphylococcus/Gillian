@@ -155,7 +155,7 @@ proc SP_charAt (xsc, vthis, position) {
 	empt:	ret := "";
 				goto rlab;
 
-	fll:	ret := extern ExecuteStringNth (S, pos);
+	fll:	ret := s-nth (S, pos);
 	rlab: return;
 
 	elab: throw

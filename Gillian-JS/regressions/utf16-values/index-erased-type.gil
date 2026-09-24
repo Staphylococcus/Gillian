@@ -1,0 +1,2 @@
+spec check(s) [[ (s == #s) * types(#s : Str) ]] [[ (ret == true) ]] normal
+proc check(s) { ret := (u16-nth(s,0.0) == u16-nth(s,0.0)); return };

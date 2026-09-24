@@ -1,0 +1,2 @@
+spec check(s) [[ (s == #s) * types(#s : Str) ]] [[ (ret == true) ]] normal
+proc check(s) { assert ((as_int(0.0) i< u16-len(s)) == (as_int(0.0) i< u16-len(s))); ret := true; return };
