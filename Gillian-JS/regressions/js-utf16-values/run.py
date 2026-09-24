@@ -25,6 +25,8 @@ CASES = [
     ('comparison-numbers-leq-wrong.js', ['--total', '--proc=check'], POST),
     ('charat-direct-twice.js', ['--total', '--proc=check'], TOTAL),
     ('charat-direct-twice-wrong.js', ['--total', '--proc=check'], POST),
+    ('charat-twice.js', ['--total', '--proc=check', '--proc=twice', '--proof-dependency=twice:check'], TOTAL),
+    ('charat-twice-wrong.js', ['--total', '--proc=check', '--proc=twice', '--proof-dependency=twice:check'], POST),
     ('charat-twice.js', ['--total', '--proc=twice'], (124, 'check has not passed every totality proof case in this run')),
     ('charat-initialize.js', ['--total', '--closed-entry', '--proc=main'], (0, 'Closed entry postcondition succeeded')),
     ('charat-initialized-empty.js', ['--total', '--closed-entry', '--proc=main'], (0, 'Closed entry postcondition succeeded')),
@@ -65,19 +67,26 @@ if __name__ == '__main__':
         directory = output / f'{index:02d}-{source.stem}'
         directory.mkdir()
         command = COMMAND + ['verify', str(source), '--logging=normal'] + options
-        record = {'file': file, 'command': command, 'expectedExit': expected[0],
+        # Keep the existing per-procedure allowance when a case also checks
+        # its callee before summary reuse. SMT query limits are unchanged.
+        timeout_seconds = 45 * max(1, sum(o.startswith('--proc=') for o in options))
+        record = {'file': file, 'timeoutSeconds': timeout_seconds, 'command': command, 'expectedExit': expected[0],
                   'expectedMessage': expected[1],
                   'sourceSha256': hashlib.sha256(source.read_bytes()).hexdigest()}
         try:
             run = subprocess.run(command, cwd=directory, capture_output=True,
-                                 text=True, errors='replace', timeout=45)
+                                 text=True, errors='replace', timeout=timeout_seconds)
             text = run.stdout + run.stderr
             (directory / 'output.log').write_text(text)
             passed = run.returncode == expected[0] and expected[1] in text
             if expected[0] != 0:
                 passed &= TOTAL[1] not in text
             record |= {'passed': passed, 'exitCode': run.returncode, 'output': text}
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as error:
+            # Preserve partial diagnostics from rejected runs too.
+            output_text = ''.join(part.decode(errors='replace') if isinstance(part, bytes)
+                                  else part or '' for part in [error.stdout, error.stderr])
+            (directory / 'output.log').write_text(output_text)
             record |= {'passed': False, 'reason': 'timeout'}
         results.append(record)
         print(f'{file}: {"PASS" if record["passed"] else "FAIL"}', flush=True)

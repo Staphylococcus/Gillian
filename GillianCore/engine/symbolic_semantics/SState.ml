@@ -270,7 +270,8 @@ module Make (SMemory : SMemory.S) :
               | Lit _ -> false
               | _ when Expr.is_boolean_expr left ->
                   FOSolver.check_entailment SS.empty pfs
-                    [ (if skip_value then left else Expr.negate left) ] gamma
+                    [ (if skip_value then left else Expr.negate left) ]
+                    gamma
               | _ -> false
             in
             if skips_right then Expr.bool (op <> And)
@@ -300,7 +301,14 @@ module Make (SMemory : SMemory.S) :
           let msg = Fmt.str "Couldn't reduce %a - %s" Expr.pp expr msg in
           raise (Internal_State_Error ([ StateErr.EOther msg ], state))
     in
-    symb_evaluate_expr e
+    (* Pure formulae have no store substitution to perform. Reduce them first
+       without asking whether each Boolean RHS is skipped. If a partial term
+       needs path-sensitive skipping, retain the existing evaluator instead. *)
+    if !Config.Verification.total && SS.is_empty (Expr.pvars e) then
+      match Reduction.reduce_lexpr ~gamma ~reduce_lvars:true ~pfs e with
+      | result -> result
+      | exception Reduction.ReductionException _ -> symb_evaluate_expr e
+    else symb_evaluate_expr e
 
   let get_store ({ store; _ } : t) : store_t = store
   let set_store (state : t) (store : store_t) : t = { state with store }

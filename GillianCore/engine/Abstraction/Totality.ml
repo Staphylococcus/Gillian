@@ -43,23 +43,31 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
   let bounded e =
     Expr.BinOp (e, ILessThanEqual, Lit (Int (Z.of_int max_int)))
   in
+  let unsupported_on_guard guard message =
+    if not (proves (Expr.UnOp (Not, guard))) then unsupported message
+  in
   let rec check guard expr =
     let need condition = require expr (Expr.BinOp (guard, Impl, condition)) in
     let children xs = List.iter (check guard) xs in
     match expr with
     | Expr.Lit (Loc loc)
       when !Config.Verification.closed_entry && Names.is_lloc_name loc ->
-        unsupported "closed entry cannot name a generated concrete location."
+        unsupported_on_guard guard
+          "closed entry cannot name a generated concrete location."
     | Expr.Lit (Constant c) when Option.is_none (Literal.static_constant c) ->
-        unsupported "nondeterministic runtime constants need an explicit model."
+        unsupported_on_guard guard
+          "nondeterministic runtime constants need an explicit model."
     | Expr.BinOp (left, ((And | Or | Impl) as op), right) ->
         check guard left;
         need (typ left BooleanType);
         let condition = if op = Or then Expr.UnOp (Not, left) else left in
         let branch = Expr.BinOp (guard, And, condition) in
-        if not (proves (Expr.UnOp (Not, branch))) then (
-          check branch right;
-          require expr (Expr.BinOp (branch, Impl, typ right BooleanType)))
+        (* Every required domain remains guarded. A supported expression does
+           not need a separate reachability query: its domain implications
+           suffice, including when the branch is dead. Only an unsupported
+           operation or a concrete-only bridge needs to establish deadness. *)
+        check branch right;
+        require expr (Expr.BinOp (branch, Impl, typ right BooleanType))
     | BinOp (list, LstNth, index) ->
         children [ list; index ];
         List.iter need
@@ -95,28 +103,29 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
               (Expr.BinOp (start, IPlus, count), ILessThanEqual, length list);
           ]
     | BinOp (string, StrNth, index) ->
-        children [ string; index ];
-        List.iter need
-          [
-            typ string StringType;
-            typ index NumberType;
-            Expr.UnOp (IsInt, index);
-            Expr.BinOp (Lit (Num 0.), FLessThanEqual, index);
-          ];
-        let offset =
-          match evaluate index with
-          | Expr.Lit (Num n) when Float.is_finite n && Float.is_integer n ->
-              Expr.Lit (Int (Z.of_float n))
-          | _ ->
-              unsupported
-                "symbolic byte indexing needs a checked numeric/index bridge."
-        in
-        List.iter need
-          [
-            bounded offset;
-            Expr.BinOp
-              (offset, ILessThan, length (Expr.UnOp (StrToBytes, string)));
-          ]
+        if not (proves (Expr.UnOp (Not, guard))) then (
+          children [ string; index ];
+          List.iter need
+            [
+              typ string StringType;
+              typ index NumberType;
+              Expr.UnOp (IsInt, index);
+              Expr.BinOp (Lit (Num 0.), FLessThanEqual, index);
+            ];
+          let offset =
+            match evaluate index with
+            | Expr.Lit (Num n) when Float.is_finite n && Float.is_integer n ->
+                Expr.Lit (Int (Z.of_float n))
+            | _ ->
+                unsupported
+                  "symbolic byte indexing needs a checked numeric/index bridge."
+          in
+          List.iter need
+            [
+              bounded offset;
+              Expr.BinOp
+                (offset, ILessThan, length (Expr.UnOp (StrToBytes, string)));
+            ])
     | BinOp (left, (IDiv | IMod), right) ->
         children [ left; right ];
         List.iter need
@@ -141,7 +150,8 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
                 Expr.BinOp (Lit (Num (-.Float.max_float)), FLessThanEqual, e);
                 Expr.BinOp (e, FLessThanEqual, Lit (Num Float.max_float));
               ]
-        | SetToList -> unsupported "set expressions in executable code."
+        | SetToList ->
+            unsupported_on_guard guard "set expressions in executable code."
         | Car | Cdr -> assert false
         | FUnaryMinus
         | BitwiseNot
@@ -190,7 +200,8 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
         | SignedRightShiftL
         | UnsignedRightShiftL ->
             both IntType;
-            unsupported "integer shift domains are not yet checked."
+            unsupported_on_guard guard
+              "integer shift domains are not yet checked."
         | StrCat | StrLess -> both StringType
         | Utf16Cat | Utf16Less -> both Utf16Type
         | Utf16Nth ->
@@ -221,7 +232,7 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
         | SetMem when proof -> need (typ right SetType)
         | (SetSub | SetDiff) when proof -> both SetType
         | SetMem | SetSub | SetDiff ->
-            unsupported "set expressions in executable code."
+            unsupported_on_guard guard "set expressions in executable code."
         | And | Or | Impl | LstNth | LstRepeat | StrNth | IDiv | IMod ->
             assert false)
     | NOp (LstCat, xs) ->
@@ -242,7 +253,9 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
     | ALoc _
     | ForAll _
     | Exists _
-    | Cases _ -> unsupported "logical-only expressions in executable code."
+    | Cases _ ->
+        unsupported_on_guard guard
+          "logical-only expressions in executable code."
   in
   check (Expr.Lit (Bool true)) expr
 

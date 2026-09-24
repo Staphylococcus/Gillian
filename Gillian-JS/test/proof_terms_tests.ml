@@ -150,6 +150,65 @@ let path_guarded_variable () =
     "path facts skip an uninitialized variable" true
     (Expr.equal (State.eval_expr state (bin And left right)) Expr.false_)
 
+let path_guarded_pure_operand () =
+  let n = Expr.LVar "#n" in
+  let state = Option.get (State.assume_t (State.init ()) n Type.IntType) in
+  let state =
+    Option.get (State.assume_a state [ bin ILessThanEqual (Expr.int 2) n ])
+  in
+  let dead = bin ILessThan n (Expr.int 1) in
+  let live = Expr.UnOp (Not, dead) in
+  List.iter
+    (fun (op, skipped, required, expected) ->
+      Alcotest.(check bool)
+        "pure partial operand remains skipped by path facts" true
+        (Expr.equal (State.eval_expr state (bin op skipped invalid)) expected);
+      let failed =
+        try
+          ignore (State.eval_expr state (bin op required invalid));
+          false
+        with State.Internal_State_Error _ -> true
+      in
+      Alcotest.(check bool)
+        "required pure partial operand still fails" true failed)
+    [
+      (And, dead, live, Expr.false_);
+      (Or, live, dead, Expr.true_);
+      (Impl, dead, live, Expr.true_);
+    ]
+
+let guarded_unsupported_operand () =
+  let n = Expr.LVar "#n" in
+  let state = Option.get (State.assume_t (State.init ()) n Type.IntType) in
+  let state =
+    Option.get (State.assume_a state [ bin ILessThanEqual (Expr.int 2) n ])
+  in
+  let dead = bin ILessThan n (Expr.int 1) in
+  let live = Expr.UnOp (Not, dead) in
+  let shift =
+    bin Equal (bin LeftShift (Expr.int 1) (Expr.int 1)) (Expr.int 2)
+  in
+  let check =
+    Totality.check_proof_expression ~context:"Guarded unsupported operand"
+      ~evaluate:(State.eval_expr state) ~assertion:(fun condition ->
+        State.assert_a state [ condition ])
+  in
+  List.iter
+    (fun (op, skipped, required) ->
+      check (bin op skipped shift);
+      let rejected =
+        try
+          check (bin op required shift);
+          false
+        with
+        | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError msg) ->
+          String.ends_with ~suffix:"integer shift domains are not yet checked."
+            msg
+      in
+      Alcotest.(check bool)
+        "unreachable unsupported operands alone may be skipped" true rejected)
+    [ (And, dead, live); (Or, live, dead); (Impl, dead, live) ]
+
 let failed_assumption () =
   let state = State.init () in
   let failed =
@@ -427,6 +486,10 @@ let () =
             (with_total skipped_variable);
           Alcotest.test_case "path-guarded variable substitution" `Quick
             (with_total path_guarded_variable);
+          Alcotest.test_case "path-guarded pure partial operand" `Quick
+            (with_total path_guarded_pure_operand);
+          Alcotest.test_case "path-guarded unsupported operand" `Quick
+            (with_total guarded_unsupported_operand);
           Alcotest.test_case "failed assumption" `Quick
             (with_total failed_assumption);
           Alcotest.test_case "infeasible assumption" `Quick

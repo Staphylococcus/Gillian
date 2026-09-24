@@ -1,6 +1,6 @@
 # JavaScript UTF-16 value mapping
 
-These 39 controls compile actual JavaScript and verify its runtime bodies in
+These 41 controls compile actual JavaScript and verify its runtime bodies in
 `--total` mode. They cover arbitrary string concatenation, prefix cancellation,
 `typeof`, symbolic property mutation/read, numeric property keys, and a wrong
 concatenation result. They include arbitrary-input theorems and separate concrete
@@ -80,10 +80,12 @@ NaN/infinite positions, ordinary units and surrogates. Wrong output, overwritten
 method and changed method length must fail their postconditions. The native PoC
 replay checks ten executable ASTs and both positive and mutated behaviors.
 
-The summary-consuming `charat-twice.js` is registered only as an unchecked-callee
-rejection (`--proc=twice`). Selecting both procedures and their proof dependency
-still returns SMT unknown during result-summary definedness; that diagnostic
-remains P06.2b2, not a positive proof. Native two-call parity is supplementary.
+The summary-consuming `charat-twice.js` now has both a positive control selecting
+and proving `check` and `twice` in dependency order, and the original unchecked-
+callee rejection (`--proc=twice`). The wrong wrapper executes both calls and
+then returns a Number in place of the required string; it must fail its
+postcondition. Both share the unrestricted string/Number input precondition.
+Independent-input direct calls remain solver-incomplete P06.2b2b work.
 P06.2b1 passes the PoC frozen selection: 139 controls across six affected
 jobs, including all 37 cases here, plus all required native replays and 120/120
 PoC tests. Repeated-call composition remains P06.2b2.
@@ -97,3 +99,19 @@ changed by these two controls.
 The affected frozen selection passes 141 controls across six jobs, including all
 39 controls here, plus the six model artifacts, context/native replay and
 120/120 PoC tests. All 46,982 frozen files remained unchanged.
+
+P06.2b2b1 discharges guarded operand domains without eager
+reachability checks for supported expressions. Unsupported operations and the
+concrete byte-index bridge still require proof of deadness before skipping.
+`SState.eval_expr` reduces formulas without program variables directly, retaining
+the old path-sensitive evaluator if reduction encounters a partial term. The
+full frozen PoC baseline passes 964 controls in 109 jobs, including all 41
+controls here, 19 proof-term units, all six model replays and 120/120 PoC tests.
+All 46,985 inputs remained unchanged. Earlier witness-unknown, case-timeout and
+disk-exhaustion runs remain rejected and retained in the PoC summary report.
+No new operation or domain assumption is added; independent input pairs remain
+P06.2b2b work.
+
+The runner allows 45 seconds per selected procedure (90 seconds for the two
+checked helper/caller cases), recording each budget in its result. SMT query
+limits are unchanged. Timeouts retain partial logs and fail acceptance.
