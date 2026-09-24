@@ -21,10 +21,11 @@ val proves_unsat : Expr.Set.t -> (string, Type.t) Hashtbl.t -> bool
 
 (** Complete-query satisfiability, with bounded existential witness searches for
     total-mode queries with multiple UTF-16/Number variables or a direct typed
-    rounded-length link. Guesses never enter symbolic state; only native
-    validated SAT can succeed early. Failed guesses fall back to the original
-    query with its unchanged unknown/error policy. Shared by feasibility and
-    entailment so neither path bypasses the same full-query guarantees. *)
+    rounded-length link or comparison. Guesses never enter symbolic state; only
+    native validated SAT can succeed early. Failed guesses fall back to the
+    original query with its unchanged unknown/error policy. Shared by
+    feasibility and entailment so neither path bypasses the same full-query
+    guarantees. *)
 val check_sat :
   Expr.Set.t -> (string, Type.t) Hashtbl.t -> Sexplib.Sexp.t option
 

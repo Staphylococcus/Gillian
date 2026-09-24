@@ -2087,7 +2087,23 @@ let seeded_model fs gamma =
     | _ -> false)
     && Hashtbl.find_opt gamma string = Some Type.Utf16Type
   in
-  let linked_strings =
+  (* Reduction can inline the length alias before a branch query. Recognise
+     the same rounded-length observation in a direct numeric comparison; this
+     only selects an optional search, never adds a symbolic-state fact. *)
+  let rounded_string expression acc =
+    match expression with
+    | Expr.UnOp (IntToNum, UnOp (Utf16Len, LVar string))
+      when Hashtbl.find_opt gamma string = Some Type.Utf16Type ->
+        SS.add string acc
+    | _ -> acc
+  in
+  let rec compared_strings = function
+    | Expr.UnOp (Not, formula) -> compared_strings formula
+    | BinOp (left, (FLessThan | FLessThanEqual), right) ->
+        rounded_string right (rounded_string left SS.empty)
+    | _ -> SS.empty
+  in
+  let length_strings =
     Expr.Set.fold
       (fun assertion acc ->
         match assertion with
@@ -2100,14 +2116,14 @@ let seeded_model fs gamma =
               (Equal | ValueEqual),
               LVar number )
           when length_pair number string -> SS.add string acc
-        | _ -> acc)
+        | _ -> SS.union (compared_strings assertion) acc)
       fs SS.empty
   in
   if
     not
       (!Config.Verification.total
       && ((count_type Type.Utf16Type >= 2 && count_type Type.NumberType >= 2)
-         || not (SS.is_empty linked_strings)))
+         || not (SS.is_empty length_strings)))
   then None
   else
     let seeded =
@@ -2135,22 +2151,26 @@ let seeded_model fs gamma =
     in
     match try_seed seeded with
     | Some _ as witness -> witness
-    | None when not (SS.is_empty linked_strings) ->
-        (* An empty/zero guess contradicts a nonempty branch. Try a one-unit
-           length, leaving code units and every Number variable free. Start
-           from the original complete formula, not the failed strengthened
-           query. This is only an existential search: failure still falls back
-           and a validated SAT witness never changes the symbolic state. *)
-        let one_unit =
-          SS.fold
-            (fun string acc ->
-              Expr.Set.add
-                (Expr.BinOp
-                   (Expr.UnOp (Utf16Len, Expr.LVar string), Equal, Expr.int 1))
-                acc)
-            linked_strings fs
-        in
-        try_seed one_unit
+    | None when not (SS.is_empty length_strings) ->
+        (* Empty/zero guesses miss branches needing one or two code units.
+           Leave contents and every Number variable free, and construct each
+           attempt from the original complete formula. Only validated SAT can
+           succeed; failed guesses still fall back without changing state. *)
+        List.find_map
+          (fun length ->
+            let with_length =
+              SS.fold
+                (fun string acc ->
+                  Expr.Set.add
+                    (Expr.BinOp
+                       ( Expr.UnOp (Utf16Len, Expr.LVar string),
+                         Equal,
+                         Expr.int length ))
+                    acc)
+                length_strings fs
+            in
+            try_seed with_length)
+          [ 1; 2 ]
     | None -> None
 
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =

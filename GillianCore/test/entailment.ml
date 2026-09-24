@@ -246,6 +246,23 @@ let length_only_witness () =
   let check label expected fs =
     Alcotest.(check bool) label expected (Smt.is_sat fs gamma)
   in
+  let bare_nonempty =
+    Expr.Set.of_list
+      [
+        bin FLessThan (Expr.num 0.) number;
+        bin ILessThanEqual size
+          (Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))));
+      ]
+  in
+  check "inlined rounded-length comparison retains nonempty feasibility" true
+    bare_nonempty;
+  check "bare comparison keeps the complete length contradiction" false
+    (Expr.Set.add (bin Equal size (Expr.int 0)) bare_nonempty);
+  check "negated reverse comparison also permits a two-unit witness" true
+    (Expr.Set.of_list
+       [ Expr.UnOp (Not, bin FLessThanEqual number (Expr.num 1.)) ]);
+  check "bare comparison fallback still permits longer input" true
+    (Expr.Set.add (bin Equal size (Expr.int 3)) bare_nonempty);
   Alcotest.(check bool)
     "model-returning API also finds the complete nonempty witness" true
     (Option.is_some (Smt.check_sat inside gamma));
@@ -256,12 +273,12 @@ let length_only_witness () =
     (Expr.Set.add (bin FLessThan count (Expr.num 0.)) inside);
   check "a contradictory rank cannot gain a witness" false
     (Expr.Set.add (bin ValueEqual rank (Expr.num (-1.))) inside);
-  check "fallback admits a longer input after both guesses fail" true
-    (Expr.Set.add (bin Equal size (Expr.int 2)) inside);
+  check "fallback admits a longer input after all guesses fail" true
+    (Expr.Set.add (bin Equal size (Expr.int 3)) inside);
   check "a previous witness cannot fix later positions or ranks" true
     (Expr.Set.add
        (bin Equal pos (Expr.num 1.))
-       (Expr.Set.add (bin Equal size (Expr.int 2)) inside));
+       (Expr.Set.add (bin Equal size (Expr.int 3)) inside));
   let surrogate =
     Expr.Lit
       (Literal.Utf16String
@@ -270,6 +287,45 @@ let length_only_witness () =
   in
   check "length witnesses leave code units free" true
     (Expr.Set.add (bin Equal s surrogate) inside);
+  (* The actual AJV high-surrogate branch needs a second code unit. Keep
+     all the original count/rank/length facts, without fixing either unit. *)
+  let next = bin FPlus pos (Expr.num 1.) in
+  let first = bin Utf16CodeUnit s (Expr.UnOp (ToIntOp, pos)) in
+  let two_inside =
+    inside
+    |> Expr.Set.add (bin FLessThan next len)
+    |> Expr.Set.add (bin Equal next next)
+    |> Expr.Set.add (bin Equal first first)
+    |> Expr.Set.add (bin FLessThanEqual (Expr.num 55296.) first)
+    |> Expr.Set.add (bin FLessThanEqual first (Expr.num 56319.))
+  in
+  Alcotest.(check bool)
+    "model-returning API finds the full second-unit branch" true
+    (Option.is_some (Smt.check_sat two_inside gamma));
+  (* These SAT controls require feasible strings on both sides of the
+     surrogate decision. The full symbolic second-lookup/FP observation
+     obligations are separate; these concrete points do not prove them. *)
+  List.iter
+    (fun second ->
+      let text =
+        Expr.Lit
+          (Literal.Utf16String
+             (Gillian.Utils.Utf16.of_canonical
+                (Gillian.Utils.Utf16.of_code_units [ 0xd800; second ])))
+      in
+      check "two-unit feasibility preserves either surrogate outcome" true
+        (Expr.Set.add (bin Equal s text) two_inside))
+    [ 0xdc00; 0x0041; 0xe000 ];
+  check "one unit cannot satisfy the full second-unit branch" false
+    (Expr.Set.add (bin Equal size (Expr.int 1)) two_inside);
+  check "linked length contradiction survives both length guesses" false
+    (Expr.Set.add (bin Equal len (Expr.num 0.)) two_inside);
+  check "negative count still rejects the second-unit branch" false
+    (Expr.Set.add (bin FLessThan count (Expr.num 0.)) two_inside);
+  check "fallback admits a later second-unit branch outside both guesses" true
+    (two_inside
+    |> Expr.Set.add (bin Equal size (Expr.int 3))
+    |> Expr.Set.add (bin Equal pos (Expr.num 1.)));
   (* Exercise either orientation/equality kind without the other link hiding
      which syntactic shape made the optional search eligible. *)
   let unlinked =
@@ -302,6 +358,7 @@ let length_only_witness () =
       check "either wrapped link retains the full branch formula" true
         (Expr.Set.add link unlinked))
     links;
+  check "wrapped length retains the full second-unit branch" true two_inside;
   check "wrapped length does not hide a contradictory full query" false
     (Expr.Set.add (bin Equal size (Expr.int 0)) inside)
 
