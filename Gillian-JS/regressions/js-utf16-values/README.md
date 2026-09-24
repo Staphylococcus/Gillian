@@ -132,3 +132,14 @@ The PoC independent-observations report passes 974 controls across all 109
 supporting jobs, all six native model replays and 120/120 PoC tests. All 46,989
 frozen inputs stayed unchanged. Final documentation follows validation; this is
 not full-fold certification. Direct independent builtin calls remain pending.
+
+P06.2b2b3 accepted: `charat-direct-independent.js` executes both builtin calls
+directly over independent string/Number pairs. All nine paths prove on backend
+`edf368e`; the mutation returning 42 has nine intended postcondition failures.
+Both retain the existing 45-second single-procedure allowance. Native replay
+binds 17 ASTs and 3,025 direct independent pairs. Focused frozen acceptance passes
+135 controls across five jobs, all six model replays and 120/120 PoC tests, with
+46,993 inputs unchanged. The PoC `direct-independent-observations.json` retains
+source-bound evidence. Implementation, runtime and all binary bytes match the
+published full 974-control baseline; this is a fixture/replay-only slice, not a
+new full baseline or full-fold certification. Numeric code units are next.

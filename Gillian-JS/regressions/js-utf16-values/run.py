@@ -25,6 +25,8 @@ CASES = [
     ('comparison-numbers-leq-wrong.js', ['--total', '--proc=check'], POST),
     ('charat-direct-twice.js', ['--total', '--proc=check'], TOTAL),
     ('charat-direct-twice-wrong.js', ['--total', '--proc=check'], POST),
+    ('charat-direct-independent.js', ['--total', '--proc=check'], TOTAL),
+    ('charat-direct-independent-wrong.js', ['--total', '--proc=check'], POST),
     ('charat-twice.js', ['--total', '--proc=check', '--proc=twice', '--proof-dependency=twice:check'], TOTAL),
     ('charat-twice-wrong.js', ['--total', '--proc=check', '--proc=twice', '--proof-dependency=twice:check'], POST),
     ('charat-independent.js', ['--total', '--proc=check', '--proc=twice', '--proof-dependency=twice:check'], TOTAL),
