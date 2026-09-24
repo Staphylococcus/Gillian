@@ -1,9 +1,10 @@
 # JavaScript UTF-16 value mapping
 
-These 30 controls compile actual JavaScript and verify its runtime bodies in
+These 37 controls compile actual JavaScript and verify its runtime bodies in
 `--total` mode. They cover arbitrary string concatenation, prefix cancellation,
 `typeof`, symbolic property mutation/read, numeric property keys, and a wrong
-concatenation result. Inputs are arbitrary represented values, not finite choices.
+concatenation result. They include arbitrary-input theorems and separate concrete
+initialized-call witnesses. The latter do not bound the arbitrary-input proofs.
 Value identity assertions preserve NaN and signed zero in property values.
 The review regressions include an arbitrary-string comparison inside one branch
 of a Boolean split: its unsupported ordering must stop analysis, never disappear
@@ -43,8 +44,9 @@ Run `python3 run.py` with `GILLIAN_JS` set to the built backend launcher.
 The `charat.js` caller executes the actual builtin with explicit method/scope
 resources. It proves the correct code unit or empty string for arbitrary strings
 and all Numbers, preserving ToInteger coercion and both range branches. Wrong
-empty outcomes and a swapped surrogate claim reject. Initialization and reusable
-metadata context are still P06.2b, not assumed proved by this caller theorem.
+empty outcomes and a swapped surrogate claim reject. P06.2b1 below connects the
+shared metadata context to actual initialization and proves its preservation.
+Arbitrary repeated-call composition remains P06.2b2.
 Core controls retain invalid-model rejection/recovery and replay five new
 index/unit witnesses in concrete GIL. The index-one witness fixes a concrete
 surrogate pair; four other queries retain symbolic index/string search. The PoC
@@ -65,5 +67,23 @@ comparison keeps the earlier single-comparison proof complete. The UTF-16
 primitive suite rejects wrong types and partial proof operands; core tests
 retain conversion boundaries, exceptional-number parity, all three lifted
 outcomes and invalid-model rejection/recovery. No input cap or helper assumption
-is introduced. Checked lookup is complete; initialized/reusable context remains
-P06.2b. The new symbolic indexing encoding is restricted to total mode.
+is introduced. Checked lookup and initialized context are established; arbitrary
+repeated calls remain P06.2b2. Symbolic indexing is restricted to total mode.
+
+
+P06.2b1 uses `CharAtContext.jsil` to describe the four actual String prototype
+metadata fields, including `@primitiveValue`, and the charAt descriptor/builtin.
+The arbitrary caller proves it preserves those resources. Full `Init.jsil`,
+compiled from an empty closed entry, establishes the same context plus the real
+caller function/scope metadata. Concrete initialized calls cover empty/outside,
+NaN/infinite positions, ordinary units and surrogates. Wrong output, overwritten
+method and changed method length must fail their postconditions. The native PoC
+replay checks ten executable ASTs and both positive and mutated behaviors.
+
+The summary-consuming `charat-twice.js` is registered only as an unchecked-callee
+rejection (`--proc=twice`). Selecting both procedures and their proof dependency
+still returns SMT unknown during result-summary definedness; that diagnostic
+remains P06.2b2, not a positive proof. Native two-call parity is supplementary.
+P06.2b1 passes the PoC frozen selection: 139 controls across six affected
+jobs, including all 37 cases here, plus all required native replays and 120/120
+PoC tests. Repeated-call composition remains P06.2b2.

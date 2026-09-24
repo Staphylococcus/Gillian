@@ -1,0 +1,8 @@
+(* Exact method resources created by the full Init.jsil. Other properties frame. *)
+pred CharAtContext():
+ MetaData($lstr_proto, #md) * MetaData(#md, null) *
+ ((#md, "@proto") -> $lobj_proto) * ((#md, "@class") -> "String") *
+ ((#md, "@extensible") -> true) * ((#md, "@primitiveValue") -> "") *
+ empty_fields(#md : -{ "@proto", "@class", "@extensible", "@primitiveValue" }-) *
+ DataPropGen($lstr_proto, "charAt"; $lsp_charAt, true, false, true) *
+ JSBIFunction($lsp_charAt; "SP_charAt", 1);
