@@ -1,6 +1,6 @@
 # JavaScript UTF-16 value mapping
 
-These 37 controls compile actual JavaScript and verify its runtime bodies in
+These 39 controls compile actual JavaScript and verify its runtime bodies in
 `--total` mode. They cover arbitrary string concatenation, prefix cancellation,
 `typeof`, symbolic property mutation/read, numeric property keys, and a wrong
 concatenation result. They include arbitrary-input theorems and separate concrete
@@ -87,3 +87,13 @@ remains P06.2b2, not a positive proof. Native two-call parity is supplementary.
 P06.2b1 passes the PoC frozen selection: 139 controls across six affected
 jobs, including all 37 cases here, plus all required native replays and 120/120
 PoC tests. Repeated-call composition remains P06.2b2.
+
+P06.2b2a additionally checks two direct ordinary `charAt` calls with the same
+arbitrary string/Number inputs. The final result and `CharAtContext` are proved
+by executing both actual builtin bodies; a mutated second result must fail its
+postcondition. Independent argument pairs and checked caller-summary composition
+remain open P06.2b2b obligations. No backend implementation or proof domain is
+changed by these two controls.
+The affected frozen selection passes 141 controls across six jobs, including all
+39 controls here, plus the six model artifacts, context/native replay and
+120/120 PoC tests. All 46,982 frozen files remained unchanged.
