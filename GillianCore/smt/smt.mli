@@ -18,18 +18,19 @@ val exec_sat :
 
 (** True only for native UNSAT. SAT or unknown is inconclusive and returns
     false; it must not be used as a SAT/branch-feasibility decision. Other
-    solver errors, including invalid models, propagate. Unknown is never cached.
-    This optional search is capped at five seconds and the configured SMT limit.
-*)
+    solver errors, including invalid models, propagate. An inconclusive optional
+    attempt is remembered only to avoid repeating it; it is never stored as a
+    SAT/UNSAT decision or used by required queries. Actual cached decisions take
+    precedence. Each optional search is capped at five seconds and the SMT
+    limit. *)
 val proves_unsat : Expr.Set.t -> (string, Type.t) Hashtbl.t -> bool
 
 (** Complete-query satisfiability, with bounded existential witness searches for
-    total-mode queries with multiple UTF-16/Number variables or a direct typed
-    rounded-length link or comparison. Guesses never enter symbolic state; only
-    native validated SAT can succeed early. Failed guesses fall back to the
-    original query with its unchanged unknown/error policy. Shared by
-    feasibility and entailment so neither path bypasses the same full-query
-    guarantees. *)
+    eligible UTF-16/Number queries. A validated full-query model is a witness;
+    numeric index identities are added only after a native UNSAT proof from
+    original integrality facts. The required query retains every original fact;
+    failed optional attempts retain its original unknown/error policy. No guess
+    or unproved identity replaces symbolic-state facts. *)
 val check_sat : Expr.Set.t -> (string, Type.t) Hashtbl.t -> model option
 
 (** Boolean view of [check_sat], including the same cache and witness search. *)

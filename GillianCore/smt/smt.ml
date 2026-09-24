@@ -381,6 +381,11 @@ end)
 let encoding_cache = Formula_cache.create Config.big_tbl_size
 let sat_cache = Formula_cache.create Config.big_tbl_size
 
+(* A timed-out sufficient precheck proved nothing. Remember only that this
+   optional attempt was inconclusive; never consult this table for a required
+   satisfiability query. A later actual SAT/UNSAT cache entry takes precedence. *)
+let inconclusive_prechecks = Formula_cache.create Config.big_tbl_size
+
 let formula_key fs gamma =
   (fs, Hashtbl.to_seq gamma |> List.of_seq |> List.sort Stdlib.compare)
 
@@ -2103,6 +2108,7 @@ let proves_unsat (fs : Expr.Set.t) (gamma : typenv) : bool =
   let key = formula_key fs gamma in
   match Formula_cache.find_opt sat_cache key with
   | Some result -> Option.is_none result
+  | None when Formula_cache.mem inconclusive_prechecks key -> false
   | None -> (
       try
         let result =
@@ -2111,7 +2117,9 @@ let proves_unsat (fs : Expr.Set.t) (gamma : typenv) : bool =
         in
         Formula_cache.replace sat_cache key result;
         Option.is_none result
-      with SMT_unknown -> false)
+      with SMT_unknown ->
+        Formula_cache.replace inconclusive_prechecks key ();
+        false)
 
 (* Search for an existential witness using extra equalities, without changing
    the symbolic state. Only a native, validated SAT model of the complete
@@ -2199,27 +2207,103 @@ let seeded_model fs gamma =
     in
     match try_seed seeded with
     | Some _ as witness -> witness
-    | None when not (SS.is_empty length_strings) ->
+    | None when not (SS.is_empty length_strings) -> (
         (* Empty/zero guesses miss branches needing one or two code units.
            Leave contents and every Number variable free, and construct each
            attempt from the original complete formula. Only validated SAT can
            succeed; failed guesses still fall back without changing state. *)
-        List.find_map
-          (fun length ->
-            let with_length =
-              SS.fold
-                (fun string acc ->
-                  Expr.Set.add
-                    (Expr.BinOp
-                       ( Expr.UnOp (Utf16Len, Expr.LVar string),
-                         Equal,
-                         Expr.int length ))
-                    acc)
-                length_strings fs
-            in
-            try_seed with_length)
-          [ 1; 2 ]
+        let with_length length =
+          SS.fold
+            (fun string acc ->
+              Expr.Set.add
+                (Expr.BinOp
+                   ( Expr.UnOp (Utf16Len, Expr.LVar string),
+                     Equal,
+                     Expr.int length ))
+                acc)
+            length_strings fs
+        in
+        (* Try a small concrete position before leaving Number indices free.
+           Both are complete-query witness searches. This ordering avoids a
+           native solver crash on a retained free-position length-two query;
+           failed guesses still reach all original attempts and required checks. *)
+        let indices =
+          object
+            inherit [_] Visitors.iter as super
+            val mutable names = SS.empty
+            method names = names
+
+            method! visit_expr () e =
+              (match e with
+              | BinOp (LVar string, (Utf16Nth | Utf16CodeUnit), index)
+                when SS.mem string length_strings ->
+                  names <- SS.union names (Expr.lvars index)
+              | _ -> ());
+              super#visit_expr () e
+          end
+        in
+        Expr.Set.iter (indices#visit_expr ()) fs;
+        let numbers =
+          SS.filter
+            (fun x -> Hashtbl.find_opt gamma x = Some Type.NumberType)
+            indices#names
+        in
+        let positioned =
+          if SS.is_empty numbers then None
+          else
+            try_seed
+              (SS.fold
+                 (fun x acc ->
+                   Expr.Set.add
+                     (Expr.BinOp (Expr.LVar x, ValueEqual, Expr.num 0.))
+                     acc)
+                 numbers (with_length 2))
+        in
+        match positioned with
+        | Some _ as witness -> witness
+        | None -> List.find_map (fun n -> try_seed (with_length n)) [ 1; 2 ])
     | None -> None
+
+(* Rounded-length upper-bound queries can combine expensive sequence and
+   floating-point theories. First prove an exact index identity using original
+   integrality facts alone. Only native UNSAT permits adding that consequence;
+   the required query still includes every original fact. This is a checked cut,
+   not an assumed arithmetic law or a branch decision from an incomplete subset. *)
+let with_checked_index_identities fs gamma =
+  if not !Config.Verification.total then fs
+  else
+    let indices =
+      Expr.Set.fold
+        (fun e acc ->
+          match e with
+          | Expr.BinOp
+              ( UnOp (IntToNum, UnOp (Utf16Len, _)),
+                FLessThanEqual,
+                UnOp (ToIntOp, index) ) -> Expr.Set.add index acc
+          | _ -> acc)
+        fs Expr.Set.empty
+    in
+    Expr.Set.fold
+      (fun index augmented ->
+        let identity = Expr.BinOp (UnOp (ToIntOp, index), ValueEqual, index) in
+        let premises =
+          Expr.Set.filter
+            (function
+              | Expr.UnOp (IsInt, e) ->
+                  SS.subset (Expr.lvars e) (Expr.lvars index)
+                  && SS.subset (Expr.pvars e) (Expr.pvars index)
+                  && SS.subset (Expr.locs e) (Expr.locs index)
+              | _ -> false)
+            fs
+        in
+        if
+          (not (Expr.Set.is_empty premises))
+          && proves_unsat
+               (Expr.Set.add (Expr.UnOp (Not, identity)) premises)
+               gamma
+        then Expr.Set.add identity augmented
+        else augmented)
+      indices fs
 
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   let key = formula_key fs gamma in
@@ -2235,7 +2319,7 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
       let ret =
         match seeded_model fs gamma with
         | Some _ as witness -> witness
-        | None -> exec_sat fs gamma
+        | None -> exec_sat (with_checked_index_identities fs gamma) gamma
       in
       let () =
         L.verbose (fun m ->

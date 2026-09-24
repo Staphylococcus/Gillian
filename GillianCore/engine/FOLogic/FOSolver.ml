@@ -229,8 +229,46 @@ let check_entailment
           (fun e -> SS.exists (Hashtbl.mem gamma_tbl) (Expr.lvars e))
           (Expr.Set.diff formulae focused)
       in
+      let observes_contents e =
+        let found = ref false in
+        let visitor =
+          object
+            inherit [_] Visitors.iter as super
+
+            method! visit_expr () e =
+              (match e with
+              | BinOp (_, (Utf16Nth | Utf16CodeUnit), _) -> found := true
+              | _ -> ());
+              super#visit_expr () e
+          end
+        in
+        visitor#visit_expr () e;
+        !found
+      in
+      let contained =
+        if
+          !Config.Verification.total && SS.is_empty existentials
+          && not (observes_contents right_f)
+        then
+          Expr.Set.filter
+            (fun e ->
+              (not (observes_contents e))
+              && SS.subset (Expr.lvars e) (Expr.lvars right_f)
+              && SS.subset (Expr.pvars e) (Expr.pvars right_f)
+              && SS.subset (Expr.locs e) (Expr.locs right_f))
+            formulae
+        else formulae
+      in
+      let contained_omission =
+        Expr.Set.exists
+          (fun e -> SS.exists (Hashtbl.mem gamma_tbl) (Expr.lvars e))
+          (Expr.Set.diff formulae contained)
+      in
+      (* This weaker arithmetic query can prove the complete conjunction only
+         by native UNSAT. SAT/unknown retain the original focused/full paths. *)
       let model =
-        if useful_omission && Smt.proves_unsat focused gamma_tbl then None
+        if contained_omission && Smt.proves_unsat contained gamma_tbl then None
+        else if useful_omission && Smt.proves_unsat focused gamma_tbl then None
         else Smt.check_sat formulae (Type_env.as_hashtbl gamma)
       in
       let ret = Option.is_none model in

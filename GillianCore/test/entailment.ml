@@ -69,6 +69,10 @@ let finite_position () =
   if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then (
     Alcotest.(check bool)
       "optional unknown cannot prove UNSAT" false (Smt.proves_unsat fs g);
+    Alcotest.(check bool)
+      "remembered inconclusive precheck still proves nothing" false
+      (Smt.proves_unsat fs g);
+
     let rejected check =
       try
         check ();
@@ -104,7 +108,10 @@ let finite_position () =
     let proved = Smt.proves_unsat fs g in
     Alcotest.(check bool)
       "inside ToInteger position is proved by precheck or full query" true
-      (proved || Option.is_none (Smt.exec_sat fs g))
+      (proved || Option.is_none (Smt.check_sat fs g));
+    Alcotest.(check bool)
+      "actual UNSAT supersedes optional inconclusive marker" true
+      (Smt.proves_unsat fs g)
 
 let witness_query () =
   let s = Expr.LVar "#witness_s" and i = Expr.LVar "#witness_i" in
@@ -362,6 +369,280 @@ let length_only_witness () =
   check "wrapped length does not hide a contradictory full query" false
     (Expr.Set.add (bin Equal size (Expr.int 0)) inside)
 
+let indexed_branch_witness () =
+  let s = Expr.LVar "#mask_s" and pos = Expr.LVar "#mask_pos" in
+  let len = Expr.LVar "#mask_len" and count = Expr.LVar "#mask_count" in
+  let rank = Expr.LVar "#mask_rank" in
+  let size = Expr.UnOp (Utf16Len, s) in
+  let number = Expr.UnOp (IntToNum, size) in
+  let maximum = Expr.num 9007199254740991. in
+  let next = bin FPlus pos (Expr.num 1.) in
+  let index = Expr.UnOp (ToIntOp, pos) in
+  let next_index = Expr.UnOp (ToIntOp, next) in
+  let first = bin Utf16CodeUnit s index in
+  let second = bin Utf16CodeUnit s next_index in
+  let mask =
+    bin BitwiseAndF (Expr.UnOp (ToInt32Op, second)) (Expr.num 64512.)
+  in
+  let low = bin Equal mask (Expr.num 56320.) in
+  (* Keep the actual helper query's wrapped count/length/rank and every
+     original branch fact. Neither string contents nor position is fixed. *)
+  let common =
+    Expr.Set.of_list
+      [
+        not_ (bin FLessThan (Expr.num 56319.) first);
+        not_ (bin FLessThan index (Expr.num 0.));
+        not_ (bin FLessThan next_index (Expr.num 0.));
+        not_ (bin FLessThanEqual number index);
+        not_ (bin FLessThanEqual number next_index);
+        not_ (bin FLessThan first (Expr.num 55296.));
+        Expr.UnOp (IsInt, count);
+        Expr.UnOp (IsInt, len);
+        Expr.UnOp (IsInt, pos);
+        bin FLessThanEqual (Expr.num 0.) count;
+        bin FLessThanEqual count pos;
+        bin ValueEqual len number;
+        bin Equal len len;
+        bin Equal len number;
+        bin FLessThanEqual len maximum;
+        bin ValueEqual rank (bin FMinus maximum pos);
+        bin Equal pos pos;
+        bin FLessThan pos len;
+        bin ILessThanEqual size
+          (Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))));
+        bin Equal next next;
+        bin FLessThan next len;
+        bin Equal first first;
+      ]
+  in
+  let g = Gamma.init () in
+  Gamma.update g "#mask_s" Type.Utf16Type;
+  Gamma.update g "#mask_pos" Type.NumberType;
+  let gamma = Gamma.as_hashtbl g in
+  let inside = Expr.Set.add low common in
+  if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then
+    let rejected =
+      try
+        ignore (Smt.check_sat inside gamma);
+        false
+      with
+      | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError msg) ->
+        msg = "Incomplete totality proof: SMT returned unknown"
+    in
+    Alcotest.(check bool)
+      "position seed cannot hide required unknown" true rejected
+  else
+    let saved = !Config.dump_smt in
+    Config.dump_smt :=
+      Option.is_some (Sys.getenv_opt "GILLIAN_UTF16_BRANCH_MODELS");
+    Fun.protect
+      ~finally:(fun () -> Config.dump_smt := saved)
+      (fun () ->
+        let check label expected fs =
+          Alcotest.(check bool) label expected (Smt.is_sat fs gamma)
+        in
+        List.iter
+          (fun (label, condition) ->
+            check label false (Expr.Set.add condition inside))
+          [
+            ("contradictory mask keeps all original facts", not_ low);
+            ( "negative count cannot gain a seeded witness",
+              bin FLessThan count (Expr.num 0.) );
+            ( "contradictory rank cannot gain a seeded witness",
+              bin ValueEqual rank (Expr.num (-1.)) );
+            ( "one unit cannot contain the second lookup",
+              bin Equal size (Expr.int 1) );
+          ];
+        let outside_second =
+          Expr.Set.add
+            (bin FLessThanEqual number next_index)
+            (Expr.Set.remove
+               (not_ (bin FLessThanEqual number next_index))
+               common)
+        in
+        check "numeric contradiction survives omitted content/count facts" false
+          outside_second;
+        check "fractional index cannot receive an unproved truncation identity"
+          true
+          (Expr.Set.of_list
+             [
+               bin Equal size (Expr.int 1);
+               bin ValueEqual pos (Expr.num 0.25);
+               bin Equal first (Expr.num 55296.);
+               bin FLessThanEqual number next_index;
+             ]);
+        let cases =
+          List.concat_map
+            (fun (suffix, extra) ->
+              List.map
+                (fun (name, result) -> (name ^ suffix, result, extra))
+                [ ("low", true); ("other", false) ])
+            [
+              ("-unrestricted", []);
+              ( "-later-three",
+                [
+                  bin Equal size (Expr.int 3); bin ValueEqual pos (Expr.num 1.);
+                ] );
+              ( "-later-seven",
+                [
+                  bin Equal size (Expr.int 7); bin ValueEqual pos (Expr.num 5.);
+                ] );
+            ]
+        in
+        let models =
+          List.map
+            (fun (id, expected, extra) ->
+              let fs =
+                List.fold_left
+                  (fun fs e -> Expr.Set.add e fs)
+                  (Expr.Set.add (if expected then low else not_ low) common)
+                  extra
+              in
+              check (id ^ " complete original query remains feasible") true fs;
+              (* Fresh typed aliases recover wrapped values without changing
+                 the actual context or dropping any original constraint. *)
+              let model_gamma = Hashtbl.copy gamma in
+              let aliases =
+                List.map
+                  (fun name -> (name, name ^ "_copy"))
+                  [ "#mask_len"; "#mask_count"; "#mask_rank" ]
+              in
+              let constraints =
+                List.fold_left
+                  (fun acc (name, copy) ->
+                    Hashtbl.add model_gamma copy Type.NumberType;
+                    Expr.Set.add
+                      (bin ValueEqual (Expr.LVar copy) (Expr.LVar name))
+                      acc)
+                  fs aliases
+              in
+              let _initial_model =
+                match Smt.check_sat constraints model_gamma with
+                | Some model -> model
+                | None -> Alcotest.fail ("Missing branch witness: " ^ id)
+              in
+              (* Force a distinct native context, then retrieve the cached model;
+                 lifting must restore the declarations of the original query. *)
+              ignore
+                (Smt.exec_sat
+                   (Expr.Set.singleton (Expr.Lit (Bool true)))
+                   (Hashtbl.create 0));
+              let model =
+                match Smt.check_sat constraints model_gamma with
+                | Some cached -> cached
+                | None -> Alcotest.fail "Lost cached branch model"
+              in
+              let lifted = Hashtbl.create 5 in
+              Smt.lift_model model model_gamma (Hashtbl.add lifted)
+                (Expr.Set.of_list
+                   (s :: pos
+                   :: List.map (fun (_, copy) -> Expr.LVar copy) aliases));
+              let get name =
+                match Hashtbl.find_opt lifted name with
+                | Some (Expr.Lit value) -> value
+                | _ -> Alcotest.fail ("Missing branch model value: " ^ name)
+              in
+              let values =
+                List.map
+                  (fun name -> (name, get name))
+                  [ "#mask_s"; "#mask_pos" ]
+                @ List.concat_map
+                    (fun (name, copy) -> [ (name, get copy); (copy, get copy) ])
+                    aliases
+              in
+              let store = Engine.CExprEval.CStore.init values in
+              let visitor =
+                object
+                  inherit [_] Visitors.endo
+                  method! visit_LVar () _ name = Expr.PVar name
+                end
+              in
+              Expr.Set.iter
+                (fun e ->
+                  match
+                    Engine.CExprEval.evaluate_expr store
+                      (visitor#visit_expr () e)
+                  with
+                  | Bool true -> ()
+                  | _ ->
+                      Alcotest.fail
+                        "Branch model failed complete concrete replay")
+                constraints;
+              let bits name =
+                match get name with
+                | Num n ->
+                    `String (Printf.sprintf "%016Lx" (Int64.bits_of_float n))
+                | _ -> Alcotest.fail "Branch model lost Number type"
+              in
+              let units =
+                match get "#mask_s" with
+                | Utf16String s ->
+                    Gillian.Utils.Utf16.(code_units (to_canonical s))
+                | _ -> Alcotest.fail "Branch model lost string type"
+              in
+              `Assoc
+                [
+                  ("id", `String id);
+                  ("low", `Bool expected);
+                  ("units", `List (List.map (fun n -> `Int n) units));
+                  ("positionBits", bits "#mask_pos");
+                  ("lengthBits", bits "#mask_len_copy");
+                  ("countBits", bits "#mask_count_copy");
+                  ("rankBits", bits "#mask_rank_copy");
+                ])
+            cases
+        in
+        match Sys.getenv_opt "GILLIAN_UTF16_BRANCH_MODELS" with
+        | None -> ()
+        | Some path -> Yojson.Safe.to_file path (`List models))
+
+let contained_goal () =
+  let position = Expr.LVar "#contained_pos"
+  and bound = Expr.LVar "#contained_bound" in
+  let twice = bin FPlus (bin FPlus position (Expr.num 1.)) (Expr.num 1.) in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#contained_pos" Type.NumberType;
+  Gamma.update gamma "#contained_bound" Type.NumberType;
+  let entails facts goal =
+    Solver.check_entailment Utils.Containers.SS.empty (Engine.PFS.of_list facts)
+      [ goal ] gamma
+  in
+  let facts = [ Expr.UnOp (IsInt, position); bin FLessThan position bound ] in
+  Alcotest.(check bool)
+    "integer double increment uses sufficient contained facts" true
+    (entails facts (Expr.UnOp (IsInt, twice)));
+  (* The contained subset drops the bound link. The original fallback must
+     still use it to prove position < 5. *)
+  Alcotest.(check bool)
+    "contained SAT still uses dependent full assumptions" true
+    (entails
+       [ bin FLessThan position bound; bin FLessThanEqual bound (Expr.num 5.) ]
+       (bin FLessThan position (Expr.num 5.)));
+  Alcotest.(check bool)
+    "missing integrality must not prove double increment" false
+    (entails
+       [ bin ValueEqual position (Expr.num 0.25); bin FLessThan position bound ]
+       (Expr.UnOp (IsInt, twice)));
+  let text = Expr.LVar "#contained_text" in
+  Gamma.update gamma "#contained_text" Type.Utf16Type;
+  let code = bin Utf16CodeUnit text (Expr.num 0.) in
+  let content =
+    [
+      bin ILessThan (Expr.int 0) (Expr.UnOp (Utf16Len, text));
+      bin Equal code (Expr.num 65.);
+      bin Equal position code;
+    ]
+  in
+  Alcotest.(check bool)
+    "content-dependent numeric goal retains full fallback" true
+    (entails content (bin Equal position (Expr.num 65.)));
+  Alcotest.(check bool)
+    "wrong content-derived numeric goal remains false" false
+    (entails content (bin Equal position (Expr.num 66.)));
+  Alcotest.(check bool)
+    "direct content goal retains its assumptions" true
+    (entails content (bin Equal code (Expr.num 65.)))
+
 let model_declarations () =
   let make tag n =
     let name = "ModelContext" ^ tag and cname = "ModelBox" ^ tag in
@@ -457,4 +738,8 @@ let tests =
       (with_total length_only_witness);
     Alcotest.test_case "model datatype context survives reset and caches" `Quick
       (with_total model_declarations);
+    Alcotest.test_case "indexed complete-query witnesses" `Quick
+      (with_total indexed_branch_witness);
+    Alcotest.test_case "contained goal preserves required fallback" `Quick
+      (with_total contained_goal);
   ]
