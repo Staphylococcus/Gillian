@@ -1,0 +1,4 @@
+spec check(x)
+[[ (x == #x) * types(#x : Str) ]]
+[[ (ret == true) ]] normal
+proc check(x) { assert (0.0 <= as_num(u16-len(x))); ret := true; return };

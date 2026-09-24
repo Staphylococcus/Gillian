@@ -242,6 +242,35 @@ let language_length_integrality () =
   check "integrality does not imply an empty string" true
     [ eq a (value [ 65 ]); integral; not_ (eq len (Expr.int 0)) ]
 
+let length_nonnegative () =
+  let len = length a in
+  let number = Expr.UnOp (IntToNum, len) in
+  List.iter
+    (fun zero ->
+      let nonnegative = bin FLessThanEqual (Expr.num zero) number in
+      check "all converted lengths are nonnegative" false [ not_ nonnegative ];
+      check "nonnegative length has an empty witness" true
+        [ eq a (value []); nonnegative ];
+      check "positive overflow remains nonnegative" false
+        [ eq len (Expr.Lit (Int (Z.shift_left Z.one 1024))); not_ nonnegative ])
+    [ 0.; -0. ];
+  check "one is not a lower bound on an empty string" false
+    [ eq a (value []); bin FLessThanEqual (Expr.num 1.) number ];
+  (* The rule must not affect generic conversions or arbitrary Numbers. *)
+  List.iter
+    (fun integer ->
+      check "negative integer conversion is not nonnegative" false
+        [
+          bin FLessThanEqual (Expr.num 0.)
+            (Expr.UnOp (IntToNum, Expr.Lit (Int integer)));
+        ])
+    [ Z.minus_one; Z.neg (Z.shift_left Z.one 1024) ];
+  List.iter
+    (fun number ->
+      check "negative and NaN Numbers are not nonnegative" false
+        [ bin FLessThanEqual (Expr.num 0.) (Expr.num number) ])
+    [ -1.; neg_infinity; nan ]
+
 let replay_length_model gamma constraints model =
   let index = Expr.LVar "#length_index" in
   let lifted = Hashtbl.create 2 in
@@ -1170,6 +1199,7 @@ let tests =
     ("JS length conversion", `Quick, js_length_conversion);
     ("length conversion boundaries", `Quick, length_conversion_boundaries);
     ("language length integrality", `Quick, language_length_integrality);
+    ("length nonnegativity", `Quick, length_nonnegative);
     ("length branch models", `Quick, length_branch_models);
     ("comparison reduction", `Quick, comparison_reduction);
     ("length comparison Numbers", `Quick, length_comparison_numbers);

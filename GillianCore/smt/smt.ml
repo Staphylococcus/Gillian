@@ -1628,6 +1628,17 @@ let rec encode_logical_expression
       f (BinOp (size, ILessThanEqual, offset))
   | UnOp (op, le) -> encode_unop ~llen_lvars ~e:le op (f le)
   | BinOp
+      ( Lit (Num zero),
+        FLessThanEqual,
+        UnOp (IntToNum, (UnOp (Utf16Len, _) as size)) )
+    when zero = 0. ->
+      (* RNE conversion of a nonnegative integer cannot be negative or NaN.
+         Overflow produces +infinity, so this also holds for unbounded generic
+         UTF-16 sequences. Both signs of zero compare equally. Evaluate the
+         operand normally to retain its typing and definedness obligations. *)
+      let>- size = get_int (f size) in
+      num_leq (int_zk Z.zero) size.expr >- BooleanType
+  | BinOp
       ( (UnOp (Utf16Len, _) as size),
         ILessThanEqual,
         (UnOp (NumToInt, pos) as offset) ) ->
