@@ -264,10 +264,34 @@ let check_entailment
           (fun e -> SS.exists (Hashtbl.mem gamma_tbl) (Expr.lvars e))
           (Expr.Set.diff formulae contained)
       in
+      let number_variables e =
+        SS.is_empty (Expr.pvars e)
+        && SS.is_empty (Expr.locs e)
+        && SS.for_all
+             (fun name ->
+               Hashtbl.find_opt gamma_tbl name = Some Type.NumberType)
+             (Expr.lvars e)
+      in
+      let numeric =
+        if
+          !Config.Verification.total && SS.is_empty existentials
+          && (not (SS.is_empty (Expr.lvars right_f)))
+          && number_variables right_f
+        then Expr.Set.filter number_variables formulae
+        else formulae
+      in
+      (* Keep numeric dependencies omitted by the contained-variable attempt,
+         while dropping string/heap links from a purely numeric goal. These
+         are still original facts: only native UNSAT licenses success. *)
+      let numeric_omission =
+        (not (Expr.Set.equal numeric formulae))
+        && not (Expr.Set.equal numeric contained)
+      in
       (* This weaker arithmetic query can prove the complete conjunction only
          by native UNSAT. SAT/unknown retain the original focused/full paths. *)
       let model =
         if contained_omission && Smt.proves_unsat contained gamma_tbl then None
+        else if numeric_omission && Smt.proves_unsat numeric gamma_tbl then None
         else if useful_omission && Smt.proves_unsat focused gamma_tbl then None
         else Smt.check_sat formulae (Type_env.as_hashtbl gamma)
       in

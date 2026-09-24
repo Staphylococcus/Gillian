@@ -643,6 +643,61 @@ let contained_goal () =
     "direct content goal retains its assumptions" true
     (entails content (bin Equal code (Expr.num 65.)))
 
+let numeric_rank () =
+  let position = Expr.LVar "#rank_pos" and len = Expr.LVar "#rank_len" in
+  let count = Expr.LVar "#rank_count" and before = Expr.LVar "#rank_before" in
+  let text = Expr.LVar "#rank_text" in
+  let maximum = Expr.num 9007199254740991. in
+  let gamma = Gamma.init () in
+  List.iter
+    (fun name -> Gamma.update gamma name Type.NumberType)
+    [ "#rank_pos"; "#rank_len"; "#rank_count"; "#rank_before" ];
+  Gamma.update gamma "#rank_text" Type.Utf16Type;
+  let next = bin FPlus position (Expr.num 1.) in
+  let twice = bin FPlus next (Expr.num 1.) in
+  let base =
+    [
+      Expr.UnOp (IsInt, position);
+      Expr.UnOp (IsInt, len);
+      Expr.UnOp (IsInt, count);
+      bin FLessThanEqual (Expr.num 0.) count;
+      bin FLessThanEqual count position;
+      bin FLessThan position len;
+      bin FLessThanEqual len maximum;
+      bin ValueEqual before (bin FMinus maximum position);
+      bin ValueEqual len (Expr.UnOp (IntToNum, Expr.UnOp (Utf16Len, text)));
+      bin ILessThanEqual
+        (Expr.UnOp (Utf16Len, text))
+        (Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))));
+      bin FLessThanEqual (Expr.num 55296.)
+        (bin Utf16CodeUnit text (Expr.UnOp (ToIntOp, position)));
+    ]
+  in
+  let entails facts goals =
+    Solver.check_entailment Utils.Containers.SS.empty (Engine.PFS.of_list facts)
+      goals gamma
+  in
+  List.iter
+    (fun (name, after_position, facts) ->
+      let rank = bin FMinus maximum after_position in
+      Alcotest.(check bool)
+        (name ^ " actual Number rank")
+        true
+        (entails facts
+           [
+             Expr.UnOp (IsInt, rank);
+             bin FLessThanEqual (Expr.num 0.) rank;
+             bin FLessThan rank before;
+           ]);
+      Alcotest.(check bool)
+        (name ^ " wrong nondecreasing rank")
+        false
+        (entails facts [ bin FLessThanEqual before rank ]))
+    [
+      ("one increment", next, base);
+      ("two increments", twice, bin FLessThan next len :: base);
+    ]
+
 let model_declarations () =
   let make tag n =
     let name = "ModelContext" ^ tag and cname = "ModelBox" ^ tag in
@@ -742,4 +797,6 @@ let tests =
       (with_total indexed_branch_witness);
     Alcotest.test_case "contained goal preserves required fallback" `Quick
       (with_total contained_goal);
+    Alcotest.test_case "numeric rank retains original dependencies" `Quick
+      (with_total numeric_rank);
   ]
