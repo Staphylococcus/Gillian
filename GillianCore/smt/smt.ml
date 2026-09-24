@@ -1608,6 +1608,17 @@ let rec encode_logical_expression
       make_const ~typ kind var
   | ALoc var -> native_const ObjectType var
   | PVar _ -> exceptf "HORROR: Program variable in pure formula"
+  | UnOp (IsInt, UnOp (IntToNum, (UnOp (Utf16Len, _) as size))) ->
+      (* A nonnegative integer rounds either to an integral finite binary64
+         value or to +infinity. The overflow midpoint is 2^1024 - 2^970:
+         max-finite = 2^1024 - 2^971, and the midpoint tie rounds to infinity.
+         Thus IsInt(RNE64(length)) is exactly length < midpoint. This changes
+         only the composite predicate, never the Number conversion or domain.
+         See ECMAScript 2022 6.1.6.1 (Number representation / ties-to-even). *)
+      let>- size = get_int (f size) in
+      num_lt size.expr
+        (int_zk (Z.sub (Z.shift_left Z.one 1024) (Z.shift_left Z.one 970)))
+      >- BooleanType
   | UnOp
       ( Not,
         BinOp

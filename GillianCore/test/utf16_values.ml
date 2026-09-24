@@ -173,6 +173,9 @@ let js_length_conversion () =
    reduction paths, including the fallback's rounding and overflow. *)
 let length_conversion_boundaries () =
   let store = Engine.CExprEval.CStore.init [] in
+  let overflow_midpoint =
+    Z.sub (Z.shift_left Z.one 1024) (Z.shift_left Z.one 970)
+  in
   List.iter
     (fun (integer, expected) ->
       let integer = Expr.Lit (Literal.Int integer) in
@@ -189,6 +192,16 @@ let length_conversion_boundaries () =
         [
           eq (length a) integer;
           not_ (bin ValueEqual (Expr.UnOp (IntToNum, length a)) expected);
+        ];
+      let is_integral = Expr.UnOp (IsInt, Expr.UnOp (IntToNum, length a)) in
+      let concrete_integral =
+        Engine.CExprEval.evaluate_expr store
+          (Expr.UnOp (IsInt, literal_conversion))
+      in
+      check "composite integrality agrees with concrete conversion" false
+        [
+          eq (length a) integer;
+          not_ (eq is_integral (Expr.Lit concrete_integral));
         ])
     (List.map
        (fun (n, f) -> (Z.of_string n, f))
@@ -202,7 +215,32 @@ let length_conversion_boundaries () =
          ("9007199254740993", 9007199254740992.);
          ("9007199254740995", 9007199254740996.);
        ]
-    @ [ (Z.shift_left Z.one 1024, infinity) ])
+    @ [
+        (Z.pred overflow_midpoint, max_float);
+        (overflow_midpoint, infinity);
+        (Z.succ overflow_midpoint, infinity);
+        (Z.shift_left Z.one 1024, infinity);
+      ])
+
+let language_length_integrality () =
+  let len = length a in
+  let number = Expr.UnOp (IntToNum, len) in
+  let integral = Expr.UnOp (IsInt, number) in
+  let language_max = Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))) in
+  (* Universal over the JS String domain, including the full 53-bit range.
+     Neither the native query nor the reducer may assume this conclusion. *)
+  check "language-valid length converts to a finite integral Number" false
+    [ bin ILessThanEqual len language_max; not_ integral ];
+  check "language-valid integrality has a satisfiable witness" true
+    [ bin ILessThanEqual len language_max; integral ];
+  (* Generic GIL lengths remain unbounded. Finite rounded lengths are still
+     integral, but overflow must not be certified as integral. *)
+  check "rounded generic length stays integral" false
+    [ eq len (Expr.Lit (Int (Z.succ (Z.shift_left Z.one 53)))); not_ integral ];
+  check "overflowing generic length is not integral" false
+    [ eq len (Expr.Lit (Int (Z.shift_left Z.one 1024))); integral ];
+  check "integrality does not imply an empty string" true
+    [ eq a (value [ 65 ]); integral; not_ (eq len (Expr.int 0)) ]
 
 let replay_length_model gamma constraints model =
   let index = Expr.LVar "#length_index" in
@@ -1131,6 +1169,7 @@ let tests =
     ("arbitrary typed sequences", `Quick, arbitrary_values);
     ("JS length conversion", `Quick, js_length_conversion);
     ("length conversion boundaries", `Quick, length_conversion_boundaries);
+    ("language length integrality", `Quick, language_length_integrality);
     ("length branch models", `Quick, length_branch_models);
     ("comparison reduction", `Quick, comparison_reduction);
     ("length comparison Numbers", `Quick, length_comparison_numbers);

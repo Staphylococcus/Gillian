@@ -1,0 +1,4 @@
+(* ECMAScript String length limit, not a schema restriction. Generic GIL
+   UTF-16 sequences stay unbounded; full JSON admission is a separate gate. *)
+pred LanguageString(s):
+  types(s : Utf16) * (u16-len(s) i<= 9007199254740991i);
