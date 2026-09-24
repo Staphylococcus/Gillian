@@ -1915,8 +1915,12 @@ let reset_solver () =
   let () = RepeatCache.clear () in
   ()
 
-let exec_sat' ~phase_selection (fs : Expr.Set.t) (gamma : typenv) : sexp option
-    =
+let exec_sat'
+    ~timeout_ms
+    ~phase_selection
+    ~raw_unknown
+    (fs : Expr.Set.t)
+    (gamma : typenv) : sexp option =
   let () =
     L.verbose (fun m ->
         m "@[<v 2>About to check SAT of:@\n%a@]@\nwith gamma:@\n@[%a@]\n"
@@ -1924,6 +1928,7 @@ let exec_sat' ~phase_selection (fs : Expr.Set.t) (gamma : typenv) : sexp option
           fs pp_typenv gamma)
   in
   let () = reset_solver () in
+  let () = cmd (set_option ":timeout" timeout_ms) in
   (* Reset retains options; restore the default unless this query explicitly
      requests a different native search policy (e.g. a solver reproducer). *)
   let () =
@@ -1947,7 +1952,7 @@ let exec_sat' ~phase_selection (fs : Expr.Set.t) (gamma : typenv) : sexp option
   let ret =
     match result with
     | Unknown ->
-        if !Config.under_approximation then raise SMT_unknown
+        if raw_unknown || !Config.under_approximation then raise SMT_unknown
         else if !Config.Verification.total then
           raise
             (Gillian_result.Exc.Gillian_error
@@ -1968,9 +1973,13 @@ let exec_sat' ~phase_selection (fs : Expr.Set.t) (gamma : typenv) : sexp option
   in
   ret
 
-let exec_sat ?(phase_selection = 3) (fs : Expr.Set.t) (gamma : typenv) :
-    sexp option =
-  try exec_sat' ~phase_selection fs gamma
+let run_sat
+    ?(timeout_ms = List.assoc "timeout" z3_config)
+    ~phase_selection
+    ~raw_unknown
+    (fs : Expr.Set.t)
+    (gamma : typenv) : sexp option =
+  try exec_sat' ~timeout_ms ~phase_selection ~raw_unknown fs gamma
   with UnexpectedSolverResponse _ as e ->
     let additional_data =
       [
@@ -1980,6 +1989,32 @@ let exec_sat ?(phase_selection = 3) (fs : Expr.Set.t) (gamma : typenv) :
       ]
     in
     raise Gillian_result.Exc.(internal_error ~additional_data "SMT failure")
+
+let exec_sat ?(phase_selection = 3) fs gamma =
+  run_sat ~phase_selection ~raw_unknown:false fs gamma
+
+(* Optional searches have a smaller budget and never exceed the configured
+   required-query limit (zero denotes unlimited). Every query sets its own
+   timeout, so an optional attempt cannot shorten a subsequent required check. *)
+let optional_timeout cap =
+  let configured = int_of_string (List.assoc "timeout" z3_config) in
+  string_of_int (if configured = 0 then cap else min cap configured)
+
+(* This is only a sufficient UNSAT check, not a satisfiability decision.
+   Native unknown is inconclusive; model/encoding/solver errors still propagate. *)
+let proves_unsat (fs : Expr.Set.t) (gamma : typenv) : bool =
+  let key = formula_key fs gamma in
+  match Formula_cache.find_opt sat_cache key with
+  | Some result -> Option.is_none result
+  | None -> (
+      try
+        let result =
+          run_sat ~timeout_ms:(optional_timeout 5000) ~phase_selection:3
+            ~raw_unknown:true fs gamma
+        in
+        Formula_cache.replace sat_cache key result;
+        Option.is_none result
+      with SMT_unknown -> false)
 
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
   let key = formula_key fs gamma in
@@ -2001,8 +2036,58 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
       let () = Formula_cache.replace sat_cache key ret in
       ret
 
+(* Search for an existential witness using extra equalities, without changing
+   the symbolic state. Only a native, validated SAT model of the complete
+   strengthened query can decide the original query. UNSAT/unknown says nothing
+   about the original inputs and must fall back. Keep this optimization limited
+   to total-mode feasibility with multiple UTF-16/Number variables. Single-pair
+   queries retain their existing search path. *)
+let seeded_model fs gamma =
+  let vars =
+    Expr.Set.fold (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty
+  in
+  let count_type typ =
+    SS.cardinal (SS.filter (fun x -> Hashtbl.find_opt gamma x = Some typ) vars)
+  in
+  if
+    not
+      (!Config.Verification.total
+      && count_type Type.Utf16Type >= 2
+      && count_type Type.NumberType >= 2)
+  then None
+  else
+    let seeded =
+      SS.fold
+        (fun x acc ->
+          let value =
+            match Hashtbl.find_opt gamma x with
+            | Some Type.Utf16Type ->
+                Some
+                  (Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical "")))
+            | Some Type.NumberType -> Some (Expr.num 0.)
+            | _ -> None
+          in
+          match value with
+          | None -> acc
+          | Some value ->
+              Expr.Set.add (Expr.BinOp (Expr.LVar x, Equal, value)) acc)
+        vars fs
+    in
+    try
+      run_sat ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+        ~raw_unknown:true seeded gamma
+    with SMT_unknown -> None
+
 let is_sat (fs : Expr.Set.t) (gamma : typenv) : bool =
-  check_sat fs gamma |> Option.is_some
+  let key = formula_key fs gamma in
+  match Formula_cache.find_opt sat_cache key with
+  | Some result -> Option.is_some result
+  | None -> (
+      match seeded_model fs gamma with
+      | Some model ->
+          Formula_cache.replace sat_cache key (Some model);
+          true
+      | None -> check_sat fs gamma |> Option.is_some)
 
 let lift_model
     (model : sexp)

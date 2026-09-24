@@ -198,10 +198,40 @@ let check_entailment
       let formulae = PFS.of_list (right_f :: (left_fs @ [] (* axioms *))) in
       let _ = Simplifications.simplify_pfs_and_gamma formulae gamma_left in
 
+      let formulae = Expr.Set.of_list (PFS.to_list formulae) in
+      let focused =
+        if !Config.Verification.total && SS.is_empty existentials then
+          let relevant e =
+            let overlap vars =
+              let goal = vars right_f and current = vars e in
+              not (SS.is_empty (SS.inter goal current))
+            in
+            let ground =
+              SS.is_empty (Expr.lvars e)
+              && SS.is_empty (Expr.pvars e)
+              && SS.is_empty (Expr.locs e)
+            in
+            ground || overlap Expr.lvars || overlap Expr.pvars
+            || overlap Expr.locs
+          in
+          Expr.Set.filter relevant formulae
+        else formulae
+      in
+      (* Removing assumptions weakens the conjunction. Only its UNSAT result
+         proves the full query; SAT/unknown must use the complete query below.
+         Never use this sufficient check for branch feasibility. *)
+      (* Omitting only untyped structural bookkeeping rarely helps search.
+         Require an omitted fact with a known logical-variable type before
+         paying for the optional query. This changes eligibility, not logic. *)
+      let gamma_tbl = Type_env.as_hashtbl gamma in
+      let useful_omission =
+        Expr.Set.exists
+          (fun e -> SS.exists (Hashtbl.mem gamma_tbl) (Expr.lvars e))
+          (Expr.Set.diff formulae focused)
+      in
       let model =
-        Smt.check_sat
-          (Expr.Set.of_list (PFS.to_list formulae))
-          (Type_env.as_hashtbl gamma)
+        if useful_omission && Smt.proves_unsat focused gamma_tbl then None
+        else Smt.check_sat formulae (Type_env.as_hashtbl gamma)
       in
       let ret = Option.is_none model in
       L.(verbose (fun m -> m "Entailment returned %b" ret));

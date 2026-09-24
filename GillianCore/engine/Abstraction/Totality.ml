@@ -315,6 +315,23 @@ let check_assertion_production ~evaluate ~assertion ~assume state a =
           if not (proves condition) then raise (Pending_domain partial))
         (if fact then Expr.UnOp (Not, e) else e)
     in
+    (* If value domains need no context at all, an already checked final fact
+       batch need not be assumed into the disposable checking context. Reuse
+       the domain checker; any requested premise or evaluation disables this
+       shortcut. Actual assertion production still retains every fact. *)
+    let context_free_values =
+      List.for_all
+        (fun (_, e) ->
+          try
+            check_expression ~proof:true
+              ~proves:(fun e -> raise (Pending_domain e))
+              ~evaluate:(fun e -> raise (Pending_domain e))
+              ~require:(fun e _ -> raise (Pending_domain e))
+              e;
+            true
+          with Pending_domain _ -> false)
+        values
+    in
     let rec establish state pending =
       let ready, deferred =
         List.fold_left
@@ -330,6 +347,8 @@ let check_assertion_production ~evaluate ~assertion ~assume state a =
           ([], []) pending
       in
       if ready = [] then List.iter (check state) (List.rev deferred @ values)
+      else if deferred = [] && context_free_values then
+        List.iter (check state) values
       else
         (* Batch independently checked facts: no pending fact enters the context,
            and one consistency query suffices for this round. *)

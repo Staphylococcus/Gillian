@@ -210,19 +210,21 @@ let guarded_unsupported_operand () =
     [ (And, dead, live); (Or, live, dead); (Impl, dead, live) ]
 
 let failed_assumption () =
-  let state = State.init () in
-  let failed =
-    try
-      ignore (State.assume_a state [ invalid ]);
-      false
-    with
-    | Gillian.Utils.Gillian_result.Exc.Gillian_error
-        (AnalysisFailures [ failure ])
-    ->
-      String.starts_with ~prefix:"Proof assumption reduction failed:"
-        failure.msg
-  in
-  Alcotest.(check bool) "reduction failure is not infeasibility" true failed
+  List.iter
+    (fun assumptions ->
+      let failed =
+        try
+          ignore (State.assume_a (State.init ()) assumptions);
+          false
+        with
+        | Gillian.Utils.Gillian_result.Exc.Gillian_error
+            (AnalysisFailures [ failure ])
+        ->
+          String.starts_with ~prefix:"Proof assumption reduction failed:"
+            failure.msg
+      in
+      Alcotest.(check bool) "reduction failure is not infeasibility" true failed)
+    [ [ invalid ]; [ Expr.true_; invalid ] ]
 
 let infeasible_assumption () =
   Alcotest.(check bool)
@@ -447,6 +449,44 @@ let assertion_domains () =
           partial;
         ])
 
+let produced_facts_retained () =
+  let x = Expr.LVar "#produced_value" in
+  let fact = bin ILessThan (Expr.int 0) x in
+  let initial = Option.get (PState.assume_t (PState.init ()) x Type.IntType) in
+  let posts =
+    PState.SMatcher.produce_posts initial
+      (Gillian.Symbolic.Subst.init [ (x, x) ])
+      [ Totality.preserve_assertion_domains [ Asrt.Pure fact ] ]
+  in
+  match posts with
+  | [ state ] ->
+      Alcotest.(check bool)
+        "actual production retains checked fact" true
+        (PState.assert_a state [ fact ]);
+      Alcotest.(check bool)
+        "retained fact does not permit a different result" false
+        (PState.assert_a state [ bin ILessThanEqual x (Expr.int 0) ])
+  | _ -> Alcotest.fail "Expected exactly one produced state"
+
+let produced_value_domains () =
+  let xs = Expr.LVar "#produced_list" in
+  let check elements =
+    let original =
+      Totality.preserve_assertion_domains
+        [
+          Asrt.Pure (bin Equal xs (Expr.EList elements));
+          Asrt.CorePred ("domain_probe", [ bin LstNth xs (Expr.int 0) ], []);
+        ]
+    in
+    Totality.check_assertion_production ~evaluate:State.eval_expr
+      ~assertion:(fun st e -> State.assert_a st [ e ])
+      ~assume:(fun st es -> State.assume_a st es)
+      (State.init ()) original
+  in
+  check [ Expr.int 7 ];
+  expect_domain_failure "Produced assertion is not proved defined:" (fun () ->
+      check [])
+
 let preserved_domain_substitution () =
   let xs = Expr.LVar "#xs" in
   let len = Expr.UnOp (LstLen, xs) in
@@ -506,6 +546,11 @@ let () =
             (with_total executable_leaves);
           Alcotest.test_case "assertion domains use only defined facts" `Quick
             (with_total assertion_domains);
+          Alcotest.test_case "actual production retains checked facts" `Quick
+            (with_total produced_facts_retained);
+          Alcotest.test_case "resource values still require their domains"
+            `Quick
+            (with_total produced_value_domains);
           Alcotest.test_case "preserve domains through substitution" `Quick
             (with_total preserved_domain_substitution);
           Alcotest.test_case "post production errors retain failing siblings"

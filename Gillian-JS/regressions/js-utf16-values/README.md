@@ -1,6 +1,6 @@
 # JavaScript UTF-16 value mapping
 
-These 41 controls compile actual JavaScript and verify its runtime bodies in
+These 44 controls compile actual JavaScript and verify its runtime bodies in
 `--total` mode. They cover arbitrary string concatenation, prefix cancellation,
 `typeof`, symbolic property mutation/read, numeric property keys, and a wrong
 concatenation result. They include arbitrary-input theorems and separate concrete
@@ -115,3 +115,20 @@ P06.2b2b work.
 The runner allows 45 seconds per selected procedure (90 seconds for the two
 checked helper/caller cases), recording each budget in its result. SMT query
 limits are unchanged. Timeouts retain partial logs and fail acceptance.
+
+P06.2b2b2 complete: `charat-independent.js` checks the actual helper and wrapper
+with independently arbitrary string/Number pairs. Only the helper's proved
+output type is made explicit; input identity still admits NaN and signed zero.
+The wrong-result and unchecked-helper controls remain failures. A sufficient
+entailment precheck accepts only subset UNSAT; SAT/unknown use the full query.
+Definedness checking avoids constructing an unused final scratch context.
+Complete-query feasibility may search for a validated native witness with
+additional empty-string/zero guesses; a failed guess uses the full query.
+Guesses never enter the symbolic state or narrow its original input contract.
+The earlier no-op assumption shortcut was rejected and removed; matcher
+consistency checking remains intact. Optional searches have separate bounded
+budgets. No postcondition fact is removed from actual production.
+The PoC independent-observations report passes 974 controls across all 109
+supporting jobs, all six native model replays and 120/120 PoC tests. All 46,989
+frozen inputs stayed unchanged. Final documentation follows validation; this is
+not full-fold certification. Direct independent builtin calls remain pending.

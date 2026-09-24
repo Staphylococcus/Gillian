@@ -12,6 +12,18 @@ val exec_sat :
   (string, Type.t) Hashtbl.t ->
   Sexplib.Sexp.t option
 
+(** True only for native UNSAT. SAT or unknown is inconclusive and returns
+    false; it must not be used as a SAT/branch-feasibility decision. Other
+    solver errors, including invalid models, propagate. Unknown is never cached.
+    This optional search is capped at five seconds and the configured SMT limit.
+*)
+val proves_unsat : Expr.Set.t -> (string, Type.t) Hashtbl.t -> bool
+
+(** Complete-query feasibility, with a bounded existential witness search for
+    total-mode queries with multiple UTF-16 and Number variables. Guesses never
+    enter symbolic state; only native validated SAT can succeed early.
+    UNSAT/unknown falls back to the original query, whose unknown/error policy
+    remains unchanged. *)
 val is_sat : Expr.Set.t -> (string, Type.t) Hashtbl.t -> bool
 
 val check_sat :
