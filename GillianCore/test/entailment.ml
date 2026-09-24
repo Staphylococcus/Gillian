@@ -89,7 +89,14 @@ let finite_position () =
     in
     Alcotest.(check bool)
       "seed failure cannot hide required unknown" true
-      (rejected (fun () -> ignore (Smt.is_sat seeded_fs g))))
+      (rejected (fun () -> ignore (Smt.is_sat seeded_fs g)));
+    Hashtbl.remove g "#other_s";
+    Hashtbl.remove g "#other_index";
+    Hashtbl.add g "#length" Type.NumberType;
+    let single_pair = Expr.Set.add (bin Equal (Expr.LVar "#length") len) fs in
+    Alcotest.(check bool)
+      "single-pair seed failure cannot hide required unknown" true
+      (rejected (fun () -> ignore (Smt.is_sat single_pair g))))
   else
     (* The optional API may legitimately use its bounded unknown outcome.
        A false precheck is not a proof: require actual UNSAT from the original
@@ -150,6 +157,54 @@ let seeded_fallback () =
        (Expr.Set.of_list (other @ (bin Equal s empty :: different)))
        (Gamma.as_hashtbl g))
 
+let single_pair_witness () =
+  let s = Expr.LVar "#single_s" and n = Expr.LVar "#single_n" in
+  let value = Expr.LVar "#single_value" in
+  let size = Expr.UnOp (Utf16Len, s) in
+  let g = Gamma.init () in
+  Gamma.update g "#single_s" Type.Utf16Type;
+  Gamma.update g "#single_n" Type.NumberType;
+  (* This is the actual AJV invariant-production query, with one pair and an
+     untyped scope value. Every assertion must survive the optional search. *)
+  let fs =
+    Expr.Set.of_list
+      [
+        not_ (bin Equal value (Expr.Lit Literal.Nono));
+        bin Equal n (Expr.UnOp (IntToNum, size));
+        bin ILessThanEqual size
+          (Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))));
+      ]
+  in
+  let gamma = Gamma.as_hashtbl g in
+  Alcotest.(check bool)
+    "one-pair feasibility succeeds" true (Smt.is_sat fs gamma);
+  let nonempty =
+    Expr.Set.add
+      (bin Equal size (Expr.int 1))
+      (Expr.Set.add (bin Equal n (Expr.num 1.)) fs)
+  in
+  let empty =
+    Expr.Lit (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical ""))
+  in
+  Alcotest.(check bool)
+    "the empty guess contradicts the nonempty query" false
+    (Smt.is_sat (Expr.Set.add (bin Equal s empty) nonempty) gamma);
+  Alcotest.(check bool)
+    "the complete nonempty query succeeds after seed failure" true
+    (Smt.is_sat nonempty gamma);
+  Alcotest.(check bool)
+    "witness guesses do not rule out later nonempty inputs" true
+    (Smt.is_sat
+       (Expr.Set.add
+          (bin Equal size (Expr.int 2))
+          (Expr.Set.add (bin Equal n (Expr.num 2.)) fs))
+       gamma);
+  Alcotest.(check bool)
+    "a contradictory full query cannot gain a witness" false
+    (Smt.is_sat
+       (Expr.Set.add (bin Equal value (Expr.Lit Literal.Nono)) fs)
+       gamma)
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -162,4 +217,6 @@ let tests =
       (with_total seeded_witness);
     Alcotest.test_case "failed SAT seed requires full fallback" `Quick
       (with_total seeded_fallback);
+    Alcotest.test_case "single-pair complete-query witness" `Quick
+      (with_total single_pair_witness);
   ]

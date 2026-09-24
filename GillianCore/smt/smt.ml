@@ -2070,8 +2070,8 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
    the symbolic state. Only a native, validated SAT model of the complete
    strengthened query can decide the original query. UNSAT/unknown says nothing
    about the original inputs and must fall back. Keep this optimization limited
-   to total-mode feasibility with multiple UTF-16/Number variables. Single-pair
-   queries retain their existing search path. *)
+   to total-mode feasibility with multiple UTF-16/Number variables or a direct
+   single-pair rounded-length equality. Other queries keep their existing path. *)
 let seeded_model fs gamma =
   let vars =
     Expr.Set.fold (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty
@@ -2079,11 +2079,29 @@ let seeded_model fs gamma =
   let count_type typ =
     SS.cardinal (SS.filter (fun x -> Hashtbl.find_opt gamma x = Some typ) vars)
   in
+  let length_pair number string =
+    Hashtbl.find_opt gamma number = Some Type.NumberType
+    && Hashtbl.find_opt gamma string = Some Type.Utf16Type
+  in
+  let has_length_pair =
+    Expr.Set.exists
+      (function
+        | BinOp
+            ( LVar number,
+              (Equal | ValueEqual),
+              UnOp (IntToNum, UnOp (Utf16Len, LVar string)) )
+        | BinOp
+            ( UnOp (IntToNum, UnOp (Utf16Len, LVar string)),
+              (Equal | ValueEqual),
+              LVar number ) -> length_pair number string
+        | _ -> false)
+      fs
+  in
   if
     not
       (!Config.Verification.total
-      && count_type Type.Utf16Type >= 2
-      && count_type Type.NumberType >= 2)
+      && ((count_type Type.Utf16Type >= 2 && count_type Type.NumberType >= 2)
+         || has_length_pair))
   then None
   else
     let seeded =
