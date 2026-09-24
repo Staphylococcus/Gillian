@@ -14,6 +14,8 @@ TOTAL = (0, 'All total procedure specs succeeded')
 POST = (1, "Couldn't satisfy postcondition")
 DOMAIN = (1, 'not proved defined')
 CASES = [
+    ('length-language-bound-wrong-type.gil', ['--total'], DOMAIN),
+    ('length-language-bound-partial.gil', ['--total'], DOMAIN),
     ('length-nonnegative-wrong-type.gil', ['--total'], DOMAIN),
     ('length-nonnegative-partial.gil', ['--total'], DOMAIN),
     ('index-ordinary-unsupported.gil', [], (1, 'symbolic UTF-16 indexing requires total-mode domain checks')),

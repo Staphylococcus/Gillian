@@ -1660,6 +1660,18 @@ let rec encode_logical_expression
                  (fp_bin "fp.leq" (number_literal 0.) pos_value.expr)
                  (bool_not outside.expr))))
       >- BooleanType
+  | BinOp
+      ( UnOp (IntToNum, (UnOp (Utf16Len, _) as size)),
+        FLessThanEqual,
+        Lit (Num maximum) )
+    when maximum = 9007199254740991. ->
+      (* M = 2^53-1 is representable, as is every integer from 0 through M.
+         For N >= M+1, monotonic RNE gives RNE(N) >= 2^53, also at overflow.
+         Thus RNE64(N) <= M iff N <= M. This exact cutoff does not generalize
+         to 2^53, since 2^53+1 rounds down. Keep conversion unchanged and
+         encode the operand normally, retaining its typing/domain guards. *)
+      let>- size = get_int (f size) in
+      num_leq size.expr (int_zk (Z.pred (Z.shift_left Z.one 53))) >- BooleanType
   | BinOp ((UnOp (IntToNum, UnOp (Utf16Len, _)) as len), FLessThanEqual, pos) ->
       let>- len = get_num (f len) in
       let>- pos = get_num (f pos) in

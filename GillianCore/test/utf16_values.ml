@@ -202,6 +202,18 @@ let length_conversion_boundaries () =
         [
           eq (length a) integer;
           not_ (eq is_integral (Expr.Lit concrete_integral));
+        ];
+      let bound = Expr.num 9007199254740991. in
+      let comparison =
+        bin FLessThanEqual (Expr.UnOp (IntToNum, length a)) bound
+      in
+      let concrete_bound =
+        Engine.CExprEval.evaluate_expr store
+          (bin FLessThanEqual literal_conversion bound)
+      in
+      check "composite bound agrees with original boundary conversion" false
+        [
+          eq (length a) integer; not_ (eq comparison (Expr.Lit concrete_bound));
         ])
     (List.map
        (fun (n, f) -> (Z.of_string n, f))
@@ -270,6 +282,32 @@ let length_nonnegative () =
       check "negative and NaN Numbers are not nonnegative" false
         [ bin FLessThanEqual (Expr.num 0.) (Expr.num number) ])
     [ -1.; neg_infinity; nan ]
+
+let language_length_bound () =
+  let len = length a in
+  let number = Expr.UnOp (IntToNum, len) in
+  let maximum = Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))) in
+  let bound = bin FLessThanEqual number (Expr.num 9007199254740991.) in
+  check "language length has the numeric upper bound" false
+    [ bin ILessThanEqual len maximum; not_ bound ];
+  check "numeric bound cannot admit a larger mathematical length" false
+    [ bin ILessThan maximum len; bound ];
+  check "numeric bound admits empty strings" true [ eq a (value []); bound ];
+  check "numeric bound does not imply empty strings" true
+    [ eq a (value [ 65 ]); bound; not_ (eq len (Expr.int 0)) ];
+  (* Neither other thresholds nor unrelated Number operands use this rule. *)
+  check "nonempty strings do not satisfy a zero upper bound" false
+    [ eq a (value [ 65 ]); bin FLessThanEqual number (Expr.num 0.) ];
+  check "the next representable cutoff still admits its rounding tie" false
+    [
+      eq len (Expr.Lit (Int (Z.succ (Z.shift_left Z.one 53))));
+      not_ (bin FLessThanEqual number (Expr.num 9007199254740992.));
+    ];
+  List.iter
+    (fun n ->
+      check "arbitrary large/NaN Numbers still fail the language bound" false
+        [ bin FLessThanEqual (Expr.num n) (Expr.num 9007199254740991.) ])
+    [ 9007199254740992.; infinity; nan ]
 
 let replay_length_model gamma constraints model =
   let index = Expr.LVar "#length_index" in
@@ -1200,6 +1238,7 @@ let tests =
     ("length conversion boundaries", `Quick, length_conversion_boundaries);
     ("language length integrality", `Quick, language_length_integrality);
     ("length nonnegativity", `Quick, length_nonnegative);
+    ("language length bound", `Quick, language_length_bound);
     ("length branch models", `Quick, length_branch_models);
     ("comparison reduction", `Quick, comparison_reduction);
     ("length comparison Numbers", `Quick, length_comparison_numbers);
