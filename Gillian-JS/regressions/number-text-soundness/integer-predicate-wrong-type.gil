@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Str) ]]
+[[ (ret == true) ]] normal
+proc answer(x) { assert (is-int(num_to_int(x))); ret := true; return };

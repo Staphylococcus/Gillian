@@ -205,6 +205,106 @@ let single_pair_witness () =
        (Expr.Set.add (bin Equal value (Expr.Lit Literal.Nono)) fs)
        gamma)
 
+let length_only_witness () =
+  let s = Expr.LVar "#branch_s" and len = Expr.LVar "#branch_len" in
+  let pos = Expr.LVar "#branch_pos" and count = Expr.LVar "#branch_count" in
+  let rank = Expr.LVar "#branch_rank" in
+  let size = Expr.UnOp (Utf16Len, s) in
+  let number = Expr.UnOp (IntToNum, size) in
+  let maximum = Expr.num 9007199254740991. in
+  let g = Gamma.init () in
+  Gamma.update g "#branch_s" Type.Utf16Type;
+  Gamma.update g "#branch_len" Type.NumberType;
+  Gamma.update g "#branch_pos" Type.NumberType;
+  (* The actual compiled AJV branch query leaves count and the saved rank
+     wrapped/untyped. Its Number equalities must survive witness search. *)
+  let common =
+    Expr.Set.of_list
+      [
+        Expr.UnOp (IsInt, count);
+        Expr.UnOp (IsInt, len);
+        Expr.UnOp (IsInt, pos);
+        bin FLessThanEqual (Expr.num 0.) count;
+        bin FLessThanEqual count pos;
+        bin ValueEqual len number;
+        bin Equal len number;
+        bin Equal len len;
+        bin Equal pos pos;
+        bin FLessThanEqual len maximum;
+        bin ValueEqual rank (bin FMinus maximum pos);
+        bin ILessThanEqual size
+          (Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))));
+      ]
+  in
+  let gamma = Gamma.as_hashtbl g in
+  let inside = Expr.Set.add (bin FLessThan pos len) common in
+  let outside =
+    Expr.Set.add
+      (bin FLessThanEqual pos len)
+      (Expr.Set.add (bin FLessThanEqual len pos) common)
+  in
+  let check label expected fs =
+    Alcotest.(check bool) label expected (Smt.is_sat fs gamma)
+  in
+  Alcotest.(check bool)
+    "model-returning API also finds the complete nonempty witness" true
+    (Option.is_some (Smt.check_sat inside gamma));
+  check "the other branch remains feasible" true outside;
+  check "a length-zero guess cannot satisfy the inside branch" false
+    (Expr.Set.add (bin Equal size (Expr.int 0)) inside);
+  check "a contradictory count cannot gain a witness" false
+    (Expr.Set.add (bin FLessThan count (Expr.num 0.)) inside);
+  check "a contradictory rank cannot gain a witness" false
+    (Expr.Set.add (bin ValueEqual rank (Expr.num (-1.))) inside);
+  check "fallback admits a longer input after both guesses fail" true
+    (Expr.Set.add (bin Equal size (Expr.int 2)) inside);
+  check "a previous witness cannot fix later positions or ranks" true
+    (Expr.Set.add
+       (bin Equal pos (Expr.num 1.))
+       (Expr.Set.add (bin Equal size (Expr.int 2)) inside));
+  let surrogate =
+    Expr.Lit
+      (Literal.Utf16String
+         (Gillian.Utils.Utf16.of_canonical
+            (Gillian.Utils.Utf16.of_code_units [ 0xd800 ])))
+  in
+  check "length witnesses leave code units free" true
+    (Expr.Set.add (bin Equal s surrogate) inside);
+  (* Exercise either orientation/equality kind without the other link hiding
+     which syntactic shape made the optional search eligible. *)
+  let unlinked =
+    common
+    |> Expr.Set.remove (bin ValueEqual len number)
+    |> Expr.Set.remove (bin Equal len number)
+    |> Expr.Set.add (bin FLessThan pos len)
+  in
+  let links =
+    [
+      bin Equal len number;
+      bin Equal number len;
+      bin ValueEqual len number;
+      bin ValueEqual number len;
+    ]
+  in
+  List.iter
+    (fun link ->
+      check "each direct typed length link admits the branch witness" true
+        (Expr.Set.add link unlinked))
+    links;
+  (* The real helper later keeps the same length equality while dropping
+     len's gamma entry. The model-returning path must still see a witness. *)
+  Hashtbl.remove gamma "#branch_len";
+  Alcotest.(check bool)
+    "wrapped linked Number also has a complete-query witness" true
+    (Option.is_some (Smt.check_sat inside gamma));
+  List.iter
+    (fun link ->
+      check "either wrapped link retains the full branch formula" true
+        (Expr.Set.add link unlinked))
+    links;
+  check "wrapped length does not hide a contradictory full query" false
+    (Expr.Set.add (bin Equal size (Expr.int 0)) inside)
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -219,4 +319,6 @@ let tests =
       (with_total seeded_fallback);
     Alcotest.test_case "single-pair complete-query witness" `Quick
       (with_total single_pair_witness);
+    Alcotest.test_case "length-only complete-query witnesses" `Quick
+      (with_total length_only_witness);
   ]

@@ -444,6 +444,70 @@ let integer_truncation () =
   check_sat "integral values survive truncation" false
     [ Expr.UnOp (IsInt, x); neg (eq (Expr.UnOp (ToIntOp, x)) x) ]
 
+let integer_truncation_predicate () =
+  let predicate e = Expr.UnOp (IsInt, Expr.UnOp (ToIntOp, e)) in
+  let expected = neg (bin Or (eq x (n infinity)) (eq x (n neg_infinity))) in
+  check_sat "only infinities retain a non-integral ToInteger result" false
+    [ neg (eq (predicate x) expected) ];
+  check_sat "NaN is admitted and truncates to an integer" true
+    [ neg (eq x x); predicate x ];
+  check_sat "a non-integral ToInteger result remains possible" true
+    [ neg (predicate x) ];
+  List.iter
+    (fun value ->
+      let result = Engine.CExprEval.evaluate_unop ToIntOp (Literal.Num value) in
+      let expected =
+        match Engine.CExprEval.evaluate_unop IsInt result with
+        | Literal.Bool b -> b
+        | _ -> assert false
+      in
+      check_sat "typed composite agrees with executable operations" false
+        [
+          bin ValueEqual x (n value);
+          neg (eq (predicate x) (Expr.bool expected));
+        ];
+      Alcotest.(check bool)
+        "wrapped Number keeps the same composite predicate" false
+        (Smt.is_sat
+           (Expr.Set.of_list
+              [
+                bin ValueEqual x (n value);
+                neg (eq (predicate x) (Expr.bool expected));
+              ])
+           (Hashtbl.create 0)))
+    [
+      0.;
+      -0.;
+      0.5;
+      -0.5;
+      1.5;
+      -1.5;
+      5e-324;
+      -5e-324;
+      9007199254740991.;
+      9007199254740992.;
+      max_float;
+      -.max_float;
+      infinity;
+      neg_infinity;
+      nan;
+    ];
+  List.iter
+    (fun value ->
+      Alcotest.(check bool)
+        "composite keeps the wrapped Number type guard" false
+        (Smt.is_sat
+           (Expr.Set.of_list [ bin ValueEqual x value; predicate x ])
+           (Hashtbl.create 0)))
+    [
+      Expr.Lit Literal.Undefined;
+      Expr.Lit Literal.Null;
+      Expr.bool true;
+      Expr.int 0;
+      Expr.Lit (Literal.String "0");
+      Expr.EList [];
+    ]
+
 let formatter_roundtrip () =
   let result =
     Reduction.reduce_lexpr ~gamma:(gamma ())
@@ -779,6 +843,7 @@ let tests =
     ("integer wrap conversions", `Quick, integer_wraps);
     ("ECMAScript numeric strings", `Quick, numeric_strings);
     ("integer truncation", `Quick, integer_truncation);
+    ("integer truncation predicate", `Quick, integer_truncation_predicate);
     ("formatter roundtrip", `Quick, formatter_roundtrip);
     ("symbolic list indices", `Quick, symbolic_indices);
     ("runtime constants", `Quick, runtime_constants);

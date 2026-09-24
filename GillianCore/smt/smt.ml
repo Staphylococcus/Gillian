@@ -1608,6 +1608,13 @@ let rec encode_logical_expression
       make_const ~typ kind var
   | ALoc var -> native_const ObjectType var
   | PVar _ -> exceptf "HORROR: Program variable in pure formula"
+  | UnOp (IsInt, UnOp (ToIntOp, value)) ->
+      (* ToInteger maps NaN to zero and truncates every finite Number to an
+         integer, preserving signed zero. Only infinities remain non-integral.
+         Evaluate the operand and retain its typing/definedness requirements;
+         neither ToInteger's Number result nor the input domain changes. *)
+      let>- value = get_num (f value) in
+      bool_not (fp_un "fp.isInfinite" value.expr) >- BooleanType
   | UnOp (IsInt, UnOp (IntToNum, (UnOp (Utf16Len, _) as size))) ->
       (* A nonnegative integer rounds either to an integral finite binary64
          value or to +infinity. The overflow midpoint is 2^1024 - 2^970:
@@ -2058,26 +2065,6 @@ let proves_unsat (fs : Expr.Set.t) (gamma : typenv) : bool =
         Option.is_none result
       with SMT_unknown -> false)
 
-let check_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
-  let key = formula_key fs gamma in
-  match Formula_cache.find_opt sat_cache key with
-  | Some result ->
-      let () =
-        L.verbose (fun m ->
-            m "SAT check cached with result: %b" (Option.is_some result))
-      in
-      result
-  | None ->
-      let () = L.verbose (fun m -> m "SAT check not found in cache") in
-      let ret = exec_sat fs gamma in
-      let () =
-        L.verbose (fun m ->
-            let f = Expr.conjunct (Expr.Set.elements fs) in
-            m "Adding to cache : @[%a@]" Expr.pp f)
-      in
-      let () = Formula_cache.replace sat_cache key ret in
-      ret
-
 (* Search for an existential witness using extra equalities, without changing
    the symbolic state. Only a native, validated SAT model of the complete
    strengthened query can decide the original query. UNSAT/unknown says nothing
@@ -2092,12 +2079,18 @@ let seeded_model fs gamma =
     SS.cardinal (SS.filter (fun x -> Hashtbl.find_opt gamma x = Some typ) vars)
   in
   let length_pair number string =
-    Hashtbl.find_opt gamma number = Some Type.NumberType
+    (* Entailment may leave the linked Number wrapped rather than retaining
+       a gamma entry. The original equality still stays in the complete query;
+       eligibility need not assume or add its type to the symbolic state. *)
+    (match Hashtbl.find_opt gamma number with
+    | None | Some Type.NumberType -> true
+    | _ -> false)
     && Hashtbl.find_opt gamma string = Some Type.Utf16Type
   in
-  let has_length_pair =
-    Expr.Set.exists
-      (function
+  let linked_strings =
+    Expr.Set.fold
+      (fun assertion acc ->
+        match assertion with
         | BinOp
             ( LVar number,
               (Equal | ValueEqual),
@@ -2105,15 +2098,16 @@ let seeded_model fs gamma =
         | BinOp
             ( UnOp (IntToNum, UnOp (Utf16Len, LVar string)),
               (Equal | ValueEqual),
-              LVar number ) -> length_pair number string
-        | _ -> false)
-      fs
+              LVar number )
+          when length_pair number string -> SS.add string acc
+        | _ -> acc)
+      fs SS.empty
   in
   if
     not
       (!Config.Verification.total
       && ((count_type Type.Utf16Type >= 2 && count_type Type.NumberType >= 2)
-         || has_length_pair))
+         || not (SS.is_empty linked_strings)))
   then None
   else
     let seeded =
@@ -2133,21 +2127,58 @@ let seeded_model fs gamma =
               Expr.Set.add (Expr.BinOp (Expr.LVar x, Equal, value)) acc)
         vars fs
     in
-    try
-      run_sat ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
-        ~raw_unknown:true seeded gamma
-    with SMT_unknown -> None
+    let try_seed query =
+      try
+        run_sat ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+          ~raw_unknown:true query gamma
+      with SMT_unknown -> None
+    in
+    match try_seed seeded with
+    | Some _ as witness -> witness
+    | None when not (SS.is_empty linked_strings) ->
+        (* An empty/zero guess contradicts a nonempty branch. Try a one-unit
+           length, leaving code units and every Number variable free. Start
+           from the original complete formula, not the failed strengthened
+           query. This is only an existential search: failure still falls back
+           and a validated SAT witness never changes the symbolic state. *)
+        let one_unit =
+          SS.fold
+            (fun string acc ->
+              Expr.Set.add
+                (Expr.BinOp
+                   (Expr.UnOp (Utf16Len, Expr.LVar string), Equal, Expr.int 1))
+                acc)
+            linked_strings fs
+        in
+        try_seed one_unit
+    | None -> None
 
-let is_sat (fs : Expr.Set.t) (gamma : typenv) : bool =
+let check_sat (fs : Expr.Set.t) (gamma : typenv) : sexp option =
   let key = formula_key fs gamma in
   match Formula_cache.find_opt sat_cache key with
-  | Some result -> Option.is_some result
-  | None -> (
-      match seeded_model fs gamma with
-      | Some model ->
-          Formula_cache.replace sat_cache key (Some model);
-          true
-      | None -> check_sat fs gamma |> Option.is_some)
+  | Some result ->
+      let () =
+        L.verbose (fun m ->
+            m "SAT check cached with result: %b" (Option.is_some result))
+      in
+      result
+  | None ->
+      let () = L.verbose (fun m -> m "SAT check not found in cache") in
+      let ret =
+        match seeded_model fs gamma with
+        | Some _ as witness -> witness
+        | None -> exec_sat fs gamma
+      in
+      let () =
+        L.verbose (fun m ->
+            let f = Expr.conjunct (Expr.Set.elements fs) in
+            m "Adding to cache : @[%a@]" Expr.pp f)
+      in
+      let () = Formula_cache.replace sat_cache key ret in
+      ret
+
+let is_sat (fs : Expr.Set.t) (gamma : typenv) : bool =
+  Option.is_some (check_sat fs gamma)
 
 let lift_model
     (model : sexp)

@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : List) ]]
+[[ (ret == true) ]] normal
+proc answer(x) { assert (is-int(num_to_int(l-nth(x, 0i)))); ret := true; return };

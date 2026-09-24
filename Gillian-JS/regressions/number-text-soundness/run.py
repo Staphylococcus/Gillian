@@ -16,6 +16,10 @@ DESCENT = (1, "variant is not a strictly smaller natural integer")
 ENTRY = (1, "entry variant is not a natural integer")
 POST = (1, "Couldn't satisfy postcondition")
 CASES = [
+    ('integer-predicate.gil', ['--total'], TOTAL),
+    ('integer-predicate-wrong.gil', ['--total'], POST),
+    ('integer-predicate-wrong-type.gil', ['--total'], (1, 'not proved defined')),
+    ('integer-predicate-partial.gil', ['--total'], (1, 'not proved defined')),
     ("distinct-indices.gil", ["--total"], TOTAL),
     ("distinct-indices-wrong.gil", ["--total"], POST),
     ("distinct-indices-equal.gil", ["--total"], POST),
