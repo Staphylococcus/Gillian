@@ -66,7 +66,7 @@ let fp_finite a =
    2^(width+52) are multiples of 2^width. Smaller magnitudes fit the native
    unsigned conversion of that width+52; sanitize its domain before applying
    it. This also maps NaN/infinities and both zeros to positive zero. *)
-let integer_wrap ~width ~signed value =
+let integer_wrap_bits ~width value =
   let wide = width + 52 in
   let absolute = fp_un "fp.abs" value in
   let safe =
@@ -87,7 +87,10 @@ let integer_wrap ~width ~signed value =
          ])
       [ whole ]
   in
-  let wrapped = ite (fp_un "fp.isNegative" value) (app_ "bvneg" [ low ]) low in
+  ite (fp_un "fp.isNegative" value) (app_ "bvneg" [ low ]) low
+
+let integer_wrap ~width ~signed value =
+  let wrapped = integer_wrap_bits ~width value in
   let conversion = if signed then "to_fp" else "to_fp_unsigned" in
   let modular =
     app
@@ -1246,6 +1249,21 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- index' = get_num p2 in
       let res = Axiomatised_operations.snth $$ [ str'.expr; index'.expr ] in
       res >- StringType
+  | BitwiseAndF ->
+      let>- left = get_num p1 in
+      let>- right = get_num p2 in
+      (* Number AND applies ToInt32 to both operands. Modular conversion is
+         total even for NaN/infinities, and every signed 32-bit result is
+         exactly representable as binary64. CExprEval uses the same domain. *)
+      let bits =
+        app_ "bvand"
+          [
+            integer_wrap_bits ~width:32 left.expr;
+            integer_wrap_bits ~width:32 right.expr;
+          ]
+      in
+      app (List [ atom "_"; atom "to_fp"; atom "11"; atom "53" ]) [ rne; bits ]
+      >- NumberType
   | FMod
   | Utf16Less
   | StrLess
@@ -1261,7 +1279,6 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
   | LeftShiftL
   | SignedRightShiftL
   | UnsignedRightShiftL
-  | BitwiseAndF
   | BitwiseOrF
   | BitwiseXorF
   | LeftShiftF
@@ -1608,6 +1625,11 @@ let rec encode_logical_expression
       make_const ~typ kind var
   | ALoc var -> native_const ObjectType var
   | PVar _ -> exceptf "HORROR: Program variable in pure formula"
+  | UnOp (ToInt32Op, (BinOp (_, Utf16CodeUnit, _) as unit)) ->
+      (* Every numeric code unit is in [0, 65535], so ToInt32 preserves it.
+         Encode the observation normally: retain receiver/index requirements
+         and the total-mode gate; no lookup or operand is discarded. *)
+      f unit
   | UnOp (IsInt, UnOp (ToIntOp, value)) ->
       (* ToInteger maps NaN to zero and truncates every finite Number to an
          integer, preserving signed zero. Only infinities remain non-integral.

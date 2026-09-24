@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x v== #x) * types(#x : Num) ]]
+[[ (ret == 42i) ]] normal
+proc answer(x) { assert ((x &f 0.0) == 0.0); ret := 42i; return };

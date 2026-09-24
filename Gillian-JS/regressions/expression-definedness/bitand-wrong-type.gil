@@ -1,0 +1,4 @@
+spec answer(x)
+[[ (x == #x) * types(#x : Str) ]]
+[[ (ret == 42i) ]] normal
+proc answer(x) { unused := x &f 0.0; ret := 42i; return };

@@ -221,6 +221,7 @@ rule read = parse
   | "s<#"
   | "s<"                 { GIL_Parser.SLT           }
   | "&"                  { GIL_Parser.BITWISEAND    }
+  | "&f"                 { GIL_Parser.BITWISEANDF   }
   | "|"                  { GIL_Parser.BITWISEOR     }
   | "^"                  { GIL_Parser.BITWISEXOR    }
   | "<<"                 { GIL_Parser.LEFTSHIFT     }

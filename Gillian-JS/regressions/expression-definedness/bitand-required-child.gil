@@ -1,0 +1,4 @@
+spec answer(xs)
+[[ (xs == #xs) * types(#xs : List) ]]
+[[ (ret == 42i) ]] normal
+proc answer(xs) { unused := l-nth(xs, 0i) &f 0.0; ret := 42i; return };

@@ -17,6 +17,15 @@ ENTRY = (1, "entry variant is not a natural integer")
 POST = (1, "Couldn't satisfy postcondition")
 CLOSED_PREDICATE = (124, "closed entry cannot abstract or assume heap resources")
 CASES = [
+    ("bitand-code-unit-required.gil", ["--total"], (1, "Executed operation is not proved defined")),
+    ("bitand-code-unit-proof-required.gil", ["--total"], (1, "Pure assertion is not proved defined")),
+    ("bitand-code-unit-valid.gil", ["--total"], TOTAL),
+    ("bitand-untyped.gil", ["--total"], (1, "Executed operation is not proved defined")),
+    ("bitand-wrong-type.gil", ["--total"], (1, "Executed operation is not proved defined")),
+    ("bitand-required-child.gil", ["--total"], (1, "Executed operation is not proved defined")),
+    ("bitand-proof-required.gil", ["--total"], (1, "Pure assertion is not proved defined")),
+    ("bitand-proof-skipped.gil", ["--total"], TOTAL),
+    ("bitand-proof-valid.gil", ["--total"], TOTAL),
     ("proof-matching-two-heads.gil", ["--total"], TOTAL),
     ("proof-matching-two-heads-wrong.gil", ["--total"], (1, "Pure assertion failed:")),
     ("proof-matching-two-heads-short.gil", ["--total"], (1, "Pure assertion failed:")),

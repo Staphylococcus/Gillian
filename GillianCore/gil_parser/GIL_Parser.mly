@@ -101,6 +101,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token AND
 %token OR
 %token BITWISEAND
+%token BITWISEANDF
 %token BITWISEOR
 %token BITWISEXOR
 %token LEFTSHIFT
@@ -277,7 +278,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %nonassoc EQ VALUEEQ
 %nonassoc FLT FLE FGT FGE ILT ILE IGT IGE SLT
 %left LEFTSHIFT SIGNEDRIGHTSHIFT UNSIGNEDRIGHTSHIFT LEFTSHIFTL SIGNEDRIGHTSHIFTL UNSIGNEDRIGHTSHIFTL
-%left BITWISEOR BITWISEXOR BITWISEAND BITWISEXORL BITWISEORL BITWISEANDL
+%left BITWISEOR BITWISEXOR BITWISEAND BITWISEANDF BITWISEXORL BITWISEORL BITWISEANDL
 %left FPLUS FMINUS IPLUS IMINUS
 %left FTIMES FDIV FMOD ITIMES IDIV IMOD M_POW
 %left M_ATAN2 STRCAT UTF16CAT SETDIFF
@@ -499,6 +500,8 @@ binary_op_expr:
     { Expr.BinOp (e1, BitwiseXor, e2) }
   | e1 = binary_op_expr; BITWISEAND; e2 = addsub_expr
     { Expr.BinOp (e1, BitwiseAnd, e2) }
+  | e1 = binary_op_expr; BITWISEANDF; e2 = addsub_expr
+    { Expr.BinOp (e1, BitwiseAndF, e2) }
   | e1 = binary_op_expr; BITWISEXORL; e2 = addsub_expr
     { Expr.BinOp (e1, BitwiseXorL, e2) }
   | e1 = binary_op_expr; BITWISEORL; e2 = addsub_expr

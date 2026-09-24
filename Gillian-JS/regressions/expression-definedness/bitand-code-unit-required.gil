@@ -1,0 +1,4 @@
+spec answer(s,i)
+[[ (s == #s) * (i v== #i) * types(#s : Utf16, #i : Num) ]]
+[[ (ret == 42i) ]] normal
+proc answer(s,i) { unused := num_to_int32(u16-code(s,i)) &f 0.0; ret := 42i; return };

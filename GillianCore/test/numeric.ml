@@ -822,8 +822,170 @@ let exact_numeric_aliases () =
         [ 0.; -0.; nan; infinity; neg_infinity; 1.; max_float ])
     [ false; true ]
 
+let bitwise_and () =
+  let values =
+    [
+      0.;
+      -0.;
+      0.5;
+      -0.5;
+      1.;
+      -1.;
+      55296.;
+      56320.;
+      57343.;
+      64512.;
+      65535.;
+      2147483647.;
+      -2147483648.;
+      2147483648.;
+      4294967295.;
+      4294967297.;
+      -4294967297.;
+      9007199254740991.;
+      Float.max_float;
+      infinity;
+      neg_infinity;
+      nan;
+    ]
+  in
+  let word value =
+    if Float.is_finite value then
+      Z.erem (Z.of_float value) (Z.shift_left Z.one 32)
+    else Z.zero
+  in
+  List.iter
+    (fun a ->
+      List.iter
+        (fun b ->
+          let bits = Z.logand (word a) (word b) in
+          let signed =
+            if Z.testbit bits 31 then Z.sub bits (Z.shift_left Z.one 32)
+            else bits
+          in
+          let expected = Z.to_float signed in
+          let concrete =
+            Engine.CExprEval.evaluate_binop
+              (Engine.CExprEval.CStore.init [])
+              BitwiseAndF (n a) (n b)
+          in
+          Alcotest.(check bool)
+            "Number AND concrete matches modular integer oracle" true
+            (Literal.equal concrete (Literal.Num expected));
+          let result = bin BitwiseAndF (n a) (n b) in
+          let property =
+            if expected = 0. then eq (bin FDiv (n 1.) result) (n infinity)
+            else eq result (n expected)
+          in
+          Alcotest.(check bool)
+            "Number AND SMT matches modular integer oracle" false
+            (Smt.is_sat (Expr.Set.singleton (neg property)) (Hashtbl.create 0)))
+        values)
+    values;
+  let result = bin BitwiseAndF x y in
+  check_sat "all Number AND results are integral" false
+    [ neg (Expr.UnOp (IsInt, result)) ];
+  check_sat "all Number AND results are signed 32-bit" false
+    [
+      bin Or
+        (bin FLessThan result (n (-2147483648.)))
+        (bin FLessThan (n 2147483647.) result);
+    ];
+  let mask = bin BitwiseAndF x (n 64512.) in
+  check_sat "arbitrary Number mask admits low surrogate" true
+    [ eq mask (n 56320.) ];
+  check_sat "arbitrary Number mask admits other values" true
+    [ neg (eq mask (n 56320.)) ]
+
+let bitwise_and_models () =
+  let previous_dump = !Gillian.Utils.Config.dump_smt in
+  Gillian.Utils.Config.dump_smt :=
+    Option.is_some (Sys.getenv_opt "GILLIAN_BITWISE_AND_MODELS");
+  Fun.protect
+    ~finally:(fun () -> Gillian.Utils.Config.dump_smt := previous_dump)
+    (fun () ->
+      let z = Expr.LVar "#bitand_result" in
+      let gamma = Gamma.as_hashtbl (gamma ()) in
+      Hashtbl.add gamma "#bitand_result" NumberType;
+      let models =
+        List.map
+          (fun (id, extra) ->
+            let constraints = eq z (bin BitwiseAndF x y) :: extra in
+            let model =
+              match Smt.exec_sat (Expr.Set.of_list constraints) gamma with
+              | Some m -> m
+              | None -> Alcotest.fail ("Missing AND witness: " ^ id)
+            in
+            let lifted = Hashtbl.create 3 in
+            Smt.lift_model model gamma (Hashtbl.add lifted)
+              (Expr.Set.of_list [ x; y; z ]);
+            let get name =
+              match Hashtbl.find_opt lifted name with
+              | Some (Expr.Lit value) -> value
+              | _ -> Alcotest.fail "Missing AND model value"
+            in
+            let store =
+              Engine.CExprEval.CStore.init
+                (List.map
+                   (fun name -> (name, get name))
+                   [ "#numeric_x"; "#numeric_y"; "#bitand_result" ])
+            in
+            let visitor =
+              object
+                inherit [_] Visitors.endo
+                method! visit_LVar () _ name = Expr.PVar name
+              end
+            in
+            List.iter
+              (fun e ->
+                match
+                  Engine.CExprEval.evaluate_expr store (visitor#visit_expr () e)
+                with
+                | Bool true -> ()
+                | _ ->
+                    Alcotest.fail "AND witness failed complete concrete replay")
+              constraints;
+            let bits name =
+              match get name with
+              | Num n ->
+                  `String (Printf.sprintf "%016Lx" (Int64.bits_of_float n))
+              | _ -> Alcotest.fail "AND witness lost Number type"
+            in
+            `Assoc
+              [
+                ("id", `String id);
+                ("leftBits", bits "#numeric_x");
+                ("rightBits", bits "#numeric_y");
+                ("resultBits", bits "#bitand_result");
+              ])
+          ([
+             ("low-mask", [ eq y (n 64512.); eq z (n 56320.) ]);
+             ("other-mask", [ eq y (n 64512.); neg (eq z (n 56320.)) ]);
+           ]
+          @ List.map
+              (fun (id, a, b) ->
+                (id, [ bin ValueEqual x (n a); bin ValueEqual y (n b) ]))
+              [
+                ("negative-result", -1., -1.);
+                ("positive-overflow", 4294967297., -1.);
+                ("negative-overflow", -4294967297., -1.);
+                ("fraction", -1.9, 2147483647.);
+                ("nan", nan, -1.);
+                ("positive-infinity", infinity, -1.);
+                ("negative-infinity", neg_infinity, -1.);
+                ("negative-zero", -0., -1.);
+                ("subnormal", 5e-324, -1.);
+                ("huge", Float.max_float, -1.);
+              ])
+      in
+      match Sys.getenv_opt "GILLIAN_BITWISE_AND_MODELS" with
+      | None -> ()
+      | Some path -> Yojson.Safe.to_file path (`List models))
+
 let tests =
   [
+    ("Number bitwise AND", `Quick, bitwise_and);
+    ("Number AND models", `Quick, bitwise_and_models);
     ("rounding", `Quick, rounding);
     ("signed integer division", `Quick, integer_division);
     ("integer predicate parity", `Quick, integer_predicate);

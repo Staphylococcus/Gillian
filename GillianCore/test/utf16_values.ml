@@ -1060,6 +1060,8 @@ let checked_code_unit () =
   with_total (fun () ->
       let term = bin Utf16CodeUnit a (Expr.num 0.) in
       let nonempty = bin ILessThan (Expr.int 0) (length a) in
+      check "ToInt32 preserves an arbitrary numeric code unit" false
+        [ nonempty; not_ (eq (Expr.UnOp (ToInt32Op, term)) term) ];
       check "symbolic unit is a nonnegative finite integer" false
         [
           nonempty;
@@ -1088,7 +1090,23 @@ let checked_code_unit () =
             message
       in
       Alcotest.(check bool)
-        "ordinary symbolic mode rejects unchecked unit lookup" true rejected)
+        "ordinary symbolic mode rejects unchecked unit lookup" true rejected;
+      let rejected_composite =
+        try
+          ignore
+            (Smt.is_sat
+               (Expr.Set.singleton
+                  (eq
+                     (Expr.UnOp (ToInt32Op, bin Utf16CodeUnit a (Expr.num 17.)))
+                     (Expr.num 4660.)))
+               (Gamma.as_hashtbl (gamma ())));
+          false
+        with Smt.SMT_error message ->
+          String.starts_with ~prefix:"SMT encoding: symbolic UTF-16 indexing"
+            message
+      in
+      Alcotest.(check bool)
+        "ToInt32 cannot bypass the ordinary lookup gate" true rejected_composite)
 
 let code_unit_models () =
   with_total (fun () ->

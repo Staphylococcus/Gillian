@@ -82,7 +82,11 @@ let uint64_right_shift x y =
 let int32_bitwise_not x = Int32.to_float (Int32.lognot (Int32.of_float x))
 
 let int32_bitwise_and x y =
-  Int32.to_float (Int32.logand (Int32.of_float x) (Int32.of_float y))
+  (* Give Number AND explicit ToInt32 semantics rather than depending on
+     unspecified host conversions outside the signed 32-bit range. The JS
+     compiler already converts both operands; applying ToInt32 twice is exact. *)
+  Int32.to_float
+    (Int32.logand (Int32.of_float (to_int32 x)) (Int32.of_float (to_int32 y)))
 
 let int32_bitwise_or x y =
   Int32.to_float (Int32.logor (Int32.of_float x) (Int32.of_float y))
