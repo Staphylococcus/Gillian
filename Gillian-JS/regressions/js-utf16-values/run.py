@@ -19,6 +19,10 @@ ORDERING = (125, 'binop: u16<')
 WHOLE_LOOP_CASES = {'ucs2length.js', 'ucs2length-stalled.js',
                     'ucs2length-wrong-result.js', 'ucs2length-missing-context.js'}
 CASES = [
+    ('count-witness.js', ['--total', '--proc=check'], TOTAL),
+    ('count-witness-negative-zero.js', ['--total', '--proc=check'], TOTAL),
+    ('count-witness-wrong-body.js', ['--total', '--proc=check'], ASSERT),
+    ('count-witness-wrong-binding.js', ['--total', '--proc=check'], ASSERT),
     ('trailing-assert-wrong.js', ['--total', '--proc=check'], ASSERT),
     ('trailing-assert.js', ['--total', '--proc=check'], TOTAL),
     ('trailing-branch-wrong.js', ['--total', '--proc=check'], ASSERT),

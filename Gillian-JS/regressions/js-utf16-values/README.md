@@ -158,10 +158,10 @@ full JSON admission, helper composition and final adapters remain open.
 The files in `../../Examples/ProofDevelopment/` are P07 development inputs, deliberately
 not registered as passing acceptance cases. The helper body and original entry
 are unchanged; the recursive prefix relation adds the exact-count obligation.
-The explicit length equality bypasses the earlier pair-bound query. The parser
-now executes the trailing fold; the latest diagnostic reaches native SMT unknown
-while matching the recursive step and unfolding the prior prefix. Earlier
-unknowns and case timeouts remain retained non-proofs.
+Explicit length equality and declared predecessor witnesses bypass the earlier
+pair-bound and inverse-witness failures. The latest actual-helper diagnostic
+completes several folds, then reaches its original 90-second cap during numeric
+invariant matching. Earlier unknowns and timeouts remain non-proofs.
 Exact-count proof, wrong-count rejection controls and AJV composition remain
 pending; these files do not extend the accepted whole-loop result-bounds claim.
 
@@ -172,3 +172,10 @@ false reachable assertions reject and an unreachable one stays unreachable.
 Parser units also check comment order, disabled annotation parsing and rejection
 of a dangling non-tactic annotation. These controls support the exact-helper
 fold annotation; they do not prove its pending prefix theorem.
+
+The four `count-witness*` controls exercise declared existential witnesses through
+actual compiled JS. Symbolic integral counts and actual negative zero prove;
+a wrong increment and a wrong supplied witness fail assertions. The declaration
+makes the known predecessor available to matching-plan construction, avoiding
+an extra inverse-arithmetic equality while retaining the original formula check.
+These are focused witness controls, not the pending exact-count helper theorem.

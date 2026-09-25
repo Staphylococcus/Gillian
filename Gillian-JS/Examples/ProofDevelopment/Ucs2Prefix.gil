@@ -37,6 +37,7 @@ pure pred Ucs2Advance(s : Utf16, len : Num, before : Num, after : Num):
 
 pure nounfold pred Ucs2Prefix(s : Utf16, len : Num, pos : Num, count : Num):
   Ucs2PrefixDomain(s, len, pos, count) * (pos == 0.0) * (count == 0.0),
+  [step: #previous, #previous_count]
   Ucs2PrefixDomain(s, len, pos, count) *
   Ucs2Prefix(s, len, #previous, #previous_count) *
   Ucs2Advance(s, len, #previous, pos) * (count == #previous_count + 1.0);

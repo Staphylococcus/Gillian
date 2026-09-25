@@ -7,10 +7,16 @@ the string length, avoiding the earlier mixed string/numeric bound query.
 Automatic inverse witnesses then failed; explicit old-position/count fold
 witnesses are checked proof annotations, not assumed results.
 
-The trailing fold was dropped by the parser. The accepted parser slice repairs
-its placement; the typed-capture probe executes it, then returns native SMT
-unknown while matching a step and unfolding the prior prefix. Earlier SMT unknown,
-case-cap and broken-pipe diagnostics remain non-proofs. Sources and next steps
-are retained in the sibling PoC's `prefix-preservation-development.json` and
-`docs/full-proof-roadmap.md`. Exact count and its intended rejection controls
+The parser now retains the trailing fold. Declaring predecessor witnesses in
+`[step: #previous, #previous_count]` prevents an unnecessary inverse-arithmetic
+discharge, including a signed-zero mismatch. The original successor relation
+is still checked. Four compiled positive/rejection controls exercise that
+existing label mechanism; no backend rule is changed.
+
+The latest original-helper diagnostic completes several folds, then reaches its
+90-second cap at a numeric count/position invariant (283 queries). It is not
+exact-count acceptance. Earlier unknowns, parse errors and timeouts remain
+retained in the sibling PoC's `count-witness-observations.json` and prior
+`prefix-preservation-development.json`. The next obligation is documented in
+`docs/full-proof-roadmap.md`. Exact count and its whole-helper rejection controls
 must pass before these inputs enter the strict acceptance catalogue.
