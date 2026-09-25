@@ -1347,6 +1347,13 @@ struct
       (* Logic command *)
       let eval_logic (lcmd : LCmd.t) eval_state =
         Totality.check_closed_logic lcmd;
+        (* Set this on execution, not during the static annotation walk: the
+           initializer must still be able to allocate its fixed-name objects.
+           Keep it set after frame restoration and across sibling paths. *)
+        (match lcmd with
+        | SL (Invariant _) when !Config.Verification.closed_entry ->
+            Config.Verification.closed_entry_heap_abstracted := true
+        | _ -> ());
         let {
           prog;
           i;

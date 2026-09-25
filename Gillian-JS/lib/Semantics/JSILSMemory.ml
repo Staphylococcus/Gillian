@@ -592,14 +592,21 @@ module M = struct
       (if action = JSILNames.alloc then
          match args with
          | Expr.Lit Empty :: _ -> ()
+         | _
+           when !Config.Verification.closed_entry
+                && !Config.Verification.closed_entry_heap_abstracted ->
+             unsupported
+               "forbids constrained allocation after closed-entry heap \
+                abstraction."
          | Expr.Lit (Loc loc) :: _
            when !Config.Verification.closed_entry
                 && (not (Utils.Names.is_lloc_name loc))
                 && not (SHeap.has_loc heap loc) ->
-             (* The closed-entry verifier starts at emp and forbids resource
-                production/folding, loop abstraction and summaries. Thus no location
-                can be hidden in a predicate or suspended frame. Reserve the
-                concrete allocator's namespace, and never overwrite a name. *)
+             (* Before the first invariant, closed entry exposes the entire
+                heap: resource production/folding and summaries are forbidden.
+                After abstraction only the Empty/fresh case above is allowed.
+                Reserve the concrete allocator's namespace and never overwrite
+                a name that is already exposed. *)
              ()
          | _ -> unsupported "requires fresh allocation in the current fragment."
        else if action = JSILNames.getCell then

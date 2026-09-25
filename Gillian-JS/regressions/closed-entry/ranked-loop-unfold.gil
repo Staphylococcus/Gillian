@@ -1,0 +1,16 @@
+nounfold pred Slot(a:Obj): <Cell>(a, "value"; 42i);
+spec main()
+[[ emp ]] [[ (ret == 0i) * <Metadata>($lclosed; null) * <Cell>($lclosed, "value"; 42i) ]] normal
+proc main() {
+  a := [Alloc]($lclosed, null);
+  absent := [GetCell]($lclosed, "value");
+  ignored := [SetCell]($lclosed, "value", 42i);
+  n := 2i;
+head: invariant (Slot($lclosed) * (0i i<= n) * types(n : Int)) [bind: n] variant(n);
+  unfold Slot($lclosed);
+  goto [n i> 0i] step done;
+step: n := n i- 1i;
+  goto head;
+done: ret := n;
+  return
+};

@@ -678,7 +678,8 @@ let check_macro prog name =
 let check_closed_logic cmd =
   if !Config.Verification.closed_entry then
     match cmd with
-    | LCmd.Assert _ | If _ | Macro _ | SL (GUnfold _) -> ()
+    | LCmd.Assert _ | If _ | Macro _ | SL (GUnfold _ | Invariant _ | Unfold _)
+      -> ()
     | _ ->
         unsupported
           (Fmt.str "closed entry cannot abstract or assume heap resources: %a"

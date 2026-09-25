@@ -1,0 +1,15 @@
+spec main()
+[[ emp ]] [[ (ret == 0i) * <Metadata>($lclosed; null) * <Cell>($lclosed, "value"; 42i) ]] normal
+proc main() {
+  a := [Alloc]($lclosed, null);
+  absent := [GetCell]($lclosed, "value");
+  ignored := [SetCell]($lclosed, "value", 42i);
+  n := 2i;
+head: invariant ((0i i<= n) * types(n : Int)) [bind: n] variant(n);
+  goto [n i> 0i] step done;
+step: n := n i- 1i;
+  goto head;
+done: other := [Alloc]($lother, null);
+  ret := n;
+  return
+};

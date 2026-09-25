@@ -1,0 +1,18 @@
+spec main()
+[[ emp ]] [[ (ret == 0i) ]] normal
+proc main() {
+  ignored := "helper"();
+  other := [Alloc]($lother, null);
+  ret := 0i;
+  return
+};
+
+proc helper() {
+  n := 2i;
+head: invariant ((0i i<= n) * types(n : Int)) [bind: n] variant(n);
+  goto [n i> 0i] step done;
+step: n := n i- 1i;
+  goto head;
+done: ret := n;
+  return
+};

@@ -1,0 +1,14 @@
+spec main()
+[[ emp ]] [[ (ret == 0i) ]] normal
+proc main() {
+  fresh := [Alloc](empty, null);
+  obj := l-nth(fresh, 0i);
+  n := 2i;
+head: invariant ((0i i<= n) * types(n : Int)) [bind: n] variant(n);
+  goto [n i> 0i] step done;
+step: other := [Alloc](obj, null);
+  n := n i- 1i;
+  goto head;
+done: ret := n;
+  return
+};

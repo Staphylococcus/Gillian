@@ -29,6 +29,21 @@ CASES = [
  ('fresh', ['--closed-entry', '--proc=main'], 124, 'requires --total'),
  ('two', ['--total', '--closed-entry'], 124, 'exactly one procedure'),
  ('fresh', ['--total', '--proc=main'], 124, 'requires fresh allocation'),
+ ('ranked-loop', BASE, 0, SUCCESS),
+ ('ranked-loop-frame', BASE, 0, SUCCESS),
+ ('ranked-loop-unfold', BASE, 0, SUCCESS),
+ ('ranked-loop-false', BASE, 1, 'Loop invariant establishment failed'),
+ ('ranked-loop-stalled', BASE, 1, 'variant is not a strictly smaller natural integer'),
+ ('ranked-loop-wrong', BASE, 1, "Couldn't satisfy postcondition"),
+ ('ranked-loop-hidden-collision', BASE, 124, 'constrained allocation after closed-entry heap abstraction'),
+ ('ranked-loop-helper-collision', BASE, 124, 'constrained allocation after closed-entry heap abstraction'),
+ ('ranked-loop-late-fixed', BASE, 124, 'constrained allocation after closed-entry heap abstraction'),
+ ('ranked-loop-fresh', BASE, 0, SUCCESS),
+ ('ranked-loop-unnamed-inside', BASE, 0, SUCCESS),
+ ('ranked-loop-symbolic-collision', BASE, 124, 'constrained allocation after closed-entry heap abstraction'),
+ ('ranked-loop-helper-return', BASE, 124, 'constrained allocation after closed-entry heap abstraction'),
+ ('ranked-loop-generated-invariant', BASE, 124, 'cannot name a generated concrete location'),
+ ('unfold-missing', BASE, 1, 'MIFCell($lclosed, "value")'),
 ]
 if __name__ == '__main__':
  output = Path(tempfile.mkdtemp(prefix='gillian-closed-entry-', dir=os.environ.get('GILLIAN_RESULTS_ROOT')))

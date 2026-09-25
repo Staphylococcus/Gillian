@@ -151,7 +151,8 @@ struct
             let rank = SSubst.subst_in_expr subst ~partial:true rank in
             Totality.check_proof_expression ~context:"Entry variant"
               ~evaluate:(SPState.eval_expr ss_pre)
-              ~assertion:(fun condition -> SPState.assert_a ss_pre [ condition ])
+              ~assertion:(fun condition ->
+                SPState.assert_a ss_pre [ condition ])
               rank;
             SPState.eval_expr ss_pre rank)
           entry_rank
@@ -970,7 +971,7 @@ struct
           prog'.preds;
         (prog', tests', tests)
 
-  let verify_procs
+  let verify_procs_in_scope
       ~(init_data : SPState.init_data)
       ?(prev_results : VerificationResults.t option)
       (prog : prog_t)
@@ -1007,10 +1008,12 @@ struct
           Option.iter (fun a -> check_names (Asrt.clocs a)) pred.pred_guard)
         prog.preds;
       match (proc.proc_params, spec.spec_sspecs) with
-      | [], [ { Spec.ss_pre = ([ Asrt.Emp ], _); ss_flag = Flag.Normal; _ } ] -> ()
+      | [], [ { Spec.ss_pre = [ Asrt.Emp ], _; ss_flag = Flag.Normal; _ } ] ->
+          ()
       | _ ->
           Totality.unsupported
-            "closed entry requires no parameters and one normal emp specification.");
+            "closed entry requires no parameters and one normal emp \
+             specification.");
     let total_order =
       if !Config.Verification.total then
         Some
@@ -1068,7 +1071,7 @@ struct
                   }
               | { name; flag = Some _; _ } :: _
                 when !Config.Verification.total
-                     && not !Config.Verification.closed_entry
+                     && (not !Config.Verification.closed_entry)
                      && Result.is_ok res ->
                   {
                     prog with
@@ -1097,6 +1100,16 @@ struct
     Printf.printf "%s\n" msg;
     L.normal (fun m -> m "%s" msg);
     result
+
+  let verify_procs
+      ~init_data
+      ?prev_results
+      prog
+      pnames_to_verify
+      lnames_to_verify =
+    Config.Verification.with_fresh_closed_entry_heap_phase (fun () ->
+        verify_procs_in_scope ~init_data ?prev_results prog pnames_to_verify
+          lnames_to_verify)
 
   let select_procs_and_lemmas ~procs_to_verify ~lemmas_to_verify =
     let module C = Config.Verification in
@@ -1222,7 +1235,8 @@ struct
       let call_graph = SAInterpreter.call_graph in
       let () =
         if not !Config.Verification.closed_entry then
-          write_verif_results cur_source_files call_graph ~diff:"" global_results
+          write_verif_results cur_source_files call_graph ~diff:""
+            global_results
       in
       r
 

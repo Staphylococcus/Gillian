@@ -108,6 +108,18 @@ module Verification = struct
 
   let total = ref false
   let closed_entry = ref false
+
+  (* A checked invariant can hide heap locations in predicates or loop frames.
+     Never regain fixed-name allocation within the same verification, even on
+     another symbolic branch or after restoring a frame. This process-wide
+     restriction is conservative; it is not a path-local freshness claim. *)
+  let closed_entry_heap_abstracted = ref false
+
+  let with_fresh_closed_entry_heap_phase f =
+    let previous = !closed_entry_heap_abstracted in
+    closed_entry_heap_abstracted := false;
+    Fun.protect ~finally:(fun () -> closed_entry_heap_abstracted := previous) f
+
   let proof_dependencies = ref ([] : (string * string) list)
   let procs_to_verify = ref ([] : string list)
   let lemmas_to_verify = ref ([] : string list)
