@@ -155,15 +155,12 @@ isolated passes; accepted four-job concurrency preserves all proof budgets. No
 string/schema bound or helper axiom is added. Ranked actual traversal is next;
 full JSON admission, helper composition and final adapters remain open.
 
-The files in `../../Examples/ProofDevelopment/` are P07 development inputs, deliberately
-not registered as passing acceptance cases. The helper body and original entry
-are unchanged; the recursive prefix relation adds the exact-count obligation.
-Explicit length equality and declared predecessor witnesses bypass the earlier
-pair-bound and inverse-witness failures. The latest actual-helper diagnostic
-completes several folds, then reaches its original 90-second cap during numeric
-invariant matching. Earlier unknowns and timeouts remain non-proofs.
-Exact-count proof, wrong-count rejection controls and AJV composition remain
-pending; these files do not extend the accepted whole-loop result-bounds claim.
+The files in `../../Examples/ProofDevelopment/` remain unregistered development
+inputs. The cursor-sign invariant and checked exit equality now permit one
+successful exact-prefix total proof (106.32 seconds under a separate 300-second
+diagnostic cap). Full-body mutation rejection and final case registration still
+block acceptance; neither native solver limits nor existing case budgets change.
+Unknowns/errors from negative controls are not accepted rejections.
 
 Trailing proof-command controls cover function/block fallthrough, empty bodies,
 loop backedges, both symbolic branches and code after a return. The parser keeps
@@ -195,3 +192,18 @@ All six new cases and six existing witness controls pass in focused validation.
 Native replay checks 96 boundary/signed-zero inputs and the exact extra-increment
 mutations. The current 108-case catalogue was not rerun in full; backend code and
 binaries retain their previously accepted full-suite evidence.
+
+## P07.1a2g — cursor signs and exit equality
+
+Five new controls use the ordinary 45-second allowance. `length-zero-sign.js`
+executes runtime string-length access over the original language-string domain
+and proves its result is never negative zero; the opposite postcondition fails.
+`cursor-exit.js` proves numeric exit bounds imply value identity when both sides
+exclude negative zero. The two explicit signed-zero witnesses fail if either
+guard is missing. This is necessary for substituting actual cursor/length values
+in a predicate; numeric equality alone does not preserve zero's sign.
+
+All five new controls and twelve existing arithmetic/witness cases pass. The
+113-case catalogue has not been rerun in full. Backend implementation, installed
+runtime and binary bytes retain the prior full-baseline evidence. The PoC's
+`cursor-exit-observations.json` records focused checks and current limitations.

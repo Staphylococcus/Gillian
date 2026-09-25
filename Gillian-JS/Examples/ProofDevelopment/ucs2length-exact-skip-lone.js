@@ -20,6 +20,8 @@ function ucs2length(str) {
           if (value >= 55296 && value <= 56319 && pos < len) {
             value = str.charCodeAt(pos);
             if ((value & 64512) === 56320) pos++;
+          } else if (value >= 55296 && value <= 57343) {
+            length--;
           }
           /* @tactic assert(scope(pos: #next_pos) * scope(length: #count + 1) * types(#next_pos : Num)) [bind: #next_pos]; apply Ucs2NumericAdvance(#count, #pos, #next_pos, #len); fold Ucs2Prefix(#s, #len, #next_pos, #count + 1) [step with (#previous := #pos) and (#previous_count := #count)] */
         }

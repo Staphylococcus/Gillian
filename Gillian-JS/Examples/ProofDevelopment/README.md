@@ -1,32 +1,34 @@
-# Pending exact-count proof
+# Exact-count proof development
 
-These inputs are not accepted regression cases. `ucs2length-exact.js` retains
-the accepted AJV executable AST and original language-string entry. Its recursive
-relation now receives the existing numeric length with an explicit equality to
-the string length, avoiding the earlier mixed string/numeric bound query.
-Automatic inverse witnesses then failed; explicit old-position/count fold
-witnesses are checked proof annotations, not assumed results.
+These files remain outside the strict acceptance catalogue. The actual AJV
+helper keeps its original executable AST and language-string entry. Its exact
+prefix relation, resource postcondition and decreasing loop rank are unchanged.
 
-The parser now retains the trailing fold. Declaring predecessor witnesses in
-`[step: #previous, #previous_count]` prevents an unnecessary inverse-arithmetic
-discharge, including a signed-zero mismatch. The original successor relation
-is still checked. Four compiled positive/rejection controls exercise that
-existing label mechanism; no backend rule is changed.
-
-The numeric advance lemma now lives in the strict regression suite and has
-positive, wrong-body, false-lemma and unchecked-consumption controls. This probe
-applies it only after it proves in the same run. Select both obligations:
+The invariant now proves that cursor and length are not negative zero. At exit,
+a checked value-equality assertion permits direct reuse of the prefix predicate.
+A checked count-increment assertion keeps the arithmetic lemma and fold aligned.
+The arithmetic lemma must prove in the same run before its result is applied:
 
 ```sh
 gillian-js verify ucs2length-exact.js --total --proc=ucs2length --lemma=Ucs2NumericAdvance
 ```
 
-The latest source-bound probe proves the lemma, then reaches its original
-90-second allowance. This is not exact-count acceptance. The helper AST, entry,
-invariant, prefix relation and postcondition are unchanged. Rejected search and
-annotation attempts are retained in the sibling PoC's
-`prefix-search-development.json`; the checked arithmetic and final helper probe
-are in `arithmetic-lemma-observations.json`. The next obligation is to align the
-proved arithmetic facts with actual next values at folding/backedge, then prove
-the complete loop and reject its wrong-count mutants. See the sibling PoC's
-`docs/full-proof-roadmap.md`. These inputs remain outside strict acceptance.
+This candidate passed total verification in 106.32 seconds under a separately
+recorded 300-second diagnostic watchdog. That is a successful exact-post proof
+run, but full acceptance still requires intended rejection of all four body
+mutants and an explicit final case allowance. Accepted case budgets and native
+SMT limits have not changed. The five strict `length-zero-sign*`/`cursor-exit*`
+controls separately validate the sign facts and their necessary guards.
+
+The four `ucs2length-exact-*` mutants keep the original entry and proof annotations.
+They alter only initial count, lone-unit counting, pair counting, or low-surrogate
+recognition. Native witnesses confirm each bug; three automatic-mode symbolic
+rejections remain unknown/error. An explicit-entry-fold/manual-mode experiment
+also reached required unknown and was discarded. Do not count these as accepted
+negative controls. Preserve raw diagnostic bytes: lone surrogates may render as
+non-UTF-8 output.
+
+Source-bound reports live in the sibling PoC's `experiments/gillian/symbolic-utf16/`:
+`cursor-exit-observations.json`, `canonical-arithmetic-development.json`, and
+`cursor-exit-development.json`. The next bounded work is P07.1a2h in its
+`docs/full-proof-roadmap.md`; original-schema AJV composition follows acceptance.

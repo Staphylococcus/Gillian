@@ -10,7 +10,7 @@
 */
 function ucs2length(str) {
         var len = str.length;
-        var length = 0;
+        var length = 1;
         var pos = 0;
         var value;
         /* @invariant (! (#pos v== -0)) * (! (#len v== -0)) * Ucs2Prefix(#s, #len, #pos, #count) * (this == undefined) * scope(str: #s) * scope(len: #len) * scope(length: #count) * scope(pos: #pos) * scope(value: #value) * types(#s : Str, #len : Num, #count : Num, #pos : Num) * (#len == s-len(#s)) * (#len <=# 9007199254740991) * (is-int #len) * (is-int #count) * (is-int #pos) * (0 <=# #count) * (#count <=# #pos) * (#pos <=# #len) * LanguageString(#s) * CharCodeAtContext() [bind: #pos, #count, #value] variant(9007199254740991 - #pos) */

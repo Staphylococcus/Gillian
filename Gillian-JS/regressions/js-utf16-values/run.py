@@ -19,6 +19,11 @@ ORDERING = (125, 'binop: u16<')
 WHOLE_LOOP_CASES = {'ucs2length.js', 'ucs2length-stalled.js',
                     'ucs2length-wrong-result.js', 'ucs2length-missing-context.js'}
 CASES = [
+    ('length-zero-sign.js', ['--total', '--proc=check'], TOTAL),
+    ('length-zero-sign-wrong.js', ['--total', '--proc=check'], POST),
+    ('cursor-exit.js', ['--total', '--proc=check'], TOTAL),
+    ('cursor-exit-negative-zero.js', ['--total', '--proc=check'], POST),
+    ('cursor-exit-negative-length.js', ['--total', '--proc=check'], POST),
     ('numeric-advance-1.js', ['--total', '--proc=check', '--lemma=Ucs2NumericAdvance'], TOTAL),
     ('numeric-advance-2.js', ['--total', '--proc=check', '--lemma=Ucs2NumericAdvance'], TOTAL),
     ('numeric-advance-1-wrong.js', ['--total', '--proc=check', '--lemma=Ucs2NumericAdvance'], POST),
