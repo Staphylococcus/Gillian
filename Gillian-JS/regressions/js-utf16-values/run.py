@@ -19,6 +19,13 @@ ORDERING = (125, 'binop: u16<')
 WHOLE_LOOP_CASES = {'ucs2length.js', 'ucs2length-stalled.js',
                     'ucs2length-wrong-result.js', 'ucs2length-missing-context.js'}
 CASES = [
+    ('numeric-advance-1.js', ['--total', '--proc=check', '--lemma=Ucs2NumericAdvance'], TOTAL),
+    ('numeric-advance-2.js', ['--total', '--proc=check', '--lemma=Ucs2NumericAdvance'], TOTAL),
+    ('numeric-advance-1-wrong.js', ['--total', '--proc=check', '--lemma=Ucs2NumericAdvance'], POST),
+    ('numeric-advance-2-wrong.js', ['--total', '--proc=check', '--lemma=Ucs2NumericAdvance'], POST),
+    ('numeric-advance-1.js', ['--total', '--proc=check'],
+     (124, 'Ucs2NumericAdvance has not passed every lemma proof case in this run')),
+    ('numeric-advance-wrong-lemma.js', ['--total', '--proc=check', '--lemma=Ucs2WrongNumericAdvance'], POST),
     ('count-witness.js', ['--total', '--proc=check'], TOTAL),
     ('count-witness-negative-zero.js', ['--total', '--proc=check'], TOTAL),
     ('count-witness-wrong-body.js', ['--total', '--proc=check'], ASSERT),

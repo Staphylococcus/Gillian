@@ -1,6 +1,6 @@
 # JavaScript UTF-16 value mapping
 
-These 44 controls compile actual JavaScript and verify its runtime bodies in
+These controls compile actual JavaScript and verify its runtime bodies in
 `--total` mode. They cover arbitrary string concatenation, prefix cancellation,
 `typeof`, symbolic property mutation/read, numeric property keys, and a wrong
 concatenation result. They include arbitrary-input theorems and separate concrete
@@ -179,3 +179,19 @@ a wrong increment and a wrong supplied witness fail assertions. The declaration
 makes the known predecessor available to matching-plan construction, avoiding
 an extra inverse-arithmetic equality while retaining the original formula check.
 These are focused witness controls, not the pending exact-count helper theorem.
+
+## P07.1a2e — checked numeric advance
+
+`Ucs2Arithmetic.gil` states one/two-increment preservation over arbitrary ordered
+integral Numbers within the existing language-length bound. Callers must select
+and prove `Ucs2NumericAdvance` in the same run before applying it. Two actual JS
+callers increment count and position, then use the checked lemma. Double count
+increments must fail their posts; a false arithmetic lemma and an unselected
+lemma must also reject. All six cases retain the ordinary 45-second cap.
+The original exact-prefix helper is still a development probe: a successful
+arithmetic lemma alone does not prove exact Unicode count or the full fold.
+
+All six new cases and six existing witness controls pass in focused validation.
+Native replay checks 96 boundary/signed-zero inputs and the exact extra-increment
+mutations. The current 108-case catalogue was not rerun in full; backend code and
+binaries retain their previously accepted full-suite evidence.

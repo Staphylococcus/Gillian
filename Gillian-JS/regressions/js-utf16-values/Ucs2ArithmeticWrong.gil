@@ -1,0 +1,11 @@
+(* Checked numeric preservation for one or two actual loop increments.
+   This lemma must verify in the caller's run before its result may be used. *)
+lemma Ucs2WrongNumericAdvance(count, pos, after, len)
+[[ types(#count : Num, #pos : Num, #after : Num, #len : Num) *
+   (is_int(#count)) * (is_int(#pos)) * (is_int(#len)) *
+   (0.0 <= #count) * (#count <= #pos) * (#pos < #len) *
+   (#len <= 9007199254740991.0) * (#after <= #len) *
+   ((#after v== #pos + 1.0) or (#after v== (#pos + 1.0) + 1.0)) ]]
+[[ (is_int(#after)) * (is_int(#count + 1.0)) *
+   (0.0 <= #count + 1.0) * (#count + 2.0 <= #after) ]]
+[* *]

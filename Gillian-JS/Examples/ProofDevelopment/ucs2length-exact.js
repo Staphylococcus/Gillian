@@ -1,6 +1,7 @@
 "use strict";
 /* @import ../../runtime/JS2JSIL/String.jsil
  @import ../../regressions/js-utf16-values/LanguageString.gil
+ @import ../../regressions/js-utf16-values/Ucs2Arithmetic.gil
  @import Ucs2Prefix.gil
  @import ../../regressions/js-utf16-values/CharCodeAtContext.jsil */
 /** @id ucs2length
@@ -20,7 +21,7 @@ function ucs2length(str) {
             value = str.charCodeAt(pos);
             if ((value & 64512) === 56320) pos++;
           }
-          /* @tactic assert(scope(pos: #next_pos) * scope(length: #next_count) * types(#next_pos : Num, #next_count : Num)) [bind: #next_pos, #next_count]; fold Ucs2Prefix(#s, #len, #next_pos, #next_count) [step with (#previous := #pos) and (#previous_count := #count)] */
+          /* @tactic assert(scope(pos: #next_pos) * scope(length: #next_count) * types(#next_pos : Num, #next_count : Num)) [bind: #next_pos, #next_count]; apply Ucs2NumericAdvance(#count, #pos, #next_pos, #len); fold Ucs2Prefix(#s, #len, #next_pos, #next_count) [step with (#previous := #pos) and (#previous_count := #count)] */
         }
         return length;
       }
