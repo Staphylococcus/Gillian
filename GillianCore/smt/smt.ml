@@ -2226,7 +2226,9 @@ let seeded_model fs gamma =
         (* Try a small concrete position before leaving Number indices free.
            Both are complete-query witness searches. This ordering avoids a
            native solver crash on a retained free-position length-two query;
-           failed guesses still reach all original attempts and required checks. *)
+           failed guesses still reach all original attempts and required checks.
+           The singleton attempt covers a last-code-unit branch whose invariant
+           aliases otherwise make free-position feasibility fragile. *)
         let indices =
           object
             inherit [_] Visitors.iter as super
@@ -2251,13 +2253,16 @@ let seeded_model fs gamma =
         let positioned =
           if SS.is_empty numbers then None
           else
-            try_seed
-              (SS.fold
-                 (fun x acc ->
-                   Expr.Set.add
-                     (Expr.BinOp (Expr.LVar x, ValueEqual, Expr.num 0.))
-                     acc)
-                 numbers (with_length 2))
+            List.find_map
+              (fun length ->
+                try_seed
+                  (SS.fold
+                     (fun x acc ->
+                       Expr.Set.add
+                         (Expr.BinOp (Expr.LVar x, ValueEqual, Expr.num 0.))
+                         acc)
+                     numbers (with_length length)))
+              [ 2; 1 ]
         in
         match positioned with
         | Some _ as witness -> witness

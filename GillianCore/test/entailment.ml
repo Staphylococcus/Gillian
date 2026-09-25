@@ -698,6 +698,155 @@ let numeric_rank () =
       ("two increments", twice, bin FLessThan next len :: base);
     ]
 
+let numeric_conjuncts () =
+  let x = Expr.LVar "#conj_x" and s = Expr.LVar "#conj_s" in
+  let limit = Expr.LVar "#conj_limit" in
+  let witness = Expr.LVar "#conj_witness" in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#conj_x" Type.NumberType;
+  Gamma.update gamma "#conj_limit" Type.NumberType;
+  Gamma.update gamma "#conj_s" Type.Utf16Type;
+  Gamma.update gamma "#conj_witness" Type.NumberType;
+  let entails ?(exists = Utils.Containers.SS.empty) facts goals =
+    Solver.check_entailment exists (Engine.PFS.of_list facts) goals gamma
+  in
+  let facts =
+    [
+      Expr.UnOp (IsInt, x);
+      bin FLessThanEqual (Expr.num 0.) x;
+      bin FLessThanEqual x limit;
+      bin FLessThanEqual limit (Expr.num 10.);
+      bin Equal (Expr.UnOp (Utf16Len, s)) (Expr.int 1);
+    ]
+  in
+  let good = bin FLessThanEqual x (Expr.num 11.) in
+  let bad = bin FLessThan x (Expr.num 0.) in
+  Alcotest.(check bool)
+    "all numeric conjuncts prove" true
+    (entails facts [ good; Expr.UnOp (IsInt, bin FPlus x (Expr.num 1.)) ]);
+  List.iter
+    (fun goals ->
+      Alcotest.(check bool)
+        "one true conjunct cannot hide a false conjunct" false
+        (entails facts goals))
+    [ [ good; bad ]; [ bad; good ] ];
+  let contents =
+    [
+      bin Equal (Expr.UnOp (Utf16Len, s)) (Expr.int 1);
+      bin ValueEqual x (bin Utf16CodeUnit s (Expr.num 0.));
+      bin Equal (bin Utf16CodeUnit s (Expr.num 0.)) (Expr.num 65.);
+    ]
+  in
+  Alcotest.(check bool)
+    "inconclusive numeric pieces retain content-dependent fallback" true
+    (entails contents
+       [ bin FLessThanEqual (Expr.num 0.) x; bin Equal x (Expr.num 65.) ]);
+  Alcotest.(check bool)
+    "existential conjuncts must share one witness" false
+    (entails
+       ~exists:(Utils.Containers.SS.singleton "#conj_witness")
+       facts
+       [
+         bin FLessThanEqual (Expr.num 0.) witness;
+         bin FLessThanEqual witness (Expr.num (-1.));
+       ])
+
+let last_unit_witness () =
+  let names =
+    [
+      "#tail_oldpos";
+      "#tail_oldcount";
+      "#tail_pos";
+      "#tail_count";
+      "#tail_len";
+      "#tail_rank";
+      "#tail_value";
+    ]
+  in
+  let oldpos = Expr.LVar "#tail_oldpos"
+  and oldcount = Expr.LVar "#tail_oldcount" in
+  let pos = Expr.LVar "#tail_pos" and count = Expr.LVar "#tail_count" in
+  let len = Expr.LVar "#tail_len" and rank = Expr.LVar "#tail_rank" in
+  let value = Expr.LVar "#tail_value" and s = Expr.LVar "#tail_s" in
+  let size = Expr.UnOp (Utf16Len, s) in
+  let index = Expr.UnOp (ToIntOp, oldpos) in
+  let code = bin Utf16CodeUnit s index in
+  let maximum = Expr.num 9007199254740991. in
+  let facts =
+    Expr.Set.of_list
+      [
+        Expr.UnOp (IsInt, oldpos);
+        Expr.UnOp (IsInt, oldcount);
+        Expr.UnOp (IsInt, pos);
+        Expr.UnOp (IsInt, count);
+        Expr.UnOp (IsInt, len);
+        bin FLessThanEqual (Expr.num 0.) oldcount;
+        bin FLessThanEqual oldcount oldpos;
+        bin FLessThan oldpos len;
+        bin FLessThanEqual len maximum;
+        bin ValueEqual len (Expr.UnOp (IntToNum, size));
+        bin ILessThanEqual size
+          (Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))));
+        bin ValueEqual rank (bin FMinus maximum oldpos);
+        bin ValueEqual pos (bin FPlus oldpos (Expr.num 1.));
+        bin ValueEqual count (bin FPlus oldcount (Expr.num 1.));
+        bin FLessThanEqual (Expr.num 0.) count;
+        bin FLessThanEqual count pos;
+        bin FLessThanEqual pos len;
+        not_ (bin FLessThan pos len);
+        bin FLessThanEqual (Expr.num 55296.) code;
+        bin FLessThanEqual code (Expr.num 56319.);
+        bin ValueEqual value code;
+      ]
+  in
+  let gamma = Hashtbl.create 8 in
+  List.iter (fun name -> Hashtbl.add gamma name Type.NumberType) names;
+  Hashtbl.add gamma "#tail_s" Type.Utf16Type;
+  let model =
+    match Smt.check_sat facts gamma with
+    | Some model -> model
+    | None -> Alcotest.fail "Missing full-context last-unit witness"
+  in
+  let vars =
+    Expr.Set.of_list
+      (List.map (fun name -> Expr.LVar name) ("#tail_s" :: names))
+  in
+  let lifted = Hashtbl.create 8 in
+  Smt.lift_model model gamma (Hashtbl.add lifted) vars;
+  let values =
+    List.map
+      (fun name ->
+        match Hashtbl.find_opt lifted name with
+        | Some (Expr.Lit value) -> (name, value)
+        | _ -> Alcotest.fail ("Missing last-unit model value: " ^ name))
+      ("#tail_s" :: names)
+  in
+  let store = Engine.CExprEval.CStore.init values in
+  let visitor =
+    object
+      inherit [_] Visitors.endo
+      method! visit_LVar () _ name = Expr.PVar name
+    end
+  in
+  Expr.Set.iter
+    (fun e ->
+      match Engine.CExprEval.evaluate_expr store (visitor#visit_expr () e) with
+      | Bool true -> ()
+      | _ -> Alcotest.fail "Last-unit witness failed original-context replay")
+    facts;
+  List.iter
+    (fun (label, bad) ->
+      Alcotest.(check bool)
+        label false
+        (Smt.is_sat (Expr.Set.add bad facts) gamma))
+    [
+      ("negative count remains contradictory", bin FLessThan count (Expr.num 0.));
+      ( "negative saved rank remains contradictory",
+        bin ValueEqual rank (Expr.num (-1.)) );
+      ( "empty string cannot contain the last lookup",
+        bin Equal size (Expr.int 0) );
+    ]
+
 let model_declarations () =
   let make tag n =
     let name = "ModelContext" ^ tag and cname = "ModelBox" ^ tag in
@@ -799,4 +948,9 @@ let tests =
       (with_total contained_goal);
     Alcotest.test_case "numeric rank retains original dependencies" `Quick
       (with_total numeric_rank);
+    Alcotest.test_case "last-unit witness retains complete invariant" `Quick
+      (with_total last_unit_witness);
+    Alcotest.test_case "numeric conjuncts preserve rejection and fallback"
+      `Quick
+      (with_total numeric_conjuncts);
   ]

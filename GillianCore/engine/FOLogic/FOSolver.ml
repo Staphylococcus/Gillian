@@ -287,11 +287,34 @@ let check_entailment
         (not (Expr.Set.equal numeric formulae))
         && not (Expr.Set.equal numeric contained)
       in
+      (* A conjunction of numeric goals becomes a disjunction of failures.
+         Prove each failure impossible separately, using the same original
+         numeric premises. All pieces must be UNSAT. This is only sufficient;
+         any SAT/unknown keeps the combined and complete fallbacks below.
+         The numeric subset is enabled only without shared existentials. *)
+      let numeric_pieces_proved () =
+        let rec disjuncts = function
+          | Expr.BinOp (left, Or, right) -> disjuncts left @ disjuncts right
+          | e -> [ e ]
+        in
+        let pieces = disjuncts right_f in
+        List.length pieces > 1
+        && Expr.Set.mem right_f numeric
+        && List.for_all
+             (fun piece ->
+               Smt.proves_unsat
+                 (Expr.Set.add piece (Expr.Set.remove right_f numeric))
+                 gamma_tbl)
+             pieces
+      in
       (* This weaker arithmetic query can prove the complete conjunction only
          by native UNSAT. SAT/unknown retain the original focused/full paths. *)
       let model =
         if contained_omission && Smt.proves_unsat contained gamma_tbl then None
-        else if numeric_omission && Smt.proves_unsat numeric gamma_tbl then None
+        else if
+          numeric_omission
+          && (numeric_pieces_proved () || Smt.proves_unsat numeric gamma_tbl)
+        then None
         else if useful_omission && Smt.proves_unsat focused gamma_tbl then None
         else Smt.check_sat formulae (Type_env.as_hashtbl gamma)
       in

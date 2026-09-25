@@ -14,7 +14,17 @@ TOTAL = (0, 'All total procedure specs succeeded')
 POST = (1, "Couldn't satisfy postcondition")
 ASSERT = (1, 'Assertion failed')
 ORDERING = (125, 'binop: u16<')
+# These whole-loop fixtures retain the original helper probe's 90-second cap.
+# Existing per-procedure allowances and native SMT budgets stay unchanged.
+WHOLE_LOOP_CASES = {'ucs2length.js', 'ucs2length-stalled.js',
+                    'ucs2length-wrong-result.js', 'ucs2length-missing-context.js'}
 CASES = [
+    ('ucs2length.js', ['--total', '--proc=ucs2length'], TOTAL),
+    ('ucs2length-stalled.js', ['--total', '--proc=ucs2length'],
+     (1, 'variant is not a strictly smaller natural integer')),
+    ('ucs2length-wrong-result.js', ['--total', '--proc=ucs2length'], POST),
+    ('ucs2length-missing-context.js', ['--total', '--proc=ucs2length'],
+     (1, 'MIFMetadata($lstr_proto)')),
     ('rank-one.js', ['--total', '--proc=check'], TOTAL),
     ('rank-two.js', ['--total', '--proc=check'], TOTAL),
     ('rank-two-wrong.js', ['--total', '--proc=check'], POST),
@@ -113,7 +123,7 @@ if __name__ == '__main__':
         command = COMMAND + ['verify', str(source), '--logging=normal'] + options
         # Keep the existing per-procedure allowance when a case also checks
         # its callee before summary reuse. SMT query limits are unchanged.
-        timeout_seconds = 45 * max(1, sum(o.startswith('--proc=') for o in options))
+        timeout_seconds = 90 if file in WHOLE_LOOP_CASES else 45 * max(1, sum(o.startswith('--proc=') for o in options))
         record = {'file': file, 'timeoutSeconds': timeout_seconds, 'command': command, 'expectedExit': expected[0],
                   'expectedMessage': expected[1],
                   'sourceSha256': hashlib.sha256(source.read_bytes()).hexdigest()}
