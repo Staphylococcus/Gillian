@@ -32,3 +32,14 @@ consume/read/refold counterpart. Allocation-collision controls alone do not
 establish this resource-consumption property. Total-mode postcondition production
 also retains every error and propagates final consistency-check exceptions;
 proof-term units exercise both an isolated failure and a successful sibling.
+
+Pure `nounfold` predicates with only input parameters stay folded during eager
+branch selection (`Low`). Heap predicates and predicates with outputs retain
+their existing eager selection. Demand-driven recovery (`High`) and explicit
+unfolding still open the same definitions. `nounfold-demand.gil` proves a
+disjunctive postcondition after branching without an explicit unfold; its wrong-post counterpart rejects.
+Existing `pure-choice.gil` and `false-unfold-branch.gil` cover explicit unfolding.
+Proof-term units exercise the actual branch entry point, literal fallback,
+unflagged eager alternatives, demanded alternatives, nonpure/output selection and
+abstract opacity.
+No predicate alternative is assumed or removed by this selection change.

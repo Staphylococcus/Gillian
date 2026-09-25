@@ -1,0 +1,40 @@
+(* Exact greedy UTF-16 code-point prefix relation. This is a logical
+   specification, not an executable helper or an assumed result summary.
+   Every recursive step consumes one or two units and adds one count. *)
+pure pred Ucs2PrefixDomain(s : Utf16, pos : Num, count : Num):
+  (u16-len(s) i<= 9007199254740991i) *
+  (is_int(pos)) * (is_int(count)) *
+  (0.0 <= count) * (count <= pos) * (pos <= as_num(u16-len(s)));
+
+pure pred Ucs2AdvanceDomain(s : Utf16, before : Num, after : Num):
+  (u16-len(s) i<= 9007199254740991i) *
+  (is_int(before)) * (is_int(after)) * (0.0 <= before) *
+  (before < after) * (after <= as_num(u16-len(s)));
+
+pure pred Ucs2Advance(s : Utf16, before : Num, after : Num):
+  Ucs2AdvanceDomain(s, before, after) * (after == before + 1.0) *
+  ((u16-code(s, num_to_int(before)) < 55296.0) or
+   (56319.0 < u16-code(s, num_to_int(before)))),
+  Ucs2AdvanceDomain(s, before, after) * (after == before + 1.0) *
+  (55296.0 <= u16-code(s, num_to_int(before))) *
+  (u16-code(s, num_to_int(before)) <= 56319.0) *
+  (not (before + 1.0 < as_num(u16-len(s)))),
+  Ucs2AdvanceDomain(s, before, after) * (after == before + 1.0) *
+  (before + 1.0 < as_num(u16-len(s))) *
+  (55296.0 <= u16-code(s, num_to_int(before))) *
+  (u16-code(s, num_to_int(before)) <= 56319.0) *
+  ((u16-code(s, num_to_int(before + 1.0)) < 56320.0) or
+   (57343.0 < u16-code(s, num_to_int(before + 1.0)))),
+  Ucs2AdvanceDomain(s, before, after) *
+  (after == (before + 1.0) + 1.0) *
+  (before + 1.0 < as_num(u16-len(s))) *
+  (55296.0 <= u16-code(s, num_to_int(before))) *
+  (u16-code(s, num_to_int(before)) <= 56319.0) *
+  (56320.0 <= u16-code(s, num_to_int(before + 1.0))) *
+  (u16-code(s, num_to_int(before + 1.0)) <= 57343.0);
+
+pure nounfold pred Ucs2Prefix(s : Utf16, pos : Num, count : Num):
+  Ucs2PrefixDomain(s, pos, count) * (pos == 0.0) * (count == 0.0),
+  Ucs2PrefixDomain(s, pos, count) *
+  Ucs2Prefix(s, #previous, #previous_count) *
+  Ucs2Advance(s, #previous, pos) * (count == #previous_count + 1.0);

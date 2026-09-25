@@ -538,6 +538,150 @@ let failed_post_production () =
                posts)))
     [ [ invalid_post ]; [ [ Asrt.Pure Expr.true_ ]; invalid_post ] ]
 
+(* Exercise the real predicate state/branch entry point, not a copy of its
+   selection condition. No predicate facts or lemma summaries are supplied. *)
+let choice_state ?(pure = true) ?(outputs = false) ~nounfold ~abstract argument
+    =
+  let pred : Pred.t =
+    {
+      pred_name = "SelectionChoice";
+      pred_source_path = None;
+      pred_loc = None;
+      pred_internal = false;
+      pred_num_params = 1;
+      pred_params = [ ("x", Some Type.IntType) ];
+      ins_number = (if outputs then 0 else 1);
+      pred_definitions =
+        List.map
+          (fun n ->
+            (None, [ Asrt.Pure (bin Equal (Expr.PVar "x") (Expr.int n)) ]))
+          [ 0; 1 ];
+      pred_facts = [];
+      pred_guard = None;
+      pred_pure = pure;
+      pred_abstract = abstract;
+      pred_nounfold = nounfold;
+      pred_normalised = false;
+    }
+  in
+  let definitions = Result.get_ok (Engine.MP.init_preds (Pred.init [ pred ])) in
+  let state = PState.init_with_pred_table definitions () in
+  let state = Option.get (PState.assume_t state argument Type.IntType) in
+  let state = PState.add_spec_vars state (Expr.lvars argument) in
+  PState.set_pred state ("SelectionChoice", [ argument ]);
+  state
+
+let with_unfolding test =
+  let unfolding = !Config.unfolding and manual = !Config.manual_proof in
+  Config.unfolding := true;
+  Config.manual_proof := false;
+  Fun.protect
+    ~finally:(fun () ->
+      Config.unfolding := unfolding;
+      Config.manual_proof := manual)
+    test
+
+let nounfold_branch_selection () =
+  with_unfolding (fun () ->
+      let x = Expr.LVar "#choice_x" in
+      List.iter
+        (fun nounfold ->
+          let state = choice_state ~nounfold ~abstract:false x in
+          let outcomes =
+            PState.assume ~unfold:true state (bin ILessThanEqual (Expr.int 0) x)
+          in
+          Alcotest.(check int)
+            "eager branch expansion respects nounfold"
+            (if nounfold then 1 else 2)
+            (List.length outcomes);
+          if nounfold then (
+            let after = List.hd outcomes in
+            Alcotest.(check bool)
+              "folded relation remains available" true
+              (List.mem ("SelectionChoice", [ x ])
+                 (Engine.Preds.to_list (PState.get_preds after)));
+            Alcotest.(check bool)
+              "branch has not assumed a disjunct" false
+              (PState.assert_a after [ bin Equal x (Expr.int 0) ]))
+          else
+            List.iter
+              (fun after ->
+                Alcotest.(check bool)
+                  "ordinary predicates still provide their alternatives" true
+                  (PState.assert_a after
+                     [
+                       bin Or
+                         (bin Equal x (Expr.int 0))
+                         (bin Equal x (Expr.int 1));
+                     ]))
+              outcomes)
+        [ true; false ];
+      (* Literal arguments are selected by a different fallback strategy. *)
+      let state = choice_state ~nounfold:true ~abstract:false (Expr.int 0) in
+      Alcotest.(check bool)
+        "literal fallback also respects nounfold" true
+        (Option.is_none
+           (PState.SMatcher.unfold_with_vals ~auto_level:`Low state [])))
+
+let nounfold_demand_selection () =
+  with_unfolding (fun () ->
+      let x = Expr.LVar "#choice_x" in
+      let state = choice_state ~nounfold:true ~abstract:false x in
+      let outcomes =
+        Option.get
+          (PState.SMatcher.unfold_with_vals ~auto_level:`High state [ x ])
+      in
+      Alcotest.(check int)
+        "demanded unfolding preserves both disjuncts" 2 (List.length outcomes);
+      List.iter
+        (fun n ->
+          Alcotest.(check bool)
+            "every alternative is represented" true
+            (List.exists
+               (fun (_, after) ->
+                 PState.assert_a after [ bin Equal x (Expr.int n) ])
+               outcomes))
+        [ 0; 1 ];
+      Alcotest.(check bool)
+        "false universal claim is rejected" false
+        (List.for_all
+           (fun (_, after) ->
+             PState.assert_a after [ bin Equal x (Expr.int 0) ])
+           outcomes);
+      List.iter
+        (fun auto_level ->
+          let state = choice_state ~nounfold:false ~abstract:true x in
+          Alcotest.(check bool)
+            "abstract predicates remain opaque" true
+            (Option.is_none
+               (PState.SMatcher.unfold_with_vals ~auto_level state [ x ])))
+        [ `Low; `High ])
+
+let nounfold_eager_resources_and_outputs () =
+  with_unfolding (fun () ->
+      let x = Expr.LVar "#choice_x" in
+      List.iter
+        (fun (pure, outputs) ->
+          let state =
+            choice_state ~pure ~outputs ~nounfold:true ~abstract:false x
+          in
+          let outcomes =
+            PState.assume ~unfold:true state (bin ILessThanEqual (Expr.int 0) x)
+          in
+          Alcotest.(check int)
+            "resource/output predicates retain eager alternatives" 2
+            (List.length outcomes);
+          List.iter
+            (fun n ->
+              Alcotest.(check bool)
+                "both output values remain represented" true
+                (List.exists
+                   (fun after ->
+                     PState.assert_a after [ bin Equal x (Expr.int n) ])
+                   outcomes))
+            [ 0; 1 ])
+        [ (false, false); (true, true); (false, true) ])
+
 let () =
   Alcotest.run "Proof terms"
     [
@@ -588,5 +732,11 @@ let () =
             (with_total (fun () -> loop_revisit false));
           Alcotest.test_case "valid loop revisit measure" `Quick
             (with_total (fun () -> loop_revisit true));
+          Alcotest.test_case "nounfold branch selection" `Quick
+            (with_total nounfold_branch_selection);
+          Alcotest.test_case "nounfold demand selection" `Quick
+            (with_total nounfold_demand_selection);
+          Alcotest.test_case "nounfold resource and output selection" `Quick
+            (with_total nounfold_eager_resources_and_outputs);
         ] );
     ]

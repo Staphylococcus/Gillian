@@ -16,6 +16,8 @@ DESCENT = (1, "variant is not a strictly smaller natural integer")
 ENTRY = (1, "entry variant is not a natural integer")
 POST = (1, "Couldn't satisfy postcondition")
 CASES = [
+    ("nounfold-demand.gil", ["--total"], TOTAL),
+    ("nounfold-demand-wrong.gil", ["--total"], POST),
     ("fabricated-cell.gil", ["--total"], (1, "MIFCell(#obj, \"x\")")),
     ("empty-subset-wrong.gil", ["--total"], POST),
     ("empty-subset.gil", ["--total"], TOTAL),

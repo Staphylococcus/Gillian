@@ -1,0 +1,8 @@
+pure nounfold pred Choice(n : Int) : (n == 0i), (n == 1i);
+spec answer(n)
+[[ (n == #n) * types(#n : Int) * Choice(#n) ]] [[ (ret == 0i) ]] normal
+proc answer(n) {
+  goto [n i< 0i] negative nonnegative;
+  negative: ret := n; return;
+  nonnegative: ret := n; return
+};

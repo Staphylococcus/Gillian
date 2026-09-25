@@ -500,7 +500,14 @@ module Make (State : SState.S) :
 
     let wrap_strategy f (name, args) =
       let pred = Predicate_selection_strategies.get_pred_def ~pred_defs name in
-      if pred.pred_abstract then 0 else f (name, args)
+      (* Defer fully specified pure relations until they are demanded. Heap
+         predicates and predicates with outputs retain their existing eager
+         behavior; their unfolding can expose resources or output values. *)
+      let defer_relation =
+        auto_level = `Low && pred.pred_nounfold && pred.pred_pure
+        && pred.ins_number = pred.pred_num_params
+      in
+      if pred.pred_abstract || defer_relation then 0 else f (name, args)
     in
 
     let apply_strategies (strategies : (string * Expr.t list -> int) list) :

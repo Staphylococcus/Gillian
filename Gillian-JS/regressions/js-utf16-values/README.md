@@ -154,3 +154,12 @@ frozen inputs stayed unchanged. The PoC retains the failed concurrent run and
 isolated passes; accepted four-job concurrency preserves all proof budgets. No
 string/schema bound or helper axiom is added. Ranked actual traversal is next;
 full JSON admission, helper composition and final adapters remain open.
+
+The files in `../../Examples/ProofDevelopment/` are P07 development inputs, deliberately
+not registered as passing acceptance cases. The helper body and original entry
+are unchanged; the recursive prefix relation adds the exact-count obligation.
+After the eager nounfold selection repair, the diagnostic reaches pair-step
+invariant matching; the two-unit position bound remains unresolved (earlier SMT
+unknown and a later case timeout).
+Exact-count proof, wrong-count rejection controls and AJV composition remain
+pending; these files do not extend the accepted whole-loop result-bounds claim.
