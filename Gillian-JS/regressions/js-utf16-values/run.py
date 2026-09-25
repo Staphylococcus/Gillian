@@ -19,6 +19,15 @@ ORDERING = (125, 'binop: u16<')
 WHOLE_LOOP_CASES = {'ucs2length.js', 'ucs2length-stalled.js',
                     'ucs2length-wrong-result.js', 'ucs2length-missing-context.js'}
 CASES = [
+    ('trailing-assert-wrong.js', ['--total', '--proc=check'], ASSERT),
+    ('trailing-assert.js', ['--total', '--proc=check'], TOTAL),
+    ('trailing-branch-wrong.js', ['--total', '--proc=check'], ASSERT),
+    ('trailing-branch.js', ['--total', '--proc=check'], TOTAL),
+    ('trailing-empty-wrong.js', ['--total', '--proc=check'], ASSERT),
+    ('trailing-empty.js', ['--total', '--proc=check'], TOTAL),
+    ('trailing-loop-wrong.js', ['--total', '--proc=check'], ASSERT),
+    ('trailing-loop.js', ['--total', '--proc=check'], TOTAL),
+    ('trailing-return.js', ['--total', '--proc=check'], TOTAL),
     ('ucs2length.js', ['--total', '--proc=ucs2length'], TOTAL),
     ('ucs2length-stalled.js', ['--total', '--proc=ucs2length'],
      (1, 'variant is not a strictly smaller natural integer')),

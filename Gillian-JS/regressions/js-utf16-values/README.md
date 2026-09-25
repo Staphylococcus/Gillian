@@ -158,8 +158,17 @@ full JSON admission, helper composition and final adapters remain open.
 The files in `../../Examples/ProofDevelopment/` are P07 development inputs, deliberately
 not registered as passing acceptance cases. The helper body and original entry
 are unchanged; the recursive prefix relation adds the exact-count obligation.
-After the eager nounfold selection repair, the diagnostic reaches pair-step
-invariant matching; the two-unit position bound remains unresolved (earlier SMT
-unknown and a later case timeout).
+The explicit length equality bypasses the earlier pair-bound query. The parser
+now executes the trailing fold; the latest diagnostic reaches native SMT unknown
+while matching the recursive step and unfolding the prior prefix. Earlier
+unknowns and case timeouts remain retained non-proofs.
 Exact-count proof, wrong-count rejection controls and AJV composition remain
 pending; these files do not extend the accepted whole-loop result-bounds claim.
+
+Trailing proof-command controls cover function/block fallthrough, empty bodies,
+loop backedges, both symbolic branches and code after a return. The parser keeps
+trailing tactics on a synthetic empty statement at that exact list position;
+false reachable assertions reject and an unreachable one stays unreachable.
+Parser units also check comment order, disabled annotation parsing and rejection
+of a dangling non-tactic annotation. These controls support the exact-helper
+fold annotation; they do not prove its pending prefix theorem.

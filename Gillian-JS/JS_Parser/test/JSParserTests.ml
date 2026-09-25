@@ -807,6 +807,58 @@ let test_obj_init test_ctx =
 
 (* TODO: tests for object initializer, unnamed function expression *)
 
+let test_trailing_tactics () =
+  let annotations =
+    "/* @tactic assert((1 == 1)) */ /* @tactic assert((2 == 2)) */"
+  in
+  let rec body e =
+    match e.exp_stx with
+    | Script (_, [ ({ exp_stx = Function _ | While _ | Block _; _ } as e) ]) ->
+        body e
+    | Function (_, _, _, e) | While (_, e) -> body e
+    | Script (_, es) | Block es -> es
+    | _ -> Alcotest.fail "Expected statement list"
+  in
+  List.iter
+    (fun source ->
+      let statements = body (parse_string_exn source) in
+      let last = List.hd (List.rev statements) in
+      Alcotest.(check bool)
+        "trailing command uses an empty statement" true (last.exp_stx = Skip);
+      Alcotest.(check (list string))
+        "both commands retain source order"
+        [ "assert((1 == 1))"; "assert((2 == 2))" ]
+        (List.map
+           (fun a ->
+             Alcotest.(check bool)
+               "tactic kind retained" true (a.annot_type = Tactic);
+             a.annot_formula)
+           last.exp_annot))
+    [
+      "var x = 0; " ^ annotations;
+      "var x = 0;" ^ annotations;
+      annotations;
+      "function f() { var x = 0; " ^ annotations ^ " }";
+      "function f(){var x = 0;" ^ annotations ^ "}";
+      "function f() { " ^ annotations ^ " }";
+      "while (true) { var x = 0; " ^ annotations ^ " }";
+      "{ " ^ annotations ^ " }";
+    ];
+  Alcotest.(check int)
+    "ordinary trailing comments add no statement" 1
+    (List.length (body (parse_string_exn "var x = 0; /* ordinary */")));
+  Alcotest.(check int)
+    "disabled annotation parsing adds no statement" 1
+    (List.length
+       (body
+          (parse_string_exn ~parse_annotations:false
+             ("var x = 0; " ^ annotations))))
+
+let test_misplaced_trailing_annotation () =
+  match parse_string "function f() { /* @invariant emp */ }" with
+  | Error (Error.UnusedAnnotations _) -> ()
+  | _ -> Alcotest.fail "An invariant without a statement must not disappear"
+
 let suite =
   (* hack around oUnit *)
   let ( >:: ) a b = (a, b) in
@@ -881,6 +933,8 @@ let suite =
     "test_getter" >:: test_getter;
     "test_setter" >:: test_setter;
     "test_obj_init" >:: test_obj_init (* "test_fun_annot" >:: test_fun_annot; *);
+    "trailing tactics" >:: test_trailing_tactics;
+    "misplaced trailing annotation" >:: test_misplaced_trailing_annotation;
   ]
 
 let alco_suite =

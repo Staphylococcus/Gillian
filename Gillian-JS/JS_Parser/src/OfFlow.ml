@@ -1228,14 +1228,38 @@ and transform_case ~parent_strict annots case =
   (trans_test, mk_exp (Block trans_cons) test_end [])
 
 and trans_stmt_list ~parent_strict start_loc raw_stmts annots =
+  let trailing, attached =
+    match List.rev raw_stmts with
+    | [] -> (annots, [])
+    | (last_loc, _) :: _ ->
+        (* Flow locations have exclusive ends; no whitespace is required
+           between the last statement and its trailing comment. *)
+        List.partition
+          (fun (loc, _) -> lower_eq_pos last_loc._end loc.Loc.start)
+          annots
+  in
   let stmts_with_start_loc = with_start_loc start_loc raw_stmts in
   let trans_stmt (st_l, (lloc, s)) =
     let children_annotations =
-      List.filter (fun (l, _) -> child l (Loc.btwn st_l lloc)) annots
+      List.filter (fun (l, _) -> child l (Loc.btwn st_l lloc)) attached
     in
     transform_statement ~parent_strict children_annotations (lloc, s)
   in
-  List.map trans_stmt stmts_with_start_loc
+  let stmts = List.map trans_stmt stmts_with_start_loc in
+  match trailing with
+  | [] -> stmts
+  | (loc, _) :: _ ->
+      (* A trailing tactic has no source statement to attach to. Keep it at
+         the end of this statement list, including an empty block, so normal
+         fallthrough executes it and abrupt completion still skips it. *)
+      let misplaced =
+        List.map
+          (fun (loc, annotations) ->
+            (loc, List.filter (fun a -> a.annot_type <> Tactic) annotations))
+          trailing
+      in
+      check_unused_annots loc misplaced;
+      stmts @ [ mk_exp Skip loc (rem_locs trailing) ]
 
 let transform_program
     ~parse_annotations
