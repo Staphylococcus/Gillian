@@ -19,6 +19,7 @@ ORDERING = (125, 'binop: u16<')
 WHOLE_LOOP_CASES = {'ucs2length.js', 'ucs2length-stalled.js',
                     'ucs2length-wrong-result.js', 'ucs2length-missing-context.js'}
 CASES = [
+    ('ucs2length-exact.js', ['--total', '--proc=ucs2length', '--lemma=Ucs2NumericAdvance'], TOTAL),
     ('length-zero-sign.js', ['--total', '--proc=check'], TOTAL),
     ('length-zero-sign-wrong.js', ['--total', '--proc=check'], POST),
     ('cursor-exit.js', ['--total', '--proc=check'], TOTAL),
@@ -137,6 +138,14 @@ CASES = [
     ('numeric-key.js', ['--total', '--proc=check'], TOTAL),
 ]
 
+def case_timeout_seconds(file, options):
+    # The new exact-prefix proof also checks its arithmetic lemma. The first
+    # complete diagnostic took 106 seconds; old cases keep their allowances.
+    if file == 'ucs2length-exact.js':
+        return 180
+    return 90 if file in WHOLE_LOOP_CASES else 45 * max(1, sum(o.startswith('--proc=') for o in options))
+
+
 if __name__ == '__main__':
     output = Path(tempfile.mkdtemp(prefix='gillian-js-utf16-values-',
                                   dir=os.environ.get('GILLIAN_RESULTS_ROOT')))
@@ -148,7 +157,7 @@ if __name__ == '__main__':
         command = COMMAND + ['verify', str(source), '--logging=normal'] + options
         # Keep the existing per-procedure allowance when a case also checks
         # its callee before summary reuse. SMT query limits are unchanged.
-        timeout_seconds = 90 if file in WHOLE_LOOP_CASES else 45 * max(1, sum(o.startswith('--proc=') for o in options))
+        timeout_seconds = case_timeout_seconds(file, options)
         record = {'file': file, 'timeoutSeconds': timeout_seconds, 'command': command, 'expectedExit': expected[0],
                   'expectedMessage': expected[1],
                   'sourceSha256': hashlib.sha256(source.read_bytes()).hexdigest()}

@@ -924,6 +924,104 @@ let model_declarations () =
   replay b gb nb (run_b (fun fs gamma -> Smt.exec_sat fs gamma));
   replay a ga na ma
 
+let relevant_types () =
+  let a = Expr.LVar "#relevant_a" in
+  let b = Expr.LVar "#relevant_b" in
+  let c = Expr.LVar "#relevant_c" in
+  let focus =
+    (Utils.Containers.SS.empty, Expr.lvars a, Utils.Containers.SS.empty)
+  in
+  let facts = [ bin ValueEqual a b; bin ValueEqual b c ] in
+  let g = Gamma.init () in
+  Gamma.update g "#relevant_a" Type.NumberType;
+  Gamma.update g "#relevant_c" Type.BooleanType;
+  let before = Gamma.to_list g |> List.sort compare in
+  Alcotest.(check bool)
+    "transitively retained formulas preserve their known types" false
+    (Solver.check_satisfiability ~relevant_info:focus facts g);
+  Alcotest.(check bool)
+    "relevance checking leaves caller types unchanged" true
+    (before = (Gamma.to_list g |> List.sort compare));
+  Gamma.remove g "#relevant_c";
+  Gamma.update g "#relevant_c" Type.NumberType;
+  Alcotest.(check bool)
+    "consistent transitive aliases remain feasible" true
+    (Solver.check_satisfiability ~relevant_info:focus facts g);
+  let zero = bin ValueEqual a (Expr.num 0.) in
+  let one = bin ValueEqual c (Expr.num 1.) in
+  Alcotest.(check bool)
+    "retained transitive contradiction still rejects" false
+    (Solver.check_satisfiability ~relevant_info:focus (zero :: one :: facts) g)
+
+let invariant_counter_witness () =
+  let s = Expr.LVar "#invariant_s" and pos = Expr.LVar "#invariant_pos" in
+  let count = Expr.LVar "#invariant_count"
+  and len = Expr.LVar "#invariant_len" in
+  let after = Expr.LVar "#invariant_after" in
+  let next_count = Expr.LVar "#invariant_next_count" in
+  let rank = Expr.LVar "#invariant_rank" in
+  let size = Expr.UnOp (Utf16Len, s) in
+  let next = bin FPlus pos (Expr.num 1.) in
+  let first = bin Utf16CodeUnit s (Expr.UnOp (ToIntOp, pos)) in
+  let second = bin Utf16CodeUnit s (Expr.UnOp (ToIntOp, next)) in
+  let fs =
+    Expr.Set.of_list
+      [
+        bin ValueEqual len (Expr.UnOp (IntToNum, size));
+        bin ILessThanEqual size
+          (Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))));
+        Expr.UnOp (IsInt, count);
+        Expr.UnOp (IsInt, pos);
+        Expr.UnOp (IsInt, len);
+        not_ (bin ValueEqual pos (Expr.num (-0.)));
+        not_ (bin ValueEqual len (Expr.num (-0.)));
+        bin FLessThanEqual (Expr.num 0.) count;
+        bin FLessThanEqual count pos;
+        bin FLessThan pos len;
+        bin FLessThan next len;
+        bin FLessThanEqual (Expr.num 55296.) first;
+        bin FLessThanEqual first (Expr.num 56319.);
+        bin Equal
+          (bin BitwiseAndF (Expr.UnOp (ToInt32Op, second)) (Expr.num 64512.))
+          (Expr.num 56320.);
+        bin ValueEqual after (bin FPlus next (Expr.num 1.));
+        bin ValueEqual next_count (bin FPlus count (Expr.num 1.));
+        bin ValueEqual rank (bin FMinus (Expr.num 9007199254740991.) pos);
+        Expr.UnOp (IsInt, after);
+        Expr.UnOp (IsInt, next_count);
+        bin FLessThanEqual next_count after;
+        bin FLessThanEqual after len;
+      ]
+  in
+  let g = Gamma.init () in
+  Gamma.update g "#invariant_s" Type.Utf16Type;
+  List.iter
+    (fun name -> Gamma.update g name Type.NumberType)
+    [
+      "#invariant_pos";
+      "#invariant_count";
+      "#invariant_len";
+      "#invariant_after";
+      "#invariant_next_count";
+      "#invariant_rank";
+    ];
+  let gamma = Gamma.as_hashtbl g in
+  let check label expected facts =
+    Alcotest.(check bool) label expected (Smt.is_sat facts gamma)
+  in
+  check "complete invariant with derived count and rank is feasible" true fs;
+  check "negative counter cannot gain a root witness" false
+    (Expr.Set.add (bin FLessThan count (Expr.num 0.)) fs);
+  check "incorrect derived count remains contradictory" false
+    (Expr.Set.add
+       (not_ (bin ValueEqual next_count (bin FPlus count (Expr.num 1.))))
+       fs);
+  check "nonzero counter and later position survive failed zero guesses" true
+    (fs
+    |> Expr.Set.add (bin ValueEqual count (Expr.num 1.))
+    |> Expr.Set.add (bin ValueEqual pos (Expr.num 1.))
+    |> Expr.Set.add (bin Equal size (Expr.int 3)))
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -953,4 +1051,9 @@ let tests =
     Alcotest.test_case "numeric conjuncts preserve rejection and fallback"
       `Quick
       (with_total numeric_conjuncts);
+    Alcotest.test_case "relevance preserves transitive types" `Quick
+      (with_total relevant_types);
+    Alcotest.test_case "invariant counters preserve complete witness queries"
+      `Quick
+      (with_total invariant_counter_witness);
   ]

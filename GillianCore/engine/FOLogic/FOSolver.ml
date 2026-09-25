@@ -26,8 +26,22 @@ let simplify_pfs_and_gamma
   let pfs, gamma =
     match (relevant_info, !Config.under_approximation) with
     | Some relevant_info, false ->
-        ( PFS.filter_with_info relevant_info (PFS.of_list fs),
-          Type_env.filter_with_info relevant_info gamma )
+        let pfs = PFS.filter_with_info relevant_info (PFS.of_list fs) in
+        (* Formula relevance is transitive. Preserve the existing types of every
+           variable in the retained formulas, not only the initial query roots.
+           Otherwise a retained Boolean can become an unconstrained value, and
+           known Number operands acquire expensive generic SMT encodings. *)
+        let pvars, lvars, locs = relevant_info in
+        let names =
+          PFS.fold_left
+            (fun names pf ->
+              SS.union names
+                (SS.union (Expr.pvars pf)
+                   (SS.union (Expr.lvars pf) (Expr.locs pf))))
+            (SS.union pvars (SS.union lvars locs))
+            pfs
+        in
+        (pfs, Type_env.filter_vars gamma names)
     | _ -> (PFS.of_list fs, Type_env.copy gamma)
   in
   let subst, _ = Simplifications.simplify_pfs_and_gamma ~matching pfs gamma in

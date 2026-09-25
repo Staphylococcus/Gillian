@@ -2,7 +2,7 @@
 /* @import ../../runtime/JS2JSIL/String.jsil
  @import ../../regressions/js-utf16-values/LanguageString.gil
  @import ../../regressions/js-utf16-values/Ucs2Arithmetic.gil
- @import Ucs2Prefix.gil
+ @import ../../regressions/js-utf16-values/Ucs2Prefix.gil
  @import ../../regressions/js-utf16-values/CharCodeAtContext.jsil */
 /** @id ucs2length
  @pre (this == undefined) * (str == #s) * types(#s : Str) * LanguageString(#s) * CharCodeAtContext()

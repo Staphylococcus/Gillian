@@ -207,3 +207,29 @@ All five new controls and twelve existing arithmetic/witness cases pass. The
 113-case catalogue has not been rerun in full. Backend implementation, installed
 runtime and binary bytes retain the prior full-baseline evidence. The PoC's
 `cursor-exit-observations.json` records focused checks and current limitations.
+
+## P07.1a2i — accepted exact helper theorem
+
+`ucs2length-exact.js` and `Ucs2Prefix.gil` are the canonical proof inputs,
+promoted without changing the original body, entry, prefix definition or rank.
+The strict case checks `Ucs2NumericAdvance` before use and has a new 180-second
+allowance; all 113 old case budgets and native solver limits are unchanged.
+
+The complete frozen run passes all 114 cases, including the exact helper
+(130.26s), the existing safety helper (72.36s), and wrong-result rejection
+(83.88s). Stalled progress, missing context and unchecked arithmetic lemmas reject.
+All 11 concrete controls pass; native replay binds body and oracle ASTs to AJV.
+
+Retaining known types for transitive query dependencies prevents an impossible
+Number/Boolean alias. Complete-query optional witness searches additionally try
+zero for Number variables not equated to expressions. Native validated SAT is
+required; failed guesses fall back, without changing state or input contracts.
+Positive aliases, contradictions, nonzero-counter fallback and required unknown
+are checked in the core suite. Earlier unknown-producing candidates remain
+rejected and retained in the sibling PoC.
+
+The PoC's `exact-helper-observations.json` records 1,090 controls / 109 jobs,
+120/120 PoC tests, nine model replays and 47,141 unchanged frozen inputs. Separate
+complete-diff self-review found no actionable issue. This proves the helper's
+exact greedy count, resources and termination; actual original-schema caller
+composition and full-fold certification remain open.

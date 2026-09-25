@@ -16,5 +16,5 @@ retained symbolic model's units `0xd836, 0xdc0a`.
 The sibling PoC's `replay-traversal.mjs` binds every full executable AST, including
 the oracle harness, to the pinned AJV bundle and named mutation. It checks the
 same results natively. Universal exact-count acceptance still requires the
-unrestricted total proof from `Examples/ProofDevelopment/ucs2length-exact.js`;
+unrestricted total proof from `../js-utf16-values/ucs2length-exact.js`;
 these concrete witnesses do not restrict that proof's input domain.

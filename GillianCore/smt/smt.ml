@@ -2250,18 +2250,53 @@ let seeded_model fs gamma =
             (fun x -> Hashtbl.find_opt gamma x = Some Type.NumberType)
             indices#names
         in
+        (* A free counter can still make a position/length witness expensive.
+           Also try zero for Number variables not equated to another expression.
+           This is only a guess: every original assertion remains in the query,
+           and failed guesses fall back to the existing searches and budget. *)
+        let defined =
+          Expr.Set.fold
+            (fun e names ->
+              let add left right names =
+                match left with
+                | Expr.LVar x when not (Expr.equal left right) -> SS.add x names
+                | _ -> names
+              in
+              match e with
+              | Expr.BinOp (left, (Equal | ValueEqual), right) ->
+                  add right left (add left right names)
+              | _ -> names)
+            fs SS.empty
+        in
+        let roots =
+          SS.filter
+            (fun x ->
+              Hashtbl.find_opt gamma x = Some Type.NumberType
+              && (not (SS.mem x defined))
+              && not (SS.mem x numbers))
+            vars
+        in
+        let with_zeros names query =
+          SS.fold
+            (fun x acc ->
+              Expr.Set.add
+                (Expr.BinOp (Expr.LVar x, ValueEqual, Expr.num 0.))
+                acc)
+            names query
+        in
         let positioned =
           if SS.is_empty numbers then None
           else
             List.find_map
               (fun length ->
-                try_seed
-                  (SS.fold
-                     (fun x acc ->
-                       Expr.Set.add
-                         (Expr.BinOp (Expr.LVar x, ValueEqual, Expr.num 0.))
-                         acc)
-                     numbers (with_length length)))
+                let query = with_zeros numbers (with_length length) in
+                let rooted =
+                  if SS.is_empty roots then None
+                  else try_seed (with_zeros roots query)
+                in
+                match rooted with
+                | Some _ as witness -> witness
+                | None -> try_seed query)
               [ 2; 1 ]
         in
         match positioned with
