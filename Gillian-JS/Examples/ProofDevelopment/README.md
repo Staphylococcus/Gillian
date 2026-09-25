@@ -15,20 +15,22 @@ gillian-js verify ucs2length-exact.js --total --proc=ucs2length --lemma=Ucs2Nume
 
 This candidate passed total verification in 106.32 seconds under a separately
 recorded 300-second diagnostic watchdog. That is a successful exact-post proof
-run, but full acceptance still requires intended rejection of all four body
-mutants and an explicit final case allowance. Accepted case budgets and native
+run, but full acceptance still requires strict theorem registration and final
+validation alongside the now-validated compiled counterexamples. Accepted case budgets and native
 SMT limits have not changed. The five strict `length-zero-sign*`/`cursor-exit*`
 controls separately validate the sign facts and their necessary guards.
 
 The four `ucs2length-exact-*` mutants keep the original entry and proof annotations.
 They alter only initial count, lone-unit counting, pair counting, or low-surrogate
-recognition. Native witnesses confirm each bug; three automatic-mode symbolic
-rejections remain unknown/error. An explicit-entry-fold/manual-mode experiment
-also reached required unknown and was discarded. Do not count these as accepted
-negative controls. Preserve raw diagnostic bytes: lone surrogates may render as
-non-UTF-8 output.
+recognition. Their unrestricted symbolic runs still include unknown/error results.
+Separate strict concrete-execution controls now establish every bug by replaying
+a valid input through actual compiled JavaScript, with the original helper as a
+positive control. The PoC native replay binds both body and checking harness ASTs
+to the pinned bundle. These are counterexamples, not bounded positive proofs.
+An explicit-entry-fold/manual-mode proof attempt was discarded. Raw diagnostic
+bytes are retained because lone surrogates can render as non-UTF-8 output.
 
 Source-bound reports live in the sibling PoC's `experiments/gillian/symbolic-utf16/`:
 `cursor-exit-observations.json`, `canonical-arithmetic-development.json`, and
-`cursor-exit-development.json`. The next bounded work is P07.1a2h in its
-`docs/full-proof-roadmap.md`; original-schema AJV composition follows acceptance.
+`cursor-exit-development.json`. The next bounded work is P07.1a2i in its
+`docs/full-proof-roadmap.md`; strict exact-theorem registration comes next, then original-schema AJV composition.
