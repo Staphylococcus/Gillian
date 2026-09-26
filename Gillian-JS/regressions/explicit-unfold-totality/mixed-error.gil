@@ -1,0 +1,14 @@
+pure nounfold pred Choice(n : Int) : (n == 0i), (n == 1i), (n == 2i);
+lemma CheckChoice(n)
+[[ types(#n : Int) * Choice(#n) * (0i i<= #n) * (#n i<= 1i) ]]
+[[ (0i i<= #n) * (#n i<= 1i) ]]
+[* unfold Choice(#n); if (#n == 0i) then { assert (#n == 0i) } else { assert (#n == 0i) } *]
+
+spec answer(n)
+[[ (n == #n) * types(#n : Int) * Choice(#n) * (0i i<= #n) * (#n i<= 1i) ]]
+[[ (0i i<= ret) * (ret i<= 1i) ]] normal
+proc answer(n) {
+  apply CheckChoice(n);
+  ret := n;
+  return
+};
