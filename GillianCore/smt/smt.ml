@@ -2301,7 +2301,10 @@ let seeded_model fs gamma =
         in
         match positioned with
         | Some _ as witness -> witness
-        | None -> List.find_map (fun n -> try_seed (with_length n)) [ 1; 2 ])
+        (* Try empty length without fixing derived Number variables; each
+           attempt preserves the full query and only a validated SAT model
+           succeeds. *)
+        | None -> List.find_map (fun n -> try_seed (with_length n)) [ 0; 1; 2 ])
     | None -> None
 
 (* Rounded-length upper-bound queries can combine expensive sequence and
@@ -2345,6 +2348,69 @@ let with_checked_index_identities fs gamma =
         else augmented)
       indices fs
 
+(* Sufficient native UNSAT precheck before the complete-query witness search.
+   When the original expression set is a mixed UTF-16/Number query, a native
+   mixed query can crash or take far longer than a pure-numeric query. Before
+   paying that cost, we check whether a nonempty PROPER numeric subset of the
+   original top-level expressions is itself unsatisfiable. If so, the whole
+   conjunction is unsatisfiable (every model of the full conjunction would be a
+   model of the subset, which has none), so we return None without touching the
+   solver. A numeric SAT or unknown answer on the subset CANNOT establish the
+   feasibility of the original query, so those cases fall through to the
+   pre-existing complete-query path unchanged. Only total-mode queries that
+   actually reference a UTF-16 variable are eligible, because pure-numeric
+   queries already use the cheaper path and the crash risk is specific to
+   mixed UTF-16/Number formulas. *)
+let numeric_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
+  if not !Config.Verification.total then false
+  else
+    (* Eligible only when at least one original expression references an
+       existing UTF-16 variable; this is the mixed-query case. *)
+    let has_utf16_ref =
+      Expr.Set.exists
+        (fun e ->
+          SS.exists
+            (fun x -> Hashtbl.find_opt gamma x = Some Type.Utf16Type)
+            (Expr.lvars e))
+        fs
+    in
+    if not has_utf16_ref then false
+    else
+      (* A conservative recursive numeric-term recognizer over the original
+         gamma: a term is numeric iff it is a numeric literal, a variable of
+         existing NumberType, or the FPlus of two numeric terms. No rewriting,
+         no new types, no facts added. *)
+      let is_numeric e =
+        let rec is_num = function
+          | Expr.Lit (Num _) -> true
+          | Expr.LVar x -> Hashtbl.find_opt gamma x = Some Type.NumberType
+          | Expr.BinOp (a, FPlus, b) -> is_num a && is_num b
+          | _ -> false
+        in
+        is_num e
+      in
+      (* Keep exactly the top-level atoms that are pure numeric comparisons:
+         is_int of a numeric term, or a numeric==numeric / numeric<=numeric
+         binary comparison. Every other atom is dropped; retained ASTs are
+         unchanged. This narrow grammar is decided by native binary64
+         arithmetic (including NaN/rounding), not mathematical reals. *)
+      let retain e =
+        match e with
+        | Expr.UnOp (IsInt, inner) -> is_numeric inner
+        | Expr.BinOp (a, (Equal | ValueEqual | FLessThan | FLessThanEqual), b)
+          -> is_numeric a && is_numeric b
+        | _ -> false
+      in
+      let subset = Expr.Set.filter retain fs in
+      (* The precheck is a sufficient UNSAT proof only when the subset is a
+         proper nonempty subformulation; a full or empty subset proves nothing
+         about the mixed query. *)
+      let proper_nonempty =
+        (not (Expr.Set.is_empty subset))
+        && Expr.Set.cardinal subset < Expr.Set.cardinal fs
+      in
+      if not proper_nonempty then false else proves_unsat subset gamma
+
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   let key = formula_key fs gamma in
   match Formula_cache.find_opt sat_cache key with
@@ -2357,9 +2423,11 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   | None ->
       let () = L.verbose (fun m -> m "SAT check not found in cache") in
       let ret =
-        match seeded_model fs gamma with
-        | Some _ as witness -> witness
-        | None -> exec_sat (with_checked_index_identities fs gamma) gamma
+        if numeric_unsat_precheck fs gamma then None
+        else
+          match seeded_model fs gamma with
+          | Some _ as witness -> witness
+          | None -> exec_sat (with_checked_index_identities fs gamma) gamma
       in
       let () =
         L.verbose (fun m ->

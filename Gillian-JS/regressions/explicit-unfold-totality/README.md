@@ -61,15 +61,33 @@ explicitly incomplete. A successful top result requires every selected control
 to execute and pass with unchanged inputs and complete evidence. All proof,
 certification and full-proof flags remain false, even when controls pass.
 
-The original focused positive has independently reviewed retained evidence.
-The runner repair has offline tests only; the two native rejection controls
-remain pending execution and independent review. No prior raw verdict is relabelled.
+The normal backend source patch is integrated after independent review of:
 
-Run offline tests with `python3 -I -B test_runner.py`. Process calls are mocked;
-finalization tests use the real pinned inventory helper over small temporary trees.
-These tests are not symbolic proofs.
+- the focused positive, wrong-post and all-infeasible controls;
+- mixed surviving/error/infeasible alternatives;
+- five isolated fault-injection controls for assertion production, first and
+  remaining alternatives, Matcher simplification and PState simplification;
+- 326 cases across predicate, lemma, helper, procedure and loop regression families;
+- 21 sufficient-entailment tests, the required-query unknown control, and
+  27 Binary64 plus 23 UTF-16 value tests;
+- the actual nested AJV helper with checked zero-count inversion and both
+  unchecked/false-lemma rejection controls.
 
-Before backend acceptance, separate controls must still cover mixed ordinary
-errors, unclassified branch loss, both Matcher/PState simplification boundaries,
-and affected recursive-lemma, predicate, definedness and closed-entry families.
-The full validate10 caller and original finite-JSON admission remain open.
+Only the normal ten-file patch is integrated. Injected sources and binaries are
+never used as a positive proof. The retained normal verifier is
+`97cec1bff7752d995c39bf3adeca67c76c39678e9018325637c7f15b0c06b826` in
+`.worktrees/t_ae90afc3`; its source bytes exactly match the integrated patch.
+This source integration does not rebuild or replace the primary checkout's
+existing executable. Reproduction continues to use the explicit frozen path.
+
+The latest core units both exited 0. Their one-off driver's final inventory
+used the wrong root for per-group `/results` links, so its original failure is
+preserved. A separate mount-aware inventory and independent review verify all
+183 result files and four links without rerunning the tests:
+`/tmp/hermes-core-smt-units-p071/independent-review.json`.
+The broader regression review is retained at
+`/tmp/codex-hermes-takeover-review-p071/review.json`.
+
+Run offline runner tests with `python3 -I -B test_runner.py`. These test the
+receipt/classification harness, not symbolic proofs. Full `validate10` caller,
+original finite-JSON admission and final full-fold adapters remain open.

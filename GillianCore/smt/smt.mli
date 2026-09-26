@@ -26,11 +26,18 @@ val exec_sat :
 val proves_unsat : Expr.Set.t -> (string, Type.t) Hashtbl.t -> bool
 
 (** Complete-query satisfiability, with bounded existential witness searches for
-    eligible UTF-16/Number queries. A validated full-query model is a witness;
-    numeric index identities are added only after a native UNSAT proof from
-    original integrality facts. The required query retains every original fact;
-    failed optional attempts retain its original unknown/error policy. No guess
-    or unproved identity replaces symbolic-state facts. *)
+    eligible UTF-16/Number queries. Before any witness search, a total-mode
+    mixed UTF-16/Number query first runs a sufficient native UNSAT precheck on a
+    proper nonempty unchanged numeric subset of the original top-level
+    expressions; a native UNSAT answer for that subset proves the whole
+    conjunction unsatisfiable and returns None without executing the complete
+    mixed query. A numeric SAT/unknown answer proves nothing about feasibility
+    and falls through to the pre-existing complete-query path unchanged. A
+    validated full-query model is a witness; numeric index identities are added
+    only after a native UNSAT proof from original integrality facts. The
+    required query retains every original fact; failed optional attempts retain
+    its original unknown/error policy. No guess or unproved identity replaces
+    symbolic-state facts. *)
 val check_sat : Expr.Set.t -> (string, Type.t) Hashtbl.t -> model option
 
 (** Boolean view of [check_sat], including the same cache and witness search. *)

@@ -29,6 +29,7 @@ module Make (State : SState.S) = struct
     | StateErr.EPure f -> StateErr.EPure f
     | StateErr.EVar v -> StateErr.EVar v
     | StateErr.EAsrt (v, f) -> StateErr.EAsrt (v, f)
+    | StateErr.EInfeasibleUnfold s -> StateErr.EInfeasibleUnfold s
     | StateErr.EOther s -> StateErr.EOther s
 
   let unlift_error : err_t -> State.err_t = function
@@ -36,6 +37,7 @@ module Make (State : SState.S) = struct
     | StateErr.EPure f -> StateErr.EPure f
     | StateErr.EVar v -> StateErr.EVar v
     | StateErr.EAsrt (v, f) -> StateErr.EAsrt (v, f)
+    | StateErr.EInfeasibleUnfold s -> StateErr.EInfeasibleUnfold s
     | StateErr.EOther s -> StateErr.EOther s
 
   let lift_errors st = List.map (lift_error st)

@@ -769,6 +769,19 @@ struct
               SAInterpreter.evaluate_lcmds prog proof state
             in
             let successes, errors = Res_list.split lemma_evaluation_results in
+            (* Remove only the checked infeasibility marker (EInfeasibleUnfold)
+               in total mode: it is an expected outcome of explicit unfolds,
+               not a proof failure. Ordinary errors and a wholly vanished
+               lemma (empty successes) still reject via analyse_lemma_results. *)
+            let errors =
+              if !Config.Verification.total then
+                List.filter
+                  (function
+                    | StateErr.EInfeasibleUnfold _ -> false
+                    | _ -> true)
+                  errors
+              else errors
+            in
             match errors with
             | [] -> analyse_lemma_results test successes
             | _ ->

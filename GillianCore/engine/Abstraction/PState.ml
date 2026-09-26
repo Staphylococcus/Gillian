@@ -714,9 +714,7 @@ module Make (State : SState.S) :
        The old logical binder names still describe the preceding iteration. *)
     (match measure with
     | Some (variant, Some (typ, entry)) ->
-        let rank =
-          SVal.SESubst.subst_in_expr subst' ~partial:true variant
-        in
+        let rank = SVal.SESubst.subst_in_expr subst' ~partial:true variant in
         Totality.check_proof_expression ~context:"Loop revisit variant"
           ~evaluate:(State.eval_expr new_state.state)
           ~assertion:(fun condition ->
@@ -849,7 +847,8 @@ module Make (State : SState.S) :
                 let state = invariant_state.state in
                 Totality.check_proof_expression ~context:"Loop entry variant"
                   ~evaluate:(State.eval_expr state)
-                  ~assertion:(fun condition -> State.assert_a state [ condition ])
+                  ~assertion:(fun condition ->
+                    State.assert_a state [ condition ])
                   variant;
                 let rank = State.eval_expr state variant in
                 let typ =
@@ -873,7 +872,8 @@ module Make (State : SState.S) :
                 in
                 let state =
                   match
-                    State.assume_a state [ Expr.BinOp (entry, ValueEqual, rank) ]
+                    State.assume_a state
+                      [ Expr.BinOp (entry, ValueEqual, rank) ]
                   with
                   | Some state -> state
                   | None ->
@@ -943,7 +943,8 @@ module Make (State : SState.S) :
       (* Check the original term against the incoming state, before reduction
          or predicate matching can erase it or supply its missing domain. *)
       Totality.check_proof_expression ~context ~evaluate:eval_expr
-        ~assertion:(fun condition -> assert_a astate [ condition ]) e;
+        ~assertion:(fun condition -> assert_a astate [ condition ])
+        e;
       eval_expr e
     in
     let open Res_list.Syntax in
@@ -957,7 +958,8 @@ module Make (State : SState.S) :
             Option.fold
               ~some:(fun (_, bindings) ->
                 List.map
-                  (fun (x, e) -> (Expr.LVar x, eval_proof_expr "Fold binding" e))
+                  (fun (x, e) ->
+                    (Expr.LVar x, eval_proof_expr "Fold binding" e))
                   bindings)
               ~none:[] fold_info
           in
@@ -1000,12 +1002,28 @@ module Make (State : SState.S) :
           else (
             L.verbose (fun m ->
                 m "@[<h>Values: %a@]" Fmt.(list ~sep:comma Expr.pp) vs);
+            (* Opt-in infeasible-unfold tracking, limited to explicit
+               nonrecursive unfolds in nonrecursive total lemma proofs:
+               total mode, no under-approximation, no totality context and
+               no lemma induction. Typed EInfeasibleUnfold errors are
+               preserved to the final collector by the Res_list bind. *)
+            let track_infeasible =
+              !Config.Verification.total
+              && (not !Config.under_approximation)
+              && Option.is_none prog.totality
+              && Option.is_none prog.lemma_induction
+            in
             let** _, state =
-              SMatcher.unfold ?additional_bindings astate pname vs
+              SMatcher.unfold ~track_infeasible ?additional_bindings astate
+                pname vs
             in
             let _, states =
               simplify ~kill_new_lvars:true ~matching:true state
             in
+            if track_infeasible && states = [] then
+              Totality.unsupported
+                "Unclassified state loss during explicit unfold PState \
+                 simplification";
             Res_list.just_oks states)
       | Package { lhs; rhs } ->
           let++ astate =

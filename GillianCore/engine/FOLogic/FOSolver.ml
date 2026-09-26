@@ -321,10 +321,89 @@ let check_entailment
                  gamma_tbl)
              pieces
       in
+      (* Empty UTF-16 length sufficient check. The negated goal
+         Not((u16-len s) == 0), one original numeric link n == as_num(u16-len s),
+         the original zero equation n == 0., and one original integer upper bound
+         (u16-len s) <= b are all original conjuncts of the full query. Dropping
+         the other conjuncts weakens the query, so native UNSAT on this
+         four-expression subset suffices; SAT or unknown fall back below. *)
+      let length_zero_proved () =
+        let enabled =
+          !Config.Verification.total
+          && (not !Config.under_approximation)
+          && SS.is_empty existentials
+          && Expr.Set.mem right_f formulae
+        in
+        if not enabled then false
+        else
+          match right_f with
+          | Expr.UnOp
+              ( Not,
+                Expr.BinOp
+                  ( Expr.UnOp (Utf16Len, Expr.LVar s),
+                    Equal,
+                    Expr.Lit (Int goal_zero) ) )
+            when Z.equal goal_zero Z.zero
+                 && Hashtbl.find_opt gamma_tbl s = Some Type.Utf16Type -> (
+              let link_of e =
+                match e with
+                | Expr.BinOp
+                    ( Expr.LVar n,
+                      Equal,
+                      Expr.UnOp (IntToNum, Expr.UnOp (Utf16Len, Expr.LVar s2))
+                    )
+                  when s2 = s
+                       && Hashtbl.find_opt gamma_tbl n = Some Type.NumberType ->
+                    Some (n, e)
+                | _ -> None
+              in
+              let bound_of e =
+                match e with
+                | Expr.BinOp
+                    ( Expr.UnOp (Utf16Len, Expr.LVar s2),
+                      ILessThanEqual,
+                      Expr.Lit (Int _) )
+                  when s2 = s -> Some e
+                | _ -> None
+              in
+              (* Deterministic (Set) order; at most one native attempt. *)
+              let links =
+                Expr.Set.fold
+                  (fun e acc ->
+                    match link_of e with
+                    | Some t -> t :: acc
+                    | None -> acc)
+                  formulae []
+              in
+              match
+                List.find_map
+                  (fun (n, link_e) ->
+                    let zero_e =
+                      Expr.BinOp (Expr.LVar n, Equal, Expr.Lit (Num 0.))
+                    in
+                    if not (Expr.Set.mem zero_e formulae) then None
+                    else
+                      List.find_map bound_of (Expr.Set.elements formulae)
+                      |> Option.map (fun bound_e -> (link_e, zero_e, bound_e)))
+                  links
+              with
+              | Some (link_e, zero_e, bound_e) ->
+                  let core =
+                    Expr.Set.of_list [ right_f; link_e; zero_e; bound_e ]
+                  in
+                  Expr.Set.cardinal core = 4
+                  && Expr.Set.subset core formulae
+                  && (not (Expr.Set.equal core formulae))
+                  && Smt.proves_unsat core gamma_tbl
+              | None -> false)
+          | _ -> false
+      in
       (* This weaker arithmetic query can prove the complete conjunction only
          by native UNSAT. SAT/unknown retain the original focused/full paths. *)
       let model =
-        if contained_omission && Smt.proves_unsat contained gamma_tbl then None
+        if length_zero_proved () then None
+        else if contained_omission && Smt.proves_unsat contained gamma_tbl then
+          None
         else if
           numeric_omission
           && (numeric_pieces_proved () || Smt.proves_unsat numeric gamma_tbl)

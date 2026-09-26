@@ -2,12 +2,24 @@ open Gillian.Gil_syntax
 module Gamma = Gillian.Symbolic.Type_env
 module Solver = Gillian.Logic.FOSolver
 module Config = Gillian.Utils.Config
+module Parser = Gillian.Gil_parsing.Make (Annot.Basic)
 
 let bin op a b = Expr.BinOp (a, op, b)
 let not_ e = Expr.UnOp (Not, e)
 let x = Expr.LVar "#focus_x"
 let y = Expr.LVar "#focus_y"
 let z = Expr.LVar "#focus_z"
+
+(* Parse a list of original GIL expression strings into an Expr.Set, failing the
+   test on any parse error. This embeds the query417 assertions without a
+   runtime /tmp dependency, mirroring the GIL reimport path in utf16_values.ml. *)
+let parse_gil_set (strings : string list) : Expr.Set.t =
+  List.fold_left
+    (fun acc s ->
+      match Parser.parse_expression (Lexing.from_string s) with
+      | Ok e -> Expr.Set.add e acc
+      | Error _ -> failwith ("failed to parse GIL expression: " ^ s))
+    Expr.Set.empty strings
 
 let with_total f () =
   let saved = !Config.Verification.total in
@@ -1022,6 +1034,362 @@ let invariant_counter_witness () =
     |> Expr.Set.add (bin ValueEqual pos (Expr.num 1.))
     |> Expr.Set.add (bin Equal size (Expr.int 3)))
 
+(* Source query417, SHA
+   84f4b79835e95e5f538d54401a8929a224f87ae60a48ee8b7f846c221ca9d8eb. The
+   native full query SIGSEGVs; the exact unchanged arithmetic subset is UNSAT.
+   The precheck must decide UNSAT on the unchanged numeric subset before any
+   mixed-query witness search (no native exec_sat on this full set). *)
+let mixed_numeric_reproducer () =
+  let strings =
+    [
+      "(! (#pos == 0.))";
+      "(is_int #lvar_249)";
+      "(is_int #pos)";
+      "(is_int #zeroPrevious)";
+      "(is_int #zeroPreviousCount)";
+      "(0. == (#zeroPreviousCount + 1.))";
+      "(0. <= #lvar_249)";
+      "(0. <= #pos)";
+      "(0. <= #zeroPrevious)";
+      "(0. <= #zeroPreviousCount)";
+      "(55296. <= u16-code(#s, (num_to_int #lvar_249)))";
+      "(55296. <= u16-code(#s, (num_to_int #zeroPrevious)))";
+      "(#len == (as_num (u16-len #s)))";
+      "(#lvar_249 < #zeroPrevious)";
+      "(#pos == (#zeroPrevious + 1.))";
+      "(#pos <= #len)";
+      "(#zeroPrevious == (#lvar_249 + 1.))";
+      "(#zeroPrevious < #pos)";
+      "(#zeroPrevious <= #len)";
+      "(#zeroPreviousCount == (#lvar_250 + 1.))";
+      "(#zeroPreviousCount <= #zeroPrevious)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((#lvar_249 + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #lvar_249)) <= 56319.)";
+      "(u16-code(#s, (num_to_int #zeroPrevious)) <= 56319.)";
+      "((#zeroPrevious + 1.) < #len)";
+      "((u16-code(#s, (num_to_int (#lvar_249 + 1.))) < 56320.) or (57343. < \
+       u16-code(#s, (num_to_int (#lvar_249 + 1.)))))";
+      "((u16-code(#s, (num_to_int (#zeroPrevious + 1.))) < 56320.) or (57343. \
+       < u16-code(#s, (num_to_int (#zeroPrevious + 1.)))))";
+    ]
+  in
+  let fs = parse_gil_set strings in
+  let g = Gamma.init () in
+  Gamma.update g "#s" Type.Utf16Type;
+  List.iter
+    (fun name -> Gamma.update g name Type.NumberType)
+    [
+      "#lvar_250";
+      "#pos";
+      "#len";
+      "#zeroPreviousCount";
+      "#zeroPrevious";
+      "#lvar_249";
+    ];
+  let gamma = Gamma.as_hashtbl g in
+  Alcotest.(check bool)
+    "mixed numeric contradiction decided on the unchanged numeric subset" true
+    (Option.is_none (Smt.check_sat fs gamma))
+
+let numeric_sat_full_witness () =
+  let x = Expr.LVar "#num_sat_x" and s = Expr.LVar "#num_sat_s" in
+  let g = Gamma.init () in
+  Gamma.update g "#num_sat_x" Type.NumberType;
+  Gamma.update g "#num_sat_s" Type.Utf16Type;
+  let gamma = Gamma.as_hashtbl g in
+  let fs =
+    Expr.Set.of_list
+      [
+        bin ValueEqual x (Expr.num 1.);
+        bin Equal s
+          (Expr.Lit (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "A")));
+      ]
+  in
+  Alcotest.(check bool)
+    "numeric subset SAT cannot be treated as a complete-query UNSAT" true
+    (Option.is_some (Smt.check_sat fs gamma))
+
+let numeric_sat_string_contradiction () =
+  let x = Expr.LVar "#num_len_x" and s = Expr.LVar "#num_len_s" in
+  let g = Gamma.init () in
+  Gamma.update g "#num_len_x" Type.NumberType;
+  Gamma.update g "#num_len_s" Type.Utf16Type;
+  let gamma = Gamma.as_hashtbl g in
+  let fs =
+    Expr.Set.of_list
+      [
+        bin ValueEqual x (Expr.num 0.);
+        bin Equal (Expr.UnOp (Utf16Len, s)) (Expr.int 1);
+        bin Equal (Expr.UnOp (Utf16Len, s)) (Expr.int 2);
+      ]
+  in
+  Alcotest.(check bool)
+    "a numeric-only model is not a complete-query witness" true
+    (Option.is_none (Smt.check_sat fs gamma))
+
+let numeric_precheck_binary64_rounding () =
+  let x = Expr.LVar "#num_rnd_x" and s = Expr.LVar "#num_rnd_s" in
+  let g = Gamma.init () in
+  Gamma.update g "#num_rnd_x" Type.NumberType;
+  Gamma.update g "#num_rnd_s" Type.Utf16Type;
+  let gamma = Gamma.as_hashtbl g in
+  let fs =
+    Expr.Set.of_list
+      [
+        bin ValueEqual x (Expr.num 9007199254740992.);
+        bin ValueEqual (bin FPlus x (Expr.num 1.)) x;
+        bin Equal s
+          (Expr.Lit (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "A")));
+      ]
+  in
+  Alcotest.(check bool)
+    "binary64 rounding is not rejected by a strict-increment shortcut" true
+    (Option.is_some (Smt.check_sat fs gamma))
+
+let empty_length_preserves_derived_rank () =
+  (* The 28 original GIL strings reconstruct query902: an empty-string state
+     with saved rank MAX_SAFE_INTEGER. The diagnostic GIL printer rounds that
+     bound, so the two literals were restored to the exact 9007199254740991.
+     from the SMT binary64 bits 433fffffffffffff (preparation.json). No
+     runtime /tmp dependency. *)
+  let strings =
+    [
+      "(! (#len v== -0.))";
+      "(! (#len < #len))";
+      "(! (#value == none))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(0. <= #count)";
+      "(#count == 0.)";
+      "(#count < 1.)";
+      "(#count <= #len)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == 0.)";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_262 v== (9007199254740991. - #len))";
+      "(#lvar_js_0 v== #lvar_js_12)";
+      "(#lvar_js_0 v== #lvar_js_4)";
+      "(#lvar_js_1 v== #lvar_js_13)";
+      "(#lvar_js_1 v== #lvar_js_5)";
+      "(#lvar_js_12 v== #lvar_js_0)";
+      "(#lvar_js_13 v== #lvar_js_1)";
+      "(#lvar_js_14 v== #lvar_js_2)";
+      "(#lvar_js_2 v== #lvar_js_14)";
+      "(#lvar_js_2 v== #lvar_js_6)";
+      "(#lvar_js_4 v== #lvar_js_0)";
+      "(#lvar_js_5 v== #lvar_js_1)";
+      "(#lvar_js_6 v== #lvar_js_2)";
+      "((u16-len #s) i<= 9007199254740991i)";
+    ]
+  in
+  let fs = parse_gil_set strings in
+  let g = Gamma.init () in
+  Gamma.update g "#s" Type.Utf16Type;
+  List.iter
+    (fun n -> Gamma.update g n Type.NumberType)
+    [ "#len"; "#count"; "#lvar_262" ];
+  let gamma = Gamma.as_hashtbl g in
+  let s = Expr.LVar "#s" in
+  let max_rank_bits = Int64.bits_of_float 9007199254740991. in
+  let one_rank_bits = Int64.bits_of_float 9007199254740990. in
+  let lifted model =
+    let t = Hashtbl.create 4 in
+    Smt.lift_model model gamma (Hashtbl.add t)
+      (Expr.Set.of_list
+         (List.map
+            (fun name -> Expr.LVar name)
+            [ "#s"; "#len"; "#count"; "#lvar_262" ]));
+    let get name =
+      match Hashtbl.find_opt t name with
+      | Some (Expr.Lit value) -> value
+      | _ -> Alcotest.fail ("Missing lifted model value: " ^ name)
+    in
+    get
+  in
+  (* Control A: the original fs must admit a native full-query model. The
+     empty-length witness search must find it without fixing the derived
+     Number variables: s is empty, len/count are 0, and rank keeps its exact
+     MAX_SAFE_INTEGER bits. A bare all-zero guess is invalid, so this rank
+     assertion is the load-bearing check. *)
+  match Smt.check_sat fs gamma with
+  | Some model -> (
+      let get = lifted model in
+      Alcotest.(check bool)
+        "empty witness: s is the empty Utf16 string" true
+        (get "#s" = Literal.Utf16String (Gillian.Utils.Utf16.of_canonical ""));
+      Alcotest.(check int64)
+        "empty witness: len is numerical 0" 0L
+        (Int64.bits_of_float
+           (match get "#len" with
+           | Literal.Num n -> n
+           | _ -> Alcotest.fail "len lost Number type"));
+      Alcotest.(check int64)
+        "empty witness: count is numerical 0" 0L
+        (Int64.bits_of_float
+           (match get "#count" with
+           | Literal.Num n -> n
+           | _ -> Alcotest.fail "count lost Number type"));
+      Alcotest.(check int64)
+        "empty witness: rank retains MAX_SAFE_INTEGER bits" max_rank_bits
+        (Int64.bits_of_float
+           (match get "#lvar_262" with
+           | Literal.Num n -> n
+           | _ -> Alcotest.fail "rank lost Number type"));
+      (* Control B: an original s == u16"A" contradicts the zero length, so
+         the complete query must reject and the empty seed cannot ignore the
+         original string facts. *)
+      Alcotest.(check bool)
+        "original string facts reject a non-empty witness" true
+        (Option.is_none
+           (Smt.check_sat
+              (Expr.Set.add
+                 (bin Equal s
+                    (Expr.Lit
+                       (Literal.Utf16String
+                          (Gillian.Utils.Utf16.of_canonical "A"))))
+                 fs)
+              gamma));
+      (* Control C: remove exactly the "#len == 0." fact, add "#len == 1."
+         plus s == u16"A". The original rank relation (#lvar_262 v==
+         9007199254740991. - #len) stays in the query, so the witness rank is
+         now MAX - 1. This proves a failed empty guess falls back rather than
+         narrowing later states to empty strings. *)
+      let len = Expr.LVar "#len" in
+      let len_zero = bin Equal len (Expr.num 0.) in
+      assert (Expr.Set.mem len_zero fs);
+      let fs1 =
+        Expr.Set.add
+          (bin Equal len (Expr.num 1.))
+          (Expr.Set.add
+             (bin Equal s
+                (Expr.Lit
+                   (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "A"))))
+             (Expr.Set.remove len_zero fs))
+      in
+      match Smt.check_sat fs1 gamma with
+      | Some model ->
+          let get = lifted model in
+          Alcotest.(check int64)
+            "fallback witness: rank retains the original relation" one_rank_bits
+            (Int64.bits_of_float
+               (match get "#lvar_262" with
+               | Literal.Num n -> n
+               | _ -> Alcotest.fail "rank lost Number type"))
+      | None ->
+          Alcotest.fail
+            "a non-empty length with a non-empty string must be satisfiable")
+  | None -> Alcotest.fail "Missing complete-query empty-length witness"
+
+let length_zero_core () =
+  (* The 36 original GIL expressions from AJV query829: an empty-string state
+     with saved rank and structural JS aliases. Two rounded Num literals are
+     restored to the exact 9007199254740991. from the SMT binary64 bits
+     433fffffffffffff, as the query902 test does. No runtime /tmp dependency. *)
+  let strings =
+    [
+      "(! (#len v== -0.))";
+      "(! (#len < #len))";
+      "(! (#lvar_262 == empty))";
+      "(! (#value == none))";
+      "(! ((u16-len #s) == 0i))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(0. <= #count)";
+      "(#count == 0.)";
+      "(#count < 1.)";
+      "(#count <= #len)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == 0.)";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_263 v== (9007199254740991. - #len))";
+      "(#lvar_js_0 v== #lvar_js_12)";
+      "(#lvar_js_0 v== #lvar_js_16)";
+      "(#lvar_js_0 v== #lvar_js_4)";
+      "(#lvar_js_1 v== #lvar_js_13)";
+      "(#lvar_js_1 v== #lvar_js_17)";
+      "(#lvar_js_1 v== #lvar_js_5)";
+      "(#lvar_js_12 v== #lvar_js_0)";
+      "(#lvar_js_13 v== #lvar_js_1)";
+      "(#lvar_js_14 v== #lvar_js_2)";
+      "(#lvar_js_16 v== #lvar_js_0)";
+      "(#lvar_js_17 v== #lvar_js_1)";
+      "(#lvar_js_18 v== #lvar_js_2)";
+      "(#lvar_js_2 v== #lvar_js_14)";
+      "(#lvar_js_2 v== #lvar_js_18)";
+      "(#lvar_js_2 v== #lvar_js_6)";
+      "(#lvar_js_4 v== #lvar_js_0)";
+      "(#lvar_js_5 v== #lvar_js_1)";
+      "(#lvar_js_6 v== #lvar_js_2)";
+      "((u16-len #s) i<= 9007199254740991i)";
+    ]
+  in
+  let fs = parse_gil_set strings in
+  let goal = bin Equal (Expr.UnOp (Utf16Len, Expr.LVar "#s")) (Expr.int 0) in
+  let neg_goal = Expr.negate goal in
+  (* The negated empty-length goal is one of the 36 original expressions. *)
+  assert (Expr.Set.mem neg_goal fs);
+  let facts = Expr.Set.remove neg_goal fs in
+  let fresh_gamma () =
+    let g = Gamma.init () in
+    Gamma.update g "#s" Type.Utf16Type;
+    List.iter
+      (fun n -> Gamma.update g n Type.NumberType)
+      [ "#len"; "#count"; "#lvar_263" ];
+    g
+  in
+  let entail fs' goal' =
+    Solver.check_entailment Utils.Containers.SS.empty
+      (Engine.PFS.of_list (Expr.Set.elements fs'))
+      [ goal' ] (fresh_gamma ())
+  in
+  let len_link op =
+    bin op (Expr.LVar "#len")
+      (Expr.UnOp (IntToNum, Expr.UnOp (Utf16Len, Expr.LVar "#s")))
+  in
+  let s_is_a =
+    bin Equal (Expr.LVar "#s")
+      (Expr.Lit (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "A")))
+  in
+  (* A. All original facts imply the empty-length goal: the new sufficient
+     path proves it from the four-expression subset. Reproduce the former
+     complete-query unknown with original rank and structural aliases kept. *)
+  Alcotest.(check bool)
+    "original facts imply the empty-length goal" true (entail facts goal);
+  (* B. The same facts do NOT imply the opposite (nonempty length). *)
+  Alcotest.(check bool)
+    "original facts do not imply a nonempty length" false
+    (entail facts (Expr.negate goal));
+  (* C. Dropping both original length links and pinning a nonempty string is a
+     concrete full-query counterexample: the empty-length goal no longer holds. *)
+  let eq_link = len_link Equal in
+  let v_link = len_link ValueEqual in
+  assert (Expr.Set.mem eq_link facts);
+  assert (Expr.Set.mem v_link facts);
+  let facts_c =
+    Expr.Set.add s_is_a (Expr.Set.remove eq_link (Expr.Set.remove v_link facts))
+  in
+  Alcotest.(check bool)
+    "missing length links reject the empty-length goal" false
+    (entail facts_c goal);
+  (* D. Keeping the links but removing only the zero equation and pinning a
+     nonempty length + nonempty string is a separate concrete witness: the
+     rejection stays decisive without touching the production inputs. *)
+  let len_zero = bin Equal (Expr.LVar "#len") (Expr.num 0.) in
+  assert (Expr.Set.mem len_zero facts);
+  let facts_d =
+    Expr.Set.add
+      (bin Equal (Expr.LVar "#len") (Expr.num 1.))
+      (Expr.Set.add s_is_a (Expr.Set.remove len_zero facts))
+  in
+  Alcotest.(check bool)
+    "missing zero equation rejects the empty-length goal" false
+    (entail facts_d goal)
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -1056,4 +1424,17 @@ let tests =
     Alcotest.test_case "invariant counters preserve complete witness queries"
       `Quick
       (with_total invariant_counter_witness);
+    Alcotest.test_case "mixed numeric contradiction reproducer" `Quick
+      (with_total mixed_numeric_reproducer);
+    Alcotest.test_case "numeric SAT requires full SAT witness" `Quick
+      (with_total numeric_sat_full_witness);
+    Alcotest.test_case "numeric SAT retains string contradiction" `Quick
+      (with_total numeric_sat_string_contradiction);
+    Alcotest.test_case "numeric precheck preserves binary64 rounding" `Quick
+      (with_total numeric_precheck_binary64_rounding);
+    Alcotest.test_case "empty length preserves derived rank and fallback" `Quick
+      (with_total empty_length_preserves_derived_rank);
+    Alcotest.test_case "empty-length core sufficient check and rejections"
+      `Quick
+      (with_total length_zero_core);
   ]

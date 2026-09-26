@@ -86,10 +86,17 @@ module type S = sig
   val produce_assertion :
     t -> SVal.SESubst.t -> Asrt.atom -> (t, err_t) Res_list.t
 
-  val produce : t -> SVal.SESubst.t -> Asrt.t -> (t, err_t) Res_list.t
+  val produce :
+    ?track_infeasible:bool ->
+    t ->
+    SVal.SESubst.t ->
+    Asrt.t ->
+    (t, err_t) Res_list.t
+
   val produce_posts : t -> SVal.SESubst.t -> Asrt.t list -> t list
 
   val unfold :
+    ?track_infeasible:bool ->
     ?additional_bindings:unfold_info_t ->
     t ->
     string ->
@@ -558,6 +565,12 @@ module Make (State : SState.S) :
         in
         Some (actual_pred, args)
 
+  let guard_unclassified_loss tracking context outcomes =
+    match outcomes with
+    | [] when tracking ->
+        Totality.unsupported ("Unclassified state loss during " ^ context)
+    | _ -> outcomes
+
   let rec produce_assertion
       (astate : t)
       (subst : SVal.SESubst.t)
@@ -726,10 +739,17 @@ module Make (State : SState.S) :
         | Some state' ->
             Res_list.return { state = state'; preds; wands; pred_defs })
 
-  and produce_asrt_list (astate : t) (subst : SVal.SESubst.t) (sas : Asrt.t) :
-      (t, err_t) Res_list.t =
+  and produce_asrt_list
+      ?(track_infeasible = false)
+      (astate : t)
+      (subst : SVal.SESubst.t)
+      (sas : Asrt.t) : (t, err_t) Res_list.t =
     let open Res_list.Syntax in
     let other_state_err msg = Res_list.error_with (StateErr.EOther msg) in
+    let track_infeasible =
+      track_infeasible && !Config.Verification.total
+      && not !Config.under_approximation
+    in
     let () =
       SVal.SESubst.iter subst (fun v value ->
           SVal.SESubst.put subst v (State.simplify_val astate.state value))
@@ -738,18 +758,24 @@ module Make (State : SState.S) :
       List.fold_left
         (fun intermediate_states asrt ->
           let** intermediate_state = intermediate_states in
-          try produce_assertion intermediate_state subst asrt
-          with e ->
-            let admissible =
-              State.assume_a ~time:"Produce: final check" ~matching:true
-                intermediate_state.state [ Expr.true_ ]
-            in
-            if !Config.delay_entailment && Option.is_none admissible then (
-              L.verbose (fun fmt ->
-                  fmt
-                    "Production exception due to delayed entailment, survived.");
-              other_state_err "Production Exception")
-            else raise e)
+          let outcomes =
+            try produce_assertion intermediate_state subst asrt with
+            | err when track_infeasible -> raise err
+            | e ->
+                let admissible =
+                  State.assume_a ~time:"Produce: final check" ~matching:true
+                    intermediate_state.state [ Expr.true_ ]
+                in
+                if !Config.delay_entailment && Option.is_none admissible then (
+                  L.verbose (fun fmt ->
+                      fmt
+                        "Production exception due to delayed entailment, \
+                         survived.");
+                  other_state_err "Production Exception")
+                else raise e
+          in
+          guard_unclassified_loss track_infeasible
+            "explicit unfold assertion production" outcomes)
         (Res_list.return astate) sas
     in
     let state, preds, wands =
@@ -768,11 +794,18 @@ module Make (State : SState.S) :
     match admissible with
     | None ->
         L.normal (fun fmt -> fmt "final state non admissible");
-        Res_list.vanish
+        if track_infeasible then
+          Res_list.error_with
+            (StateErr.EInfeasibleUnfold
+               "final explicit-unfold production admissibility check")
+        else Res_list.vanish
     | Some state -> Res_list.return { state; preds; pred_defs; wands }
 
-  let produce (astate : t) (subst : SVal.SESubst.t) (a : Asrt.t) :
-      (t, err_t) Res_list.t =
+  let produce
+      ?(track_infeasible = false)
+      (astate : t)
+      (subst : SVal.SESubst.t)
+      (a : Asrt.t) : (t, err_t) Res_list.t =
     L.verbose (fun m ->
         m
           "@[-----------------@\n\
@@ -793,7 +826,7 @@ module Make (State : SState.S) :
         ~assume:(fun st es -> State.assume_a st es)
         (State.copy astate.state) original);
     let sas = MP.simplify_asrts a in
-    produce_asrt_list astate subst sas
+    produce_asrt_list ~track_infeasible astate subst sas
 
   let produce_posts (state : t) (subst : SVal.SESubst.t) (asrts : Asrt.t list) :
       t list =
@@ -859,10 +892,15 @@ module Make (State : SState.S) :
   (* WARNING: At the moment, unfold behaves over-approximately, it will return only success of only error.
      We only use unfold and fold in OX mode right now, and we don't quite know the meaning of UX fold/unfold. *)
   let rec unfold
+      ?(track_infeasible = false)
       ?(additional_bindings = [])
       (astate : t)
       (pname : string)
       (args : Expr.t list) : (SVal.SESubst.t * t, err_t) Res_list.t =
+    let track_infeasible =
+      track_infeasible && !Config.Verification.total
+      && not !Config.under_approximation
+    in
     let pred = MP.get_pred_def astate.pred_defs pname in
     if
       !Config.Verification.total
@@ -930,9 +968,21 @@ module Make (State : SState.S) :
           let astate = { state = state'; preds; wands; pred_defs } in
           let rest_results =
             let* def = rest_defs in
-            produce (copy_astate astate) (SVal.SESubst.copy subst_i) def
+            let outcomes =
+              produce ~track_infeasible (copy_astate astate)
+                (SVal.SESubst.copy subst_i)
+                def
+            in
+            guard_unclassified_loss track_infeasible
+              "explicit unfold predicate alternative" outcomes
           in
-          let first_results = produce astate subst_i first_def in
+          let first_results =
+            produce ~track_infeasible astate subst_i first_def
+          in
+          let first_results =
+            guard_unclassified_loss track_infeasible
+              "explicit unfold predicate alternative" first_results
+          in
           let* result = first_results @ rest_results in
           match result with
           | Error err when !Config.Verification.total -> [ Error err ]
@@ -943,6 +993,10 @@ module Make (State : SState.S) :
               Res_list.vanish
           | Ok state ->
               let subst, states = simplify_astate ~matching:true state in
+              let states =
+                guard_unclassified_loss track_infeasible
+                  "explicit unfold simplification" states
+              in
               let+ state = states in
               Ok (subst, state))
     in

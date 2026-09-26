@@ -86,7 +86,13 @@ module type S = sig
   val produce_assertion :
     t -> SVal.SESubst.t -> Asrt.atom -> (t, err_t) Res_list.t
 
-  val produce : t -> SVal.SESubst.t -> Asrt.t -> (t, err_t) Res_list.t
+  val produce :
+    ?track_infeasible:bool ->
+    t ->
+    SVal.SESubst.t ->
+    Asrt.t ->
+    (t, err_t) Res_list.t
+
   val produce_posts : t -> SVal.SESubst.t -> Asrt.t list -> t list
 
   (** [unfold state name args unfold_info] returns a list of pairs (subst,
@@ -94,6 +100,7 @@ module type S = sig
       given state. unfold_info contains information about how to bind new
       variables. *)
   val unfold :
+    ?track_infeasible:bool ->
     ?additional_bindings:unfold_info_t ->
     t ->
     string ->

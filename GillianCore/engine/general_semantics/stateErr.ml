@@ -7,6 +7,8 @@ type ('mem_err, 'value) t =
   | EVar of Var.t (* Undefined variable *)
   | EAsrt of ('value list * Expr.t)
   (* Assertion that failed, with the relevant values for unfolding. *)
+  | EInfeasibleUnfold of string
+  (* Internal control marker for a checked infeasible explicit unfold. *)
   | EOther of string
     (* We want all errors to be proper errors - this is a temporary placeholder *)
 [@@deriving yojson, show]
@@ -38,6 +40,7 @@ let pp_err
       Fmt.pf fmt "Assertion failed for %a: %a"
         (Fmt.list ~sep:(Fmt.any ", ") pp_v)
         vs Expr.pp f
+  | EInfeasibleUnfold msg -> Fmt.pf fmt "Checked infeasible unfold: %s" msg
   | EOther msg -> Fmt.pf fmt "%s" msg
 
 let can_fix (can_fix_mem : 'a -> bool) (err : ('a, 'b) t) : bool =
