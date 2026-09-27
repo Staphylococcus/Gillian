@@ -112,6 +112,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token CDR
 %token SETTOLIST
 %token LSTLEN
+%token LSTLENINT
 %token STRLEN
 %token STRBYTES
 %token NUMTOINT
@@ -712,10 +713,15 @@ lab_spec_target:
   | LESSTHAN; sspec_name = VAR; GREATERTHAN
     { (sspec_name, SS.empty) }
 
+procedure_variant_target:
+  | rank = jsil_lemma_variant_target { Spec.Expression rank }
+  | VARIANT; LBRACE; LSTLENINT; param = VAR; RBRACE
+    { Spec.ListLength param }
+
 pre_post_target:
-  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; variant = option(jsil_lemma_variant_target); NORMAL
+  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; variant = option(procedure_variant_target); NORMAL
     { Spec.{ pre; posts; variant; flag = Normal; to_verify = true; label = lab_spec } }
-  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; variant = option(jsil_lemma_variant_target); ERROR
+  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; variant = option(procedure_variant_target); ERROR
   { Spec.{ pre; posts; variant; flag = Error; to_verify = true; label = lab_spec} }
 
 spec_head_target:

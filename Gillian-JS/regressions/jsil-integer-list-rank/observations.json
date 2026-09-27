@@ -1,0 +1,60 @@
+{
+  "card": "t_8accc860",
+  "run": 216,
+  "binarySha256": "3e367eef3f408ec644a225f6ad40f61b692545180e8cae9bd94ec6b832bdee3b",
+  "evidenceRoot": "/tmp/hermes-jsil-exact-list-rank-native-p071",
+  "independentReviewSha256": "db81ee16a11727e2945547a53f18122cf110b4350f3f45e3f27b6eb9535b44c9",
+  "scope": "Exact integer list-length procedure annotation and symbolic-list tail recursion; no descriptor ownership or AJV enumeration theorem",
+  "scopedFrontendAccepted": true,
+  "units": {
+    "success": 9,
+    "failures": 0
+  },
+  "cases": [
+    {
+      "case": "ranked",
+      "returncode": 0,
+      "seconds": 8.37712281398126,
+      "sourceSha256": "07683c03c3fd7712bff3b0ee5c1731b9535c6bf2e9ea6dc97cbdf87f0ad0a332",
+      "logSha256": "dad842723ed78952fd303a5704bda23ced9e7ceb3bca093cfdb6862c2f9b944f"
+    },
+    {
+      "case": "wrong-post",
+      "returncode": 1,
+      "seconds": 8.126694931997918,
+      "sourceSha256": "a2913535774401d6138e4d7c99ceaca6fc45185a8b3432826d203d6342ae3842",
+      "logSha256": "6fa7e8b0dab0e2bea6b66a8f11d47f9ac8ac54b560fa16d103bd153a762a1ca8"
+    },
+    {
+      "case": "no-progress",
+      "returncode": 1,
+      "seconds": 8.026616626011673,
+      "sourceSha256": "689534ecfa345146731d33f16d1accc30516022ef23350714d496e00761d2732",
+      "logSha256": "27bfc6f3678ac762a94b0fc28dd86912b091528443498ef1396d8042e0145a43"
+    },
+    {
+      "case": "constant-rank",
+      "returncode": 1,
+      "seconds": 8.377035190002061,
+      "sourceSha256": "31f7f68513dd87efb0c944caacf008f34e9ad67a8711658408f3aa120242a0c7",
+      "logSha256": "3ea4f996a2f5ebb2a463260f555f4c0aa38c8afbd782a557f903a3d39fbe876c"
+    },
+    {
+      "case": "missing-rank",
+      "returncode": 124,
+      "seconds": 0.06356430498999543,
+      "sourceSha256": "53a536845cf7e71b0b889ee8c6dd9746132f44bc86b7b2e5b3044ef2e694eb58",
+      "logSha256": "97978219ab74ba05633e3dcb0caa269d3cdf03ef0f26d3ca1055f73f191fab89"
+    },
+    {
+      "case": "nonformal-rank",
+      "returncode": 124,
+      "seconds": 0.06349403300555423,
+      "sourceSha256": "c16c46ee763c2e7f9638bf3a3776eeacd106cd609aa8af5163c32be447854955",
+      "logSha256": "d17618a0861ee214fe8def2770046b967c6e82b54a6511580ebfb8b2688a5635"
+    }
+  ],
+  "proofAccepted": false,
+  "certificationReady": false,
+  "fullProofDone": false
+}

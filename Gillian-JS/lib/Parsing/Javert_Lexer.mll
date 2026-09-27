@@ -229,6 +229,7 @@ rule read = parse
   (* Unary minus uses the same symbol as binary minus, token MINUS *)
   | "~"                  { Javert_Parser.BITWISENOT    }
   | "l-len"              { Javert_Parser.LSTLEN }
+  | "l-len-int"          { Javert_Parser.LSTLENINT }
   | "l-rev"              { Javert_Parser.LSTREV }
   | "l-sub"              { Javert_Parser.LSTSUB }
   | "s-len"              { Javert_Parser.STRLEN }

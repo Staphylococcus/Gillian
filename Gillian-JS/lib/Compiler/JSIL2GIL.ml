@@ -159,6 +159,10 @@ let rec jsil2gil_lcmd (lcmd : LCmd.t) : GLCmd.t =
   | FreshSVar x -> FreshSVar x
   | SL slcmd -> SL (jsil2gil_slcmd slcmd)
 
+let jsil2gil_procedure_variant = function
+  | Spec.Expression expr -> jsil2gil_expr expr
+  | Spec.ListLength param -> Expr.UnOp (LstLen, Expr.PVar param)
+
 let jsil2gil_sspec (sspec : Spec.st) : GSpec.st =
   let ss_label =
     Option.map (fun (l, vl) -> (l, Containers.SS.elements vl)) sspec.label
@@ -167,7 +171,7 @@ let jsil2gil_sspec (sspec : Spec.st) : GSpec.st =
   {
     ss_pre = (jsil2gil_asrt sspec.pre, None);
     ss_posts = List.map (fun post -> (jsil2gil_asrt post, None)) sspec.posts;
-    ss_variant = Option.map jsil2gil_expr sspec.variant;
+    ss_variant = Option.map jsil2gil_procedure_variant sspec.variant;
     ss_flag = sspec.flag;
     ss_to_verify = sspec.to_verify;
     ss_label;

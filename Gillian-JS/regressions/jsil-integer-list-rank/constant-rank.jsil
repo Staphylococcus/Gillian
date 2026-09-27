@@ -1,0 +1,11 @@
+spec drain(xs)
+[[ (xs == #xs) * types(#xs : List) ]]
+[[ (ret == true) ]] variant(as_int 1) normal
+proc drain(xs) {
+  goto [xs = nil] done step;
+step: tail := cdr xs;
+  ret := "drain"(tail);
+  return;
+done: ret := true;
+  return
+};

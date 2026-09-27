@@ -2,10 +2,8 @@ open Gillian.Gil_syntax
 module Spec = Jsil_syntax.Spec
 module Lower = Js2jsil_lib.JSIL2GIL
 
-let parse cases =
-  let text =
-    "spec count(n)\n" ^ cases ^ "\nproc count(n) { ret := n; return };"
-  in
+let parse ?(body = "ret := n; return") cases =
+  let text = "spec count(n)\n" ^ cases ^ "\nproc count(n) { " ^ body ^ " };" in
   let file = Filename.temp_file "jsil-variant-" ".jsil" in
   let prog =
     Fun.protect
@@ -26,14 +24,16 @@ let check_case (a : Spec.st) (b : Spec.st) =
     "pre/post/flag/label/verification preserved" true
     (a.pre = b.pre && a.posts = b.posts && a.flag = b.flag && a.label = b.label
    && a.to_verify = b.to_verify);
-  check_expr "variant preserved" a.variant b.variant
+  Alcotest.(check bool) "variant preserved" true (a.variant = b.variant)
 
 let roundtrip flag () =
   let spec =
     parse ("<base> [[ (n == #n) ]] [[ (ret == #n) ]] variant(n) " ^ flag)
   in
   let original = List.hd spec.sspecs in
-  check_expr "parsed formal rank" (Some (Expr.PVar "n")) original.variant;
+  Alcotest.(check bool)
+    "parsed formal rank" true
+    (original.variant = Some (Spec.Expression (Expr.PVar "n")));
   let printed = Format.asprintf "%a" Spec.pp_sspec original in
   let recovered = List.hd (parse printed).sspecs in
   check_case original recovered;
@@ -47,7 +47,8 @@ let legacy () =
   let original =
     List.hd (parse "[[ (n == #n) ]] [[ (ret == #n) ]] normal").sspecs
   in
-  check_expr "missing rank stays absent" None original.variant;
+  Alcotest.(check bool)
+    "missing rank stays absent" true (original.variant = None);
   check_expr "legacy lowering stays absent" None
     (Lower.jsil2gil_sspec original).ss_variant;
   let constructed =
@@ -68,7 +69,7 @@ let multiple_cases () =
   List.iter2
     (fun (original : Spec.st) (lowered : Gillian.Gil_syntax.Spec.st) ->
       check_expr "per-case rank lowered"
-        (Option.map Lower.jsil2gil_expr original.variant)
+        (Option.map Lower.jsil2gil_procedure_variant original.variant)
         lowered.ss_variant;
       Alcotest.(check bool)
         "per-case label and flag retained" true
@@ -89,12 +90,57 @@ let list_length () =
   let original =
     List.hd (parse "[[ emp ]] [[ emp ]] variant(l-len n) normal").sspecs
   in
-  check_expr "parsed JSIL list length"
-    (Some (Expr.UnOp (LstLen, Expr.PVar "n")))
-    original.variant;
+  Alcotest.(check bool)
+    "parsed JSIL list length" true
+    (original.variant
+    = Some (Spec.Expression (Expr.UnOp (LstLen, Expr.PVar "n"))));
   check_expr "length rank remains a JS number"
     (Some (Expr.UnOp (IntToNum, Expr.UnOp (LstLen, Expr.PVar "n"))))
     (Lower.jsil2gil_sspec original).ss_variant
+
+let integer_list_length flag () =
+  let original =
+    List.hd (parse ("[[ emp ]] [[ emp ]] variant(l-len-int n) " ^ flag)).sspecs
+  in
+  Alcotest.(check bool)
+    "distinct structural rank" true
+    (original.variant = Some (Spec.ListLength "n"));
+  let recovered =
+    List.hd (parse (Format.asprintf "%a" Spec.pp_sspec original)).sspecs
+  in
+  check_case original recovered;
+  check_expr "exact GIL integer length, no numeric conversion"
+    (Some (Expr.UnOp (LstLen, Expr.PVar "n")))
+    (Lower.jsil2gil_sspec recovered).ss_variant
+
+let structural_rank_is_not_executable () =
+  let rejects body suffix =
+    let rejected =
+      try
+        ignore (parse ~body ("[[ emp ]] [[ emp ]] " ^ suffix));
+        false
+      with Failure _ -> true
+    in
+    Alcotest.(check bool)
+      "invalid structural-rank position rejected" true rejected
+  in
+  rejects "ret := l-len-int n; return" "normal";
+  List.iter
+    (rejects "ret := n; return")
+    [
+      "variant(l-len-int) normal";
+      "variant(l-len-int #n) normal";
+      "variant(l-len-int (n)) normal";
+      "variant(l-len-int n + 1) normal";
+    ];
+  (* Ordinary expressions retain binary64 length, including the explicit cast. *)
+  let length = Expr.UnOp (LstLen, Expr.PVar "n") in
+  let numeric = Expr.UnOp (IntToNum, length) in
+  check_expr "ordinary numeric length unchanged" (Some numeric)
+    (Some (Lower.jsil2gil_expr length));
+  check_expr "ordinary cast still crosses the numeric boundary"
+    (Some (Expr.UnOp (NumToInt, numeric)))
+    (Some (Lower.jsil2gil_expr (Expr.UnOp (NumToInt, length))))
 
 let malformed () =
   List.iter
@@ -119,5 +165,11 @@ let () =
           Alcotest.test_case "per-case variants" `Quick multiple_cases;
           Alcotest.test_case "numeric list-length lowering" `Quick list_length;
           Alcotest.test_case "malformed ranks" `Quick malformed;
+          Alcotest.test_case "integer length normal roundtrip" `Quick
+            (integer_list_length "normal");
+          Alcotest.test_case "integer length error roundtrip" `Quick
+            (integer_list_length "error");
+          Alcotest.test_case "integer rank syntax boundary" `Quick
+            structural_rank_is_not_executable;
         ] );
     ]
