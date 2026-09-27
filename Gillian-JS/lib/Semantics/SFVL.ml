@@ -61,16 +61,41 @@ let add_abstract fn fv sfvl =
 
 let field_names sfvl = List.map fst (Expr.Map.bindings sfvl)
 
+let property_name = function
+  | Expr.Lit (Literal.String bytes) -> Some bytes
+  | Expr.Lit (Literal.Utf16String value) ->
+      Some (Gillian.Utils.Utf16.to_canonical value)
+  | _ -> None
+
 let ordered_field_names sfvl =
-  if Expr.Map.exists (fun _ entry -> not entry.order_known) sfvl then
+  let entries = Expr.Map.bindings sfvl in
+  (* Index keys have numeric order. With at most one other string, no pair
+     needs creation history. This derives the result without restoring history.
+     Reject duplicate canonical names, including mixed legacy/UTF-16 aliases. *)
+  let rec intrinsic_order seen ordinary = function
+    | [] -> true
+    | (name, _) :: rest -> (
+        match property_name name with
+        | Some key when not (SS.mem key seen) ->
+            let ordinary =
+              ordinary
+              + if Option.is_some (Property_order.index key) then 0 else 1
+            in
+            ordinary <= 1 && intrinsic_order (SS.add key seen) ordinary rest
+        | _ -> false)
+  in
+  let intrinsic = intrinsic_order SS.empty 0 entries in
+  if
+    (not intrinsic)
+    && Expr.Map.exists (fun _ entry -> not entry.order_known) sfvl
+  then
     raise
       (Gillian.Utils.Gillian_result.Exc.Gillian_error
          (OperationError
             "Unsupported property enumeration: insertion order is unavailable \
              after logical cell production."));
   let fields =
-    Expr.Map.bindings sfvl
-    |> List.sort (fun (_, a) (_, b) -> compare a.order b.order)
+    entries |> List.sort (fun (_, a) (_, b) -> compare a.order b.order)
   in
   let rec check_order = function
     | (_, a) :: ((_, b) :: _ as rest) ->
@@ -82,16 +107,15 @@ let ordered_field_names sfvl =
         check_order rest
     | _ -> ()
   in
-  check_order fields;
+  if not intrinsic then check_order fields;
   List.map fst fields
-  |> Javert_utils.Property_order.sort_by (function
-       | Expr.Lit (Literal.String bytes) -> bytes
-       | Expr.Lit (Literal.Utf16String value) ->
-           Gillian.Utils.Utf16.to_canonical value
-       | _ ->
-           raise
-             (Gillian.Utils.Exceptions.Unsupported
-                "Property enumeration needs concrete names"))
+  |> Javert_utils.Property_order.sort_by (fun name ->
+         match property_name name with
+         | Some key -> key
+         | None ->
+             raise
+               (Gillian.Utils.Exceptions.Unsupported
+                  "Property enumeration needs concrete names"))
 
 let fold f sfvl ac =
   Expr.Map.fold (fun name entry ac -> f name entry.value ac) sfvl ac

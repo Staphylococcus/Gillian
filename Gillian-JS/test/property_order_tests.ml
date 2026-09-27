@@ -157,7 +157,70 @@ let rejects_unknown f =
   in
   Alcotest.(check bool) "unknown order rejected specifically" true rejected
 
-let unknown fields = rejects_unknown (fun () -> ignore (names fields))
+let unknown fields =
+  (* A singleton has a unique observable order despite unknown history. Adding
+     another ordinary name checks that unknown provenance was not promoted. *)
+  let fields = Fields.add (name "__order_probe__") value fields in
+  rejects_unknown (fun () -> ignore (names fields))
+
+let intrinsic_order () =
+  let abstract keys =
+    List.fold_left
+      (fun fields key -> Fields.add_abstract (name key) value fields)
+      Fields.empty keys
+  in
+  check [] (abstract []);
+  let singleton = abstract [ "classification" ] in
+  check [ "classification" ] singleton;
+  unknown singleton;
+  List.iter
+    (fun keys -> check [ "0"; "2"; "10"; "classification" ] (abstract keys))
+    [
+      [ "classification"; "10"; "2"; "0" ];
+      [ "0"; "2"; "classification"; "10" ];
+      [ "10"; "0"; "2"; "classification" ];
+    ];
+  check
+    [ "0"; "4294967294"; "4294967295" ]
+    (abstract [ "4294967295"; "4294967294"; "0" ]);
+  (* Independent timestamps can tie; the index rule alone fixes this order. *)
+  check [ "2"; "10" ] (Fields.union (abstract [ "10" ]) (abstract [ "2" ]));
+  let typed key =
+    Expr.Lit
+      (Literal.Utf16String
+         (Gillian.Utils.Utf16.of_canonical (Gillian.Utils.Utf16.canonical key)))
+  in
+  let fields =
+    Fields.empty
+    |> Fields.add_abstract (typed "x") value
+    |> Fields.add_abstract (typed "10") value
+    |> Fields.add_abstract (typed "2") value
+  in
+  Alcotest.(check bool)
+    "typed intrinsic order" true
+    (Fields.ordered_field_names fields = List.map typed [ "2"; "10"; "x" ])
+
+let intrinsic_rejections () =
+  List.iter
+    (fun keys ->
+      let fields =
+        List.fold_left
+          (fun fields key -> Fields.add_abstract (name key) value fields)
+          Fields.empty keys
+      in
+      rejects_unknown (fun () -> ignore (names fields)))
+    [ [ "z"; "a" ]; [ "01"; "z" ]; [ "4294967295"; "z" ]; [ "-0"; "z" ] ];
+  let symbolic = Fields.add_abstract (Expr.LVar "#key") value Fields.empty in
+  rejects_unknown (fun () -> ignore (Fields.ordered_field_names symbolic));
+  let typed =
+    Expr.Lit (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "2"))
+  in
+  let alias =
+    Fields.empty
+    |> Fields.add_abstract typed value
+    |> Fields.add_abstract (name "2") value
+  in
+  rejects_unknown (fun () -> ignore (Fields.ordered_field_names alias))
 
 let abstract_order () =
   let original =
@@ -312,6 +375,8 @@ let () =
           ("symbolic transition", `Quick, heap_transition);
           ("semantic lookup", `Quick, semantic_lookup);
           ("typed keys", `Quick, typed_keys);
+          ("intrinsic abstract order", `Quick, intrinsic_order);
+          ("ambiguous abstract order", `Quick, intrinsic_rejections);
           ("abstract cell order", `Quick, abstract_order);
           ("merged provenance", `Quick, merged_order);
           ("substituted provenance", `Quick, substituted_order);
