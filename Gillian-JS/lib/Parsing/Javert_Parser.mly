@@ -524,6 +524,16 @@ binders_target:
   | LBRACKET; BIND; COLON; xs = separated_list(COMMA, LVAR); RBRACKET
     { xs }
 
+/* Loop invariants may abstract changing program locals. Other proof-command
+   binders remain logical-only; the engine already distinguishes these names. */
+invariant_binder_target:
+  | x = LVAR { x }
+  | x = VAR { x }
+
+invariant_binders_target:
+  | LBRACKET; BIND; COLON; xs = separated_list(COMMA, invariant_binder_target); RBRACKET
+    { xs }
+
 macro_head_target:
  | name = VAR; LBRACE; params = separated_list(COMMA, expr_target); RBRACE
    { (name, params) }
@@ -560,7 +570,7 @@ logic_cmd_target:
     { LCmd.SL (Unfold (name, les, unfold_info, true)) }
   | UNFOLDALL; name = VAR
     { LCmd.SL (GUnfold name) }
-  | INVARIANT; LBRACE; a = assertion_target; RBRACE; binders = option(binders_target); rank = option(jsil_lemma_variant_target)
+  | INVARIANT; LBRACE; a = assertion_target; RBRACE; binders = option(invariant_binders_target); rank = option(jsil_lemma_variant_target)
     { LCmd.SL (Invariant (a, Option.value ~default:[ ] binders, rank)) }
   | SEPASSERT; LBRACE; a = assertion_target; RBRACE; binders = option(binders_target)
     { LCmd.SL (SepAssert (a, Option.value ~default:[ ] binders)) }
