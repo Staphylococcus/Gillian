@@ -713,10 +713,10 @@ lab_spec_target:
     { (sspec_name, SS.empty) }
 
 pre_post_target:
-  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; NORMAL
-    { Spec.{ pre; posts; flag = Normal; to_verify = true; label = lab_spec } }
-  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; ERROR
-  { Spec.{ pre; posts; flag = Error; to_verify = true; label = lab_spec} }
+  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; variant = option(jsil_lemma_variant_target); NORMAL
+    { Spec.{ pre; posts; variant; flag = Normal; to_verify = true; label = lab_spec } }
+  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; variant = option(jsil_lemma_variant_target); ERROR
+  { Spec.{ pre; posts; variant; flag = Error; to_verify = true; label = lab_spec} }
 
 spec_head_target:
   spec_name = VAR; LBRACE; spec_params = separated_list(COMMA, VAR); RBRACE

@@ -167,8 +167,7 @@ let jsil2gil_sspec (sspec : Spec.st) : GSpec.st =
   {
     ss_pre = (jsil2gil_asrt sspec.pre, None);
     ss_posts = List.map (fun post -> (jsil2gil_asrt post, None)) sspec.posts;
-    (* FIXME: bring in variant *)
-    ss_variant = None;
+    ss_variant = Option.map jsil2gil_expr sspec.variant;
     ss_flag = sspec.flag;
     ss_to_verify = sspec.to_verify;
     ss_label;

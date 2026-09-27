@@ -1,0 +1,10 @@
+spec count(n)
+[[ (n == #n) * types(#n : Num) * (is-int #n) * (0 <=# #n) * (#n <=# 4) ]]
+[[ (ret == 0) ]] normal
+proc count(n) {
+  goto [n > 0] step done;
+step: ret := "count"(n - 1);
+  return;
+done: ret := 0;
+  return
+};

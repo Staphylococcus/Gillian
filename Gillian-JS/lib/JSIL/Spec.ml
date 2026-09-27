@@ -8,6 +8,7 @@ module SS = Containers.SS
 type st = {
   pre : Asrt.t;  (** Precondition *)
   posts : Asrt.t list;  (** Postcondition *)
+  variant : Expr.t option;  (** Optional procedure termination measure *)
   flag : Flag.t;  (** Return flag ({!type:jsil_return_flag}) *)
   to_verify : bool;  (** Should the spec be verified? *)
   label : (string * SS.t) option;
@@ -26,11 +27,12 @@ type t = {
 (** Creates a JSIL specification given its components *)
 let s_init
     ?(label : (string * SS.t) option)
+    ?(variant : Expr.t option)
     (pre : Asrt.t)
     (posts : Asrt.t list)
     (flag : Flag.t)
     (to_verify : bool) : st =
-  { pre; posts; flag; to_verify; label }
+  { pre; posts; variant; flag; to_verify; label }
 
 let init
     (name : string)
@@ -54,10 +56,12 @@ let pp_sspec fmt sspec =
         (Fmt.iter ~sep:(Fmt.any ", ") SS.iter Fmt.string)
         exs
   in
-  Fmt.pf fmt "%a[[  @[<hov 0>%a@]  ]]@\n[[  @[<hov 0>%a@]  ]]@\n%s"
+  Fmt.pf fmt "%a[[  @[<hov 0>%a@]  ]]@\n[[  @[<hov 0>%a@]  ]]%a@\n%s"
     (Fmt.option pp_lab) sspec.label Asrt.pp sspec.pre
     (Fmt.list ~sep:(Fmt.any ";@\n") Asrt.pp)
-    sspec.posts (Flag.str sspec.flag)
+    sspec.posts
+    (Fmt.option (fun fmt rank -> Fmt.pf fmt " variant(%a)" Expr.pp rank))
+    sspec.variant (Flag.str sspec.flag)
 
 let pp fmt spec =
   let pp_incomplete fmt = function

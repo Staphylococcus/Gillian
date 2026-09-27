@@ -1,0 +1,86 @@
+{
+  "feature": "JSIL per-case procedure variants",
+  "scopeAccepted": true,
+  "proofAccepted": false,
+  "certificationReady": false,
+  "fullProofDone": false,
+  "base": "4c50efef62d007513a69eb3440de76bacbe9382e",
+  "binarySha256": "b79d497d01ea8e7734c946a9fa9736ad017b7a50711682f5ec2813d16292ae9c",
+  "unitTests": {
+    "success": 6,
+    "failures": 0,
+    "root": "/tmp/codex-jsil-variant-recovery-p071"
+  },
+  "nativeCard": "t_919f1746",
+  "nativeEvidenceRoot": "/tmp/hermes-jsil-integer-rank-native-p071",
+  "reviewSha256": "0b2e144dd7fee90328524a40e43d1ff25ce6b6cc13b1181332c0157cf1704554",
+  "cases": [
+    {
+      "case": "ranked",
+      "returncode": 0,
+      "signal": null,
+      "seconds": 11.132880994002335,
+      "sourceSha256": "0735e37f418d5801c8e5ee2b362cbef33db16f6dfb30433d5700cd6afe71f493",
+      "stdoutSha256": "11512366d8e83f3159b60ecb2312ad5f930c4032b8318280a8e8c79ae1eb67e0",
+      "decodedLogSha256": "4088e4a286db19fa1d23e7f1bf1482f0051c9dec0e49383fb1642122f88ee083"
+    },
+    {
+      "case": "wrong-post",
+      "returncode": 1,
+      "signal": null,
+      "seconds": 11.383617023995612,
+      "sourceSha256": "e0d71199b3d310a88ce9df0a76b5bdf9860bca9e458ce0e8ee16e8edef1f5730",
+      "stdoutSha256": "707d581a96fc643e2d3812f35dc5b2d5d72baa29f9df001241722048e13c4445",
+      "decodedLogSha256": "41769a93d28db1cf26b902ad7bf414f683f0df713f5fe791e3139aab9ba63f7f"
+    },
+    {
+      "case": "no-progress",
+      "returncode": 1,
+      "signal": null,
+      "seconds": 7.877388145992882,
+      "sourceSha256": "b71754f5ff9a2bbdcdda64ff84fe437fdd6b7b0d5a5a072c1ce95a18aa5609df",
+      "stdoutSha256": "9832271ffc8ae2525617cc14274e0e7df1f5d1bad28bff8f5fdcaeeb478369f4",
+      "decodedLogSha256": "33a9319bd350beb2cfb26497572bd721cb1eff733ccae1b9adf204b83b9c77b1"
+    },
+    {
+      "case": "constant-rank",
+      "returncode": 1,
+      "signal": null,
+      "seconds": 7.876866909995442,
+      "sourceSha256": "36378f4e5402c7b1efcbf0bd25d08163507d2852aeb9ea93263281a6c364bdc9",
+      "stdoutSha256": "6047af42e29f099578082ac2aca77e1ac9b4fb65bacd7d96f755a571f53cb5a0",
+      "decodedLogSha256": "068a0ff11a55718d4818780a7f4ecf455131f7c53eddf2c48439ccaecf7b91a9"
+    },
+    {
+      "case": "missing-rank",
+      "returncode": 124,
+      "signal": null,
+      "seconds": 0.0636782600049628,
+      "sourceSha256": "7a88ca43d76cd71aaebbf9f96c77733ccc48d00a774890bd0052c62f0b80431a",
+      "stdoutSha256": "ddbc9be3153c4870d7a70cf59f29540cdf690db8855d286d236c54929b3bb803",
+      "decodedLogSha256": "81b70e37cf76a8b4c4c6160f85c826f21d27435be9c9750903f6f7f1c236644b"
+    }
+  ],
+  "launchAccounting": {
+    "preGateFailures": 2,
+    "nativeBatches": 1,
+    "note": "Worker transcribed pin incorrectly twice. Saved card has the correct full hash; both failures preceded launch-started creation and Docker. Original stderr and receipts preserved."
+  },
+  "acceptanceLimit": "Bounded numeric 0..4 frontend regression; actual enumeration helpers, caller admission and full finite-JSON proof remain open.",
+  "validatedCandidateSourceHashes": {
+    "Gillian-JS/lib/Compiler/JS2JSIL_Preprocessing.ml": "1f6b8120b2de23316cce8408958b50aedb1eea3a1dfd0ec84fe6443197244055",
+    "Gillian-JS/lib/Compiler/JSIL2GIL.ml": "dfedec10ba702fa2b04b0de71341dbd38d00411f4c328cc03e6aa4c5c3b1746c",
+    "Gillian-JS/lib/JSIL/Spec.ml": "79533c04de95643471ff54fceb4fcb55412125dc1b7a9d8dca9c439fd003c409",
+    "Gillian-JS/lib/Parsing/Javert_Parser.mly": "379cbff610ad20351683da4a596d8f80983fa3109aae775703c1fd0a216cc6fd",
+    "Gillian-JS/test/dune": "04ab76053e7a2900909b86cb03b93e4ccd691b8cc43e10b67584ad759395dd8f",
+    "Gillian-JS/regressions/jsil-procedure-variant/README.md": "acc86521daa98e01416143bad57c55d6c0f9f8b924029732b1722b3f85cd38bc",
+    "Gillian-JS/regressions/jsil-procedure-variant/constant-rank.jsil": "36378f4e5402c7b1efcbf0bd25d08163507d2852aeb9ea93263281a6c364bdc9",
+    "Gillian-JS/regressions/jsil-procedure-variant/entry.js": "948e2dca3fc4d4abf3ff8adaba5ac6f69126e2a4b07a59b943fc139428ff46df",
+    "Gillian-JS/regressions/jsil-procedure-variant/missing-rank.jsil": "7a88ca43d76cd71aaebbf9f96c77733ccc48d00a774890bd0052c62f0b80431a",
+    "Gillian-JS/regressions/jsil-procedure-variant/no-progress.jsil": "b71754f5ff9a2bbdcdda64ff84fe437fdd6b7b0d5a5a072c1ce95a18aa5609df",
+    "Gillian-JS/regressions/jsil-procedure-variant/ranked.jsil": "0735e37f418d5801c8e5ee2b362cbef33db16f6dfb30433d5700cd6afe71f493",
+    "Gillian-JS/regressions/jsil-procedure-variant/run.py": "e9e919f5f5a6848642bec755f22313460baf437c59d4ef445d4771df33c36015",
+    "Gillian-JS/regressions/jsil-procedure-variant/wrong-post.jsil": "e0d71199b3d310a88ce9df0a76b5bdf9860bca9e458ce0e8ee16e8edef1f5730",
+    "Gillian-JS/test/jsil_variant_tests.ml": "3a598995536e01e4c083bcf9f5470e5796a8d1524c61c7b52eb8cee053c62f42"
+  }
+}

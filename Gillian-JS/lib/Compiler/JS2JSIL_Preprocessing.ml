@@ -608,7 +608,15 @@ let translate_only_specs cc_tbl old_fun_tbl fun_tbl vis_tbl js_only_specs =
               JSSpec.js2jsil_st pre post cc_tbl vis_tbl (Hashtbl.create 0) name
                 params
             in
-            Spec.{ pre; posts = post; flag; to_verify = false; label })
+            Spec.
+              {
+                pre;
+                posts = post;
+                variant = None;
+                flag;
+                to_verify = false;
+                label;
+              })
           sspecs
       in
       let spec : Spec.t =
