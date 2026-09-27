@@ -5770,6 +5770,17 @@ and translate_statement tr_ctx e =
           [ (x_ret_5, [ PVar x_ret_0; PVar x_ret_1; PVar x_ret_4 ]) ]
       in
 
+      (* Place the invariant at the generated iteration header, not in the
+         prelude: total mode emits the head PHI first, then the invariant. *)
+      let head_cmds =
+        match invariant with
+        | Some (a, binders, rank) when !Gillian.Utils.Config.Verification.total ->
+            [
+              (Some head, cmd_ass_xret1);
+              (None, LabCmd.LLogic (LCmd.SL (Invariant (a, binders, rank))));
+            ]
+        | _ -> [ (Some head, cmd_ass_xret1) ]
+      in
       let cmds1 = add_initial_label cmds1 next1 metadata in
       let cmds =
         cmds2
@@ -5793,8 +5804,10 @@ and translate_statement tr_ctx e =
               (*           len := l-len (xf)                                            *)
               (None, cmd_ass_xc);
               (*           x_c := 0                                                     *)
-              (Some head, cmd_ass_xret1);
-              (* head:     x_ret_1 := PHI(x_ret_0, x_ret_3)                           *)
+            ]
+        @ annotate_cmds head_cmds
+        @ annotate_cmds
+            [
               (None, cmd_goto_len);
               (*           goto [x_c_1 < len] body end_loop                           *)
               (Some body, cmd_ass_xp);
@@ -5844,7 +5857,11 @@ and translate_statement tr_ctx e =
       let errs =
         errs2 @ errs_x2_v @ [ x4; xlf ] @ errs1 @ [ x5 ] @ errs3 @ errs_x3_v
       in
-      let cmds = annotate_first_cmd cmds in
+      let cmds =
+        if !Gillian.Utils.Config.Verification.total then
+          prefix_lcmds lcmds None cmds
+        else annotate_first_cmd cmds
+      in
       (cmds, PVar x_ret_5, errs, rets3, outer_breaks, outer_conts)
   | JS_Parser.Syntax.For (e1, e2, e3, e4) ->
       (*

@@ -13,7 +13,7 @@ proofs, and an invariant without compiler loop metadata cannot close a path.
 Invariant failures retain their original diagnostic instead of replacing it
 with the formula used to search for a counterexample.
 
-Run the 17 controls and the independent concrete JavaScript checks:
+Run the 22 controls and the independent concrete JavaScript checks:
 
 ```sh
 GILLIAN_JS=gillian-js python3 Gillian-JS/regressions/loop-soundness/run.py
@@ -27,10 +27,34 @@ cover zero iterations, nested loops, framed locals, break, return and throw.
 The report preserves the before/after evidence, source hashes and executable
 identities, together with the other backend regressions.
 
-This repairs **partial correctness**. The deliberately infinite `forever.js`
-remains valid under partial verification because it never returns; `--total`
-still rejects it and the other loops. Ranked-loop support remains pending:
-capture a natural integer measure after invariant generalization, check strict
-descent at every back-edge before closing the proof path, and ensure every
-control-flow cycle crosses a checked loop header. Begin with a single natural
-loop and reject unsupported entry/nesting patterns explicitly.
+The original failure-propagation repair establishes **partial correctness**.
+The deliberately infinite `forever.js` remains valid under partial verification
+because it never returns; `--total` rejects it and the unranked `valid-loop.js`.
+A total loop proof additionally needs invariant establishment and preservation,
+a nonnegative rank with strict descent on backedges, and coverage of every
+control-flow cycle by a checked ranked header.
+
+## Total-mode for-in header invariants
+
+The compiler places a total-mode ForIn invariant immediately after the iteration
+header PHI, before its guard. The enumeration prelude and non-total translation
+are preserved. Establishment, preservation, rank and cycle checks remain active.
+
+The three `for-in-unreachable*.js` controls pass on the compiled candidate:
+the checked `False` invariant/rank 0 permits the unreachable branch's correct
+postcondition, the wrong postcondition fails, and removing the annotation rejects
+the unranked cycle. `Object.jsil` supplies the real enumeration helper body.
+These cases do not prove a reached enumeration loop.
+
+`ranked-true-entry.js` and `ranked-false-entry.js` differ only in their logical
+invariant. Their ordinary `for` has a false test but a reached header: True passes,
+while False fails invariant establishment before evaluating that test. The shared
+header rule therefore checks an invariant even when the loop body cannot execute.
+
+The original 17 regression cases also passed on this binary. Independently
+reviewed original-AJV diagnostics retain five PHI-adjacent ranked headers and
+backedges, reaching the later missing-specification guard; removing only the
+ForIn annotation instead reaches the earlier cycle guard. Neither diagnostic
+runs a procedure proof. These are scoped compiler/regression results, not a full
+AJV, enumeration or finite-JSON theorem. See `observations.json` for source-bound
+receipts, separate recovery reviews and compression mappings; no producer reran.

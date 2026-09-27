@@ -31,6 +31,13 @@ CASES = [
     ("forever.js", [], SUCCESS),
     ("forever.js", ["--total"], (124, "has a control-flow cycle")),
     ("valid-loop.js", ["--total"], (124, "has a control-flow cycle")),
+    # Total for-in invariants placed at the generated iteration header.
+    # Three ForIn controls checked on the matching compiled candidate.
+    ("for-in-unreachable.js", ["--total"], (0, "All total procedure specs succeeded")),
+    ("for-in-unreachable-wrong-post.js", ["--total"], (1, "Couldn't satisfy postcondition")),
+    ("for-in-unreachable-unranked.js", ["--total"], (124, "has a control-flow cycle without a ranked invariant header")),
+    ("ranked-true-entry.js", ["--total"], (0, "All total procedure specs succeeded")),
+    ("ranked-false-entry.js", ["--total"], (1, "Loop invariant establishment failed")),
 ]
 
 if __name__ == "__main__":

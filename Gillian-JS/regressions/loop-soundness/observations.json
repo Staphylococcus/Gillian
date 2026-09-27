@@ -2543,5 +2543,82 @@
     "command": "opam exec -- dune runtest --profile release Gillian-JS/test GillianCore",
     "passed": 16,
     "output": "Testing Property order.\nThis run has ID `A2A85A90-3EB4-48EC-A816-278AD3079E9A`.\n ...                order          0   keys.\n[OK]                order          0   keys.\n ...                order          1   symbolic transition.\n[OK]                order          1   symbolic transition.\nThe full test results are available in `/work/_build/default/Gillian-JS/test/_build/_tests/A2A85A90-3EB4-48EC-A816-278AD3079E9A`.\nTest Successful in 0.000s. 2 tests run.\nTesting JavaScript UTF-16.\nThis run has ID `75068E89-08D2-4AFA-A916-414F7104ECD4`.\n ...                decode          0   code units.\n[OK]                decode          0   code units.\n ...                decode          1   malformed.\n[OK]                decode          1   malformed.\n ...                decode          2   canonical.\n[OK]                decode          2   canonical.\nThe full test results are available in `/work/_build/default/Gillian-JS/test/_build/_tests/75068E89-08D2-4AFA-A916-414F7104ECD4`.\nTest Successful in 0.000s. 3 tests run.\nTesting Gillian.\nThis run has ID `DFAA2BC8-9991-4782-91D0-6817F2A7AB55`.\n ...                Gil_syntax.Reducers          0   literal_base_elements.\n[OK]                Gil_syntax.Reducers          0   literal_base_elements.\n ...                Gil_syntax.Reducers          1   expr_base_elements.\n[OK]                Gil_syntax.Reducers          1   expr_base_elements.\n ...                Binary64                     0   rounding.\n[OK]                Binary64                     0   rounding.\n ...                Binary64                     1   special values.\n[OK]                Binary64                     1   special values.\n ...                Binary64                     2   untyped equality and typed caching.\n[OK]                Binary64                     2   untyped equality and typed caching.\n ...                Binary64                     3   arithmetic differential matrix.\n[OK]                Binary64                     3   arithmetic differential matrix.\n ...                Binary64                     4   reductions.\n[OK]                Binary64                     4   reductions.\n ...                Binary64                     5   numeric conversions.\n[OK]                Binary64                     5   numeric conversions.\n ...                Binary64                     6   signed zero identity and caching.\n[OK]                Binary64                     6   signed zero identity and caching.\n ...                Binary64                     7   counterexample model.\n[OK]                Binary64                     7   counterexample model.\n ...                Strings                      0   GIL literal escaping.\n[OK]                Strings                      0   GIL literal escaping.\nThe full test results are available in `/work/_build/default/GillianCore/test/_build/_tests/DFAA2BC8-9991-4782-91D0-6817F2A7AB55`.\nTest Successful in 1.000s. 11 tests run.\n"
+  },
+  "forInHeaderTotality": {
+    "base": "1c05a0aaa13ec4c0729a7f9c79f5c9769a45efb1",
+    "sourceHashes": {
+      "Gillian-JS/lib/Compiler/JS2JSIL_Compiler.ml": "b5cae58436ba040bf49717d3e86aa8cc7df2bfd0a23eaefc1eab60c102051ed4",
+      "Gillian-JS/regressions/loop-soundness/run.py": "20844031d23017c7d2bc606c48c7aca3bb142b3dc048cada948f48c48c5d506d",
+      "Gillian-JS/regressions/loop-soundness/README.md": "cae89fb0e971a07f52e0352c7d6af852508202f68aa84c1ccd931f4629f71878",
+      "Gillian-JS/regressions/loop-soundness/for-in-unreachable.js": "d07e1f66c6b4fc0ec89b56abbec957c77d41cd8ddf039bf85f710d26fcf6e317",
+      "Gillian-JS/regressions/loop-soundness/for-in-unreachable-wrong-post.js": "75b5d63d1718e8d8a42ca0f9c643d129e3033209443c85756ed3c9ac3252f35b",
+      "Gillian-JS/regressions/loop-soundness/for-in-unreachable-unranked.js": "b66240277647b1233ab39e5b79739e3325ce47134135b783cd0c441e27439948",
+      "Gillian-JS/regressions/loop-soundness/ranked-true-entry.js": "b33719a68e24db75fe151612d14b6bdc3b181bf433b6cd1b6108d939ee8f325d",
+      "Gillian-JS/regressions/loop-soundness/ranked-false-entry.js": "53d476fbf5ab2939d8bdcc05d091bebf6979122a66fa2075968512e25cf371a5"
+    },
+    "binarySha256": "6c0ab9cbd40acd0f3a6de8eefb995ee83d46a13710ba1f74f6c2c21e0e38d7b5",
+    "compilerSourceMatchesBuiltCandidate": true,
+    "sourceOutsideForInUnchanged": true,
+    "old17CasesAndRunnerImplementationUnchanged": true,
+    "nativeCases": {
+      "existingLoopRegressions": 17,
+      "newJsControls": 5,
+      "originalCallerCfgDiagnostics": 2
+    },
+    "reviews": {
+      "forInThree": {
+        "path": "/tmp/hermes-forin-object-import-p071/review/independent-review.json",
+        "sha256": "5dd26c2c98871ed0b28ea4ad0834dac38d8e6e6e49177f464245e914a10d4b0f"
+      },
+      "reachedInvariantPair": {
+        "path": "/tmp/hermes-ranked-false-entry-p071/review/independent-review.json",
+        "sha256": "ee0481e4764bce1c88b3f64f9a5ee5f2f07b1a0b76c92174f08eb0fabec31990"
+      },
+      "oldLoopFamily": {
+        "path": "/tmp/hermes-forin-loop-family-p071/independent-review.json",
+        "sha256": "6dc97b86959bea964c1905d4b3e61c5f8ab8d1fd1be924c536a792251e9d106f"
+      },
+      "rankedOriginalCfg": {
+        "path": "/tmp/hermes-ajv-five-loop-cfg-p071/review/independent-review.json",
+        "sha256": "7be46c93d4db53303f90e0df32676748afdea9c637564e4f225e0a018ca98024"
+      },
+      "missingForInCfg": {
+        "path": "/tmp/hermes-ajv-five-loop-cfg-missing-p071/review/independent-review.json",
+        "sha256": "84ddf53e6489930ef3edab8c247304b3cf60530b27458f66182d65dad88ed24f"
+      }
+    },
+    "compressions": {
+      "forInThree": {
+        "path": "/tmp/hermes-forin-object-import-p071/review/compression-manifest.json",
+        "sha256": "b83e783aa18225f74cf9bc9bc25b7ccc452cf84de60b82b2a22c7d6e611f54b4"
+      },
+      "reachedInvariantPair": {
+        "path": "/tmp/hermes-ranked-false-entry-p071/review/compression-manifest.json",
+        "sha256": "0b2a1464a52c36ec884ff41b9c980909f89e515880cb09ea73791626dbe8c455"
+      },
+      "oldLoopFamily": {
+        "path": "/tmp/hermes-forin-loop-family-p071/compression-manifest.json",
+        "sha256": "a0911e440517be5a411c8a47077356472d8de9e691ab4e63a22315bed21a6601"
+      },
+      "rankedOriginalCfg": {
+        "path": "/tmp/hermes-ajv-five-loop-cfg-p071/review/compression-manifest.json",
+        "sha256": "efc13baadbb661419320fadf86f2b6d8e590f66bf95192ab9fa9d1b81d7588aa"
+      },
+      "missingForInCfg": {
+        "path": "/tmp/hermes-ajv-five-loop-cfg-missing-p071/review/compression-manifest.json",
+        "sha256": "66d3300f06953fc813a89b14a12372ed27db6af159ecddf01e91c7871cd2a0d6"
+      }
+    },
+    "originalReportsUnmodified": true,
+    "nativeReruns": 0,
+    "compilerSliceAccepted": true,
+    "proofAccepted": false,
+    "certificationReady": false,
+    "fullProofDone": false,
+    "limits": [
+      "Reached enumeration is not proved.",
+      "Original caller CFG diagnostics stop before symbolic tests.",
+      "Full finite-JSON caller and all seven final adapters remain open."
+    ]
   }
 }
