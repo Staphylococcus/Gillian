@@ -141,12 +141,17 @@ let set
   set_met heap loc metadata
 
 (** Symbolic heap put heap (loc, (perm, field)) is assigned to value *)
-let set_fv_pair (heap : t) (loc : string) (field : Expr.t) (value : Expr.t) :
-    unit =
+let set_fv_pair
+    ?(abstract = false)
+    (heap : t)
+    (loc : string)
+    (field : Expr.t)
+    (value : Expr.t) : unit =
   (* Update the combined object before splitting it: changing a value from
      concrete to symbolic must preserve its property's creation order. *)
   let fields = Option.value ~default:SFVL.empty (get_fvl heap loc) in
-  set_fvl heap loc (SFVL.add field value fields)
+  let add = if abstract then SFVL.add_abstract else SFVL.add in
+  set_fvl heap loc (add field value fields)
 
 let init_object
     (heap : t)

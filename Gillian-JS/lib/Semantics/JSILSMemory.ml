@@ -157,6 +157,7 @@ module M = struct
     Ok [ (heap, [ loc ], [], []) ]
 
   let set_cell
+      ?(abstract = false)
       (heap : t)
       (pfs : PFS.t)
       (gamma : Type_env.t)
@@ -164,7 +165,7 @@ module M = struct
       (prop : vt)
       (v : vt) : action_ret =
     let loc_name, _, new_pfs = fresh_loc ~loc pfs gamma in
-    SHeap.set_fv_pair heap loc_name prop v;
+    SHeap.set_fv_pair ~abstract heap loc_name prop v;
     Ok [ (heap, [], new_pfs, []) ]
 
   let get_cell
@@ -628,6 +629,9 @@ module M = struct
          | _ -> unsupported "has invalid arguments.");
       args)
 
+  (* Assertion production must not masquerade as a runtime property write. *)
+  let produce_cell_action = "ProduceCell"
+
   let execute_action
       ?matching:_
       (action : string)
@@ -643,6 +647,10 @@ module M = struct
       match args with
       | [ loc; prop; v ] -> set_cell heap pfs gamma loc prop v
       | _ -> raise (Failure "Internal Error. execute_action. setCell")
+    else if action = produce_cell_action then
+      match args with
+      | [ loc; prop; v ] -> set_cell ~abstract:true heap pfs gamma loc prop v
+      | _ -> raise (Failure "Internal Error. execute_action. ProduceCell")
     else if action = JSILNames.delCell then
       match args with
       | [ loc; prop ] -> remove_cell heap pfs gamma loc prop
@@ -687,7 +695,7 @@ module M = struct
     else raise (Failure "Internal Error. execute_action")
 
   let ga_to_setter (a_id : string) : string =
-    if a_id = JSILNames.aCell then JSILNames.setCell
+    if a_id = JSILNames.aCell then produce_cell_action
     else if a_id = JSILNames.aMetadata then JSILNames.setMetadata
     else if a_id = JSILNames.aProps then JSILNames.setProps
     else raise (Failure "DEATH. ga_to_setter")

@@ -11,7 +11,15 @@ type field_name = Expr.t
 type field_value = Expr.t [@@deriving yojson]
 
 (* Definition *)
-type entry = { value : field_value; order : int } [@@deriving yojson]
+type entry = {
+  value : field_value;
+  order : int;
+  (* A cell assertion owns a value, not its insertion history. Older serialized
+     entries also lack evidence for that history. *)
+  order_known : bool; [@default false]
+}
+[@@deriving yojson]
+
 type t = entry Expr.Map.t [@@deriving yojson]
 
 (* Printing *)
@@ -37,16 +45,29 @@ let get fn sfvl =
   Option.map (fun entry -> entry.value) (Expr.Map.find_opt fn sfvl)
 
 let add fn fv sfvl =
-  let order =
+  let order, order_known =
     match Expr.Map.find_opt fn sfvl with
-    | Some { value; order } when value <> Expr.Lit Literal.Nono -> order
-    | _ -> 1 + Expr.Map.fold (fun _ entry acc -> max acc entry.order) sfvl 0
+    | Some { value; order; order_known } when value <> Expr.Lit Literal.Nono ->
+        (order, order_known)
+    | _ ->
+        (1 + Expr.Map.fold (fun _ entry acc -> max acc entry.order) sfvl 0, true)
   in
-  Expr.Map.add fn { value = fv; order } sfvl
+  Expr.Map.add fn { value = fv; order; order_known } sfvl
+
+let add_abstract fn fv sfvl =
+  let fields = add fn fv sfvl in
+  let entry = Expr.Map.find fn fields in
+  Expr.Map.add fn { entry with order_known = false } fields
 
 let field_names sfvl = List.map fst (Expr.Map.bindings sfvl)
 
 let ordered_field_names sfvl =
+  if Expr.Map.exists (fun _ entry -> not entry.order_known) sfvl then
+    raise
+      (Gillian.Utils.Gillian_result.Exc.Gillian_error
+         (OperationError
+            "Unsupported property enumeration: insertion order is unavailable \
+             after logical cell production."));
   let fields =
     Expr.Map.bindings sfvl
     |> List.sort (fun (_, a) (_, b) -> compare a.order b.order)
@@ -94,7 +115,12 @@ let union =
               ((Fmt.to_to_string Expr.pp) k)
               ((Fmt.to_to_string Expr.pp) fvl.value)
               ((Fmt.to_to_string Expr.pp) fvr.value)));
-      Some fvl)
+      Some
+        {
+          fvl with
+          order_known =
+            fvl.order_known && fvr.order_known && fvl.order = fvr.order;
+        })
 
 let to_list fv_list = fold (fun f v ac -> (f, v) :: ac) fv_list []
 
@@ -135,7 +161,14 @@ let substitution (subst : SSubst.t) (partial : bool) (fv_list : t) : t =
     (fun le_field le_val ac ->
       let sf = f_subst le_field in
       let sv = f_subst le_val.value in
-      Expr.Map.add sf { le_val with value = sv } ac)
+      let order_known =
+        match Expr.Map.find_opt sf ac with
+        | None -> le_val.order_known
+        | Some previous ->
+            previous.order_known && le_val.order_known
+            && previous.order = le_val.order
+      in
+      Expr.Map.add sf { le_val with value = sv; order_known } ac)
     fv_list Expr.Map.empty
 
 (* Selective substitution *)

@@ -10,6 +10,10 @@ type field_value = Expr.t
 type t [@@deriving yojson]
 
 val add : field_name -> field_value -> t -> t
+
+(** Logical production supplies no insertion-order evidence. *)
+val add_abstract : field_name -> field_value -> t -> t
+
 val empty : t
 val field_names : t -> field_name list
 val ordered_field_names : t -> field_name list
