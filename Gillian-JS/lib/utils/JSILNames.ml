@@ -16,3 +16,9 @@ let getProps = "getProps"
 let setProps = "setProps"
 let delProps = "delProps"
 let resourceError = "ResourceError"
+
+(* Exclusive complete field-map assertion; these are logical actions only. *)
+let aOrderedFields = "OrderedFields"
+let getOrderedFields = "GetOrderedFields"
+let setOrderedFields = "SetOrderedFields"
+let delOrderedFields = "DeleteOrderedFields"

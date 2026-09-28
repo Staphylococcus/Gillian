@@ -538,6 +538,126 @@ module M = struct
     Option.fold ~some:f ~none:() (get_loc_name pfs gamma loc);
     Ok [ (heap, [], [], []) ]
 
+  (* OrderedFields owns the entire field/domain footprint, not a separately
+     frameable order fact. Its witness is observable enumeration order. *)
+  let ordered_fields_error loc = Error [ ([ loc ], [], Expr.false_) ]
+
+  let ordered_key_names (keys : vt list) =
+    let rec collect seen acc = function
+      | [] -> Some (List.rev acc)
+      | key :: rest -> (
+          let name =
+            match key with
+            | Expr.Lit (Literal.String s) -> Some s
+            | Expr.Lit (Literal.Utf16String s) -> Some (Gillian.Utils.Utf16.to_canonical s)
+            | _ -> None
+          in
+          match name with
+          | Some s when not (Containers.SS.mem s seen) ->
+              collect (Containers.SS.add s seen) (s :: acc) rest
+          | _ -> None)
+    in
+    collect Containers.SS.empty [] keys
+
+  let ordered_values_present pfs gamma values =
+    List.for_all
+      (fun value ->
+        FOSolver.check_entailment Containers.SS.empty pfs
+          [ Expr.UnOp (Not, Expr.BinOp (value, Equal, Lit Nono)) ]
+          gamma)
+      values
+
+  let ordered_fields_snapshot heap pfs gamma loc =
+    match get_loc_name pfs gamma loc with
+    | None -> ordered_fields_error loc
+    | Some name -> (
+        match SHeap.get heap name with
+        | Some ((fields, Some domain), metadata) -> (
+            let complete =
+              Expr.BinOp (domain, Equal, ESet (SFVL.field_names fields))
+            in
+            if
+              not
+                (FOSolver.check_entailment Containers.SS.empty pfs [ complete ]
+                   gamma)
+            then ordered_fields_error loc
+            else
+              let _, present =
+                SFVL.partition (fun _ v -> v = Lit Nono) fields
+              in
+              match ordered_key_names (SFVL.field_names present) with
+              | None -> ordered_fields_error loc
+              | Some _ ->
+                  (* Keep the existing unknown-order rejection authoritative. *)
+                  let keys = SFVL.ordered_field_names present in
+                  let values =
+                    List.map (fun k -> Option.get (SFVL.get k present)) keys
+                  in
+                  if ordered_values_present pfs gamma values then
+                    Ok (name, metadata, keys, values)
+                  else ordered_fields_error loc)
+        | _ -> ordered_fields_error loc)
+
+  let get_ordered_fields heap pfs gamma loc : action_ret =
+    match ordered_fields_snapshot heap pfs gamma loc with
+    | Error errors -> Error errors
+    | Ok (name, _, keys, values) ->
+        Ok
+          [
+            ( heap,
+              [ Expr.loc_from_loc_name name; EList keys; EList values ],
+              [],
+              [] );
+          ]
+
+  let remove_ordered_fields heap pfs gamma loc : action_ret =
+    match ordered_fields_snapshot heap pfs gamma loc with
+    | Error errors -> Error errors
+    | Ok (name, metadata, _, _) ->
+        let heap = SHeap.copy heap in
+        SHeap.set heap name SFVL.empty None metadata;
+        Ok [ (heap, [], [], []) ]
+
+  let set_ordered_fields heap pfs gamma loc keys values : action_ret =
+    let as_list expression =
+      match Reduction.reduce_lexpr ~pfs ~gamma expression with
+      | EList xs -> Some xs
+      | Lit (LList xs) -> Some (List.map (fun x -> Expr.Lit x) xs)
+      | _ -> None
+    in
+    match (as_list keys, as_list values) with
+    | Some keys, Some values when List.length keys = List.length values -> (
+        match ordered_key_names keys with
+        | Some names
+          when Property_order.sort names = names
+               && ordered_values_present pfs gamma values ->
+            let fields =
+              List.fold_left2
+                (fun fs key value -> SFVL.add key value fs)
+                SFVL.empty keys values
+            in
+            let name, _, new_pfs = fresh_loc ~loc pfs gamma in
+            let remainder = SHeap.get heap name in
+            let vacant =
+              match remainder with
+              | None -> true
+              | Some ((existing, None), _) -> SFVL.is_empty existing
+              | _ -> false
+            in
+            if (not vacant) || SFVL.ordered_field_names fields <> keys then
+              ordered_fields_error loc
+            else
+              let metadata =
+                match remainder with
+                | None -> None
+                | Some (_, m) -> m
+              in
+              let heap = SHeap.copy heap in
+              SHeap.set heap name fields (Some (ESet keys)) metadata;
+              Ok [ (heap, [], new_pfs, []) ]
+        | _ -> ordered_fields_error loc)
+    | _ -> ordered_fields_error loc
+
   (* Program actions and logical producers share this legacy implementation.
      Total execution must not borrow the producer's ability to invent a missing
      location/cell, or remove an object whose remaining fields could be framed.
@@ -639,7 +759,20 @@ module M = struct
       (pfs : PFS.t)
       (gamma : Type_env.t)
       (args : vt list) : action_ret =
-    if action = JSILNames.getCell then
+    if action = JSILNames.getOrderedFields then
+      match args with
+      | [ loc ] -> get_ordered_fields heap pfs gamma loc
+      | _ -> Error [ ([], [], Expr.false_) ]
+    else if action = JSILNames.setOrderedFields then
+      match args with
+      | [ loc; keys; values ] ->
+          set_ordered_fields heap pfs gamma loc keys values
+      | _ -> Error [ ([], [], Expr.false_) ]
+    else if action = JSILNames.delOrderedFields then
+      match args with
+      | [ loc ] -> remove_ordered_fields heap pfs gamma loc
+      | _ -> Error [ ([], [], Expr.false_) ]
+    else if action = JSILNames.getCell then
       match args with
       | [ loc; prop ] -> get_cell heap pfs gamma loc prop
       | _ -> raise (Failure "Internal Error. execute_action")
@@ -695,19 +828,22 @@ module M = struct
     else raise (Failure "Internal Error. execute_action")
 
   let ga_to_setter (a_id : string) : string =
-    if a_id = JSILNames.aCell then produce_cell_action
+    if a_id = JSILNames.aOrderedFields then JSILNames.setOrderedFields
+    else if a_id = JSILNames.aCell then produce_cell_action
     else if a_id = JSILNames.aMetadata then JSILNames.setMetadata
     else if a_id = JSILNames.aProps then JSILNames.setProps
     else raise (Failure "DEATH. ga_to_setter")
 
   let ga_to_getter (a_id : string) : string =
-    if a_id = JSILNames.aCell then JSILNames.getCell
+    if a_id = JSILNames.aOrderedFields then JSILNames.getOrderedFields
+    else if a_id = JSILNames.aCell then JSILNames.getCell
     else if a_id = JSILNames.aMetadata then JSILNames.getMetadata
     else if a_id = JSILNames.aProps then JSILNames.getProps
     else raise (Failure "DEATH. ga_to_setter")
 
   let ga_to_deleter (a_id : string) : string =
-    if a_id = JSILNames.aCell then JSILNames.delCell
+    if a_id = JSILNames.aOrderedFields then JSILNames.delOrderedFields
+    else if a_id = JSILNames.aCell then JSILNames.delCell
     else if a_id = JSILNames.aMetadata then JSILNames.delMetadata
     else if a_id = JSILNames.aProps then JSILNames.delProps
     else raise (Failure "DEATH. ga_to_setter")
