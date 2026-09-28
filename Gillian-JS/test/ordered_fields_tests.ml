@@ -224,6 +224,110 @@ let copying () =
         (has_order h [ "z"; "a" ]))
     [ Heap.copy h; restored ]
 
+(* Use the real memory producer, as loop frame restoration does. A value-only
+   exporter cannot pass these order checks, even if its cell values survive. *)
+let restore_assertions assertions =
+  List.fold_left
+    (fun heap -> function
+      | Asrt.CorePred (name, ins, outs) -> (
+          match Memory.produce name heap (pc ()) (ins @ outs) with
+          | [ { Branch.value = heap; _ } ] -> heap
+          | _ -> Alcotest.fail ("exported resource cannot be restored: " ^ name)
+          )
+      | _ -> Alcotest.fail "unexpected non-core heap assertion")
+    (Heap.init ()) assertions
+
+let exports_order assertions =
+  List.exists
+    (function
+      | Asrt.CorePred (name, _, _) -> name = aOrderedFields
+      | _ -> false)
+    assertions
+
+let frame_export () =
+  let original = make () in
+  ignore (action original getCell [ loc; key "absent" ]);
+  let before = snapshot original in
+  let assertions = Heap.assertions original in
+  check "full frame exports its order" (exports_order assertions);
+  check "export does not mutate frame" (before = snapshot original);
+  let restored = restore_assertions assertions in
+  check "frame order survives" (has_order restored [ "z"; "a" ]);
+  check "frame values survive"
+    (snd (action restored getCell [ loc; key "z" ])
+    = [ loc; key "z"; Expr.num 1. ]);
+  check "materialized absence remains absent"
+    (snd (action restored getCell [ loc; key "absent" ])
+    = [ loc; key "absent"; Expr.Lit Literal.Nono ]);
+  check "metadata exported separately"
+    (snd (action restored getMetadata [ loc ]) = [ loc; metadata ])
+
+let frame_export_mutation () =
+  let heap = restore_assertions (Heap.assertions (make ())) in
+  ignore (action heap setCell [ loc; key "z"; Expr.Lit Literal.Nono ]);
+  ignore (action heap setCell [ loc; key "z"; Expr.num 3. ]);
+  let restored = restore_assertions (Heap.assertions heap) in
+  check "export observes deletion and reinsertion"
+    (has_order restored [ "a"; "z" ]);
+  check "export cannot reuse stale values"
+    (snd (action restored getCell [ loc; key "z" ])
+    = [ loc; key "z"; Expr.num 3. ])
+
+let conservative_export () =
+  let cases =
+    [
+      ( "partial domain",
+        fun h ->
+          ignore
+            (action h setProps
+               [ loc; Expr.ESet [ key "z"; key "a"; key "hole" ] ]) );
+      ( "missing domain",
+        fun h -> ignore (action h delProps [ loc; Expr.ESet [] ]) );
+      ( "unknown value presence",
+        fun h ->
+          ignore (action h setCell [ loc; key "a"; Expr.LVar "#unknown" ]) );
+      ( "unknown insertion order",
+        fun h ->
+          ignore
+            (action h (Legacy.ga_to_setter aCell) [ loc; key "a"; Expr.num 2. ])
+      );
+      ( "canonical name collision",
+        fun h ->
+          let alias =
+            Expr.Lit
+              (Literal.Utf16String
+                 (Gillian.Utils.Utf16.of_canonical
+                    (Gillian.Utils.Utf16.canonical "a")))
+          in
+          ignore (action h setCell [ loc; alias; Expr.num 3. ]);
+          ignore
+            (action h setProps [ loc; Expr.ESet [ key "z"; key "a"; alias ] ])
+      );
+    ]
+  in
+  List.iter
+    (fun (label, alter) ->
+      let heap = make () in
+      alter heap;
+      let before = snapshot heap in
+      let assertions = Heap.assertions heap in
+      check
+        (label ^ " retains conservative cells")
+        (not (exports_order assertions));
+      check (label ^ " leaves original intact") (snapshot heap = before))
+    cases;
+  let heap = make () in
+  ignore (action heap (Legacy.ga_to_setter aCell) [ loc; key "a"; Expr.num 2. ]);
+  let restored = restore_assertions (Heap.assertions heap) in
+  let rejected =
+    try
+      ignore (action restored getAllProps [ loc ]);
+      false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) ->
+      true
+  in
+  check "export never certifies an unknown order" rejected
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -240,5 +344,8 @@ let () =
             ("empty and metadata-only", empty_and_metadata);
             ("unknown provenance and admission", unknown_and_actions);
             ("copy and serialization", copying);
+            ("complete frame assertion roundtrip", frame_export);
+            ("frame export after mutation", frame_export_mutation);
+            ("conservative frame export", conservative_export);
           ] );
     ]

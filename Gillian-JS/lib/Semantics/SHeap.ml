@@ -336,18 +336,83 @@ let assertions (heap : t) : Asrt.t =
 
   let assertions_of_object (loc, ((fv_list, domain), metadata)) =
     let le_loc = make_loc_lexpr loc in
-    let fv_assertions = SFVL.assertions le_loc fv_list in
-    let domain =
-      Option.fold
-        ~some:(fun domain -> [ Asrt_utils.empty_fields ~loc:le_loc ~domain ])
-        ~none:[] domain
+    (* A loop frame is restored from these assertions. Exporting only Cell
+       assertions would discard recorded insertion order. OrderedFields can
+       replace the whole field/domain footprint, but never a partial one.
+       This exporter has no pure context: require syntactic completeness,
+       distinct concrete names and definitely present values. Otherwise keep
+       the conservative cell representation; do not manufacture a witness. *)
+    let ordered =
+      let names = SFVL.field_names fv_list in
+      let complete =
+        match domain with
+        | Some (Expr.ESet domain) ->
+            Expr.Set.equal (Expr.Set.of_list domain) (Expr.Set.of_list names)
+        | _ -> false
+      in
+      let rec distinct_names seen = function
+        | [] -> true
+        | name :: rest -> (
+            let key =
+              match name with
+              | Expr.Lit (Literal.String s) -> Some s
+              | Expr.Lit (Literal.Utf16String s) ->
+                  Some (Gillian.Utils.Utf16.to_canonical s)
+              | _ -> None
+            in
+            match key with
+            | Some s when not (SS.mem s seen) ->
+                distinct_names (SS.add s seen) rest
+            | _ -> false)
+      in
+      let present, _ =
+        SFVL.partition (fun _ value -> value <> Expr.Lit Literal.Nono) fv_list
+      in
+      let definitely_present =
+        SFVL.fold
+          (fun _ value ok ->
+            ok
+            &&
+            match value with
+            | Expr.Lit Literal.Nono -> false
+            | Expr.Lit _ | Expr.ALoc _ | Expr.EList _ | Expr.ESet _ -> true
+            | _ -> false)
+          present true
+      in
+      if complete && distinct_names SS.empty names && definitely_present then
+        try
+          let keys = SFVL.ordered_field_names present in
+          let values =
+            List.map (fun key -> Option.get (SFVL.get key present)) keys
+          in
+          Some
+            (Asrt.CorePred
+               ( Javert_utils.JSILNames.aOrderedFields,
+                 [ le_loc ],
+                 [ Expr.EList keys; Expr.EList values ] ))
+        with
+        | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _)
+        | Gillian.Utils.Exceptions.Unsupported _
+        ->
+          None
+      else None
+    in
+    let fields_and_domain =
+      match ordered with
+      | Some resource -> [ resource ]
+      | None ->
+          SFVL.assertions le_loc fv_list
+          @ Option.fold
+              ~some:(fun domain ->
+                [ Asrt_utils.empty_fields ~loc:le_loc ~domain ])
+              ~none:[] domain
     in
     let metadata =
       match metadata with
       | Some metadata -> [ Asrt_utils.metadata ~loc:le_loc ~metadata ]
       | None -> []
     in
-    fv_assertions @ domain @ metadata
+    fields_and_domain @ metadata
   in
 
   to_list heap |> List.concat_map assertions_of_object |> List.sort Asrt.compare
