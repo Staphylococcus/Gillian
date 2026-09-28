@@ -375,37 +375,14 @@ let jsil2core (lab : string option) (cmd : LabCmd.t) :
         (Some then_lab, cmd5);
         (Some else_lab, cmd6);
       ]
-  (*
-      C(deleteObj (e)) :-
-        lab: aux1 := e;
-             aux2 := [GetAllProps](aux1);
-             goto [ l-nth(aux2, 1) = empty ] then else;
-       then: fail [ResourceError](aux1);
-       else: aux3 := [DeleteObject](l-nth(aux2, 0))
-    *)
+  (* Deletion requires complete ownership, not an observable property order.
+     DeleteObject checks the footprint itself; GetFields keeps GetAllProps. *)
   | LBasic (DeleteObj e) ->
       let aux1 = fresh_var () in
       let aux2 = fresh_var () in
-      let aux3 = fresh_var () in
-      let e1 = Expr.BinOp (Expr.PVar aux2, LstNth, Expr.zero_i) in
-      let e2 = Expr.BinOp (Expr.PVar aux2, LstNth, Expr.one_i) in
-      let then_lab = fresh_then () in
-      let else_lab = fresh_else () in
-      let cmd1 : string GCmd.t = Assignment (aux1, fe e) in
-      let cmd2 : string GCmd.t =
-        LAction (aux2, JSILNames.getAllProps, [ Expr.PVar aux1 ])
-      in
-      let cmd3 : string GCmd.t =
-        GuardedGoto (BinOp (e2, Equal, Lit Empty), then_lab, else_lab)
-      in
-      let cmd4 : string GCmd.t = resource_error [ e1 ] in
-      let cmd5 : string GCmd.t = LAction (aux3, JSILNames.delObj, [ e1 ]) in
       [
-        (lab, cmd1);
-        (None, cmd2);
-        (None, cmd3);
-        (Some then_lab, cmd4);
-        (Some else_lab, cmd5);
+        (lab, GCmd.Assignment (aux1, fe e));
+        (None, GCmd.LAction (aux2, JSILNames.delObj, [ Expr.PVar aux1 ]));
       ]
   (*
        C(x := hasField(e1, e2)) :-

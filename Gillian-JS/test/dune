@@ -1,5 +1,5 @@
 (tests
- (names utf16_tests property_order_tests proof_terms_tests ordered_fields_tests)
+ (names utf16_tests property_order_tests proof_terms_tests ordered_fields_tests delete_object_tests)
  (modules (:standard \ jsil_variant_tests))
  (libraries semantics alcotest wtf8))
 

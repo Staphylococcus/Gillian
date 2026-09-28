@@ -405,15 +405,27 @@ module M = struct
 
   let delete_object (heap : t) (pfs : PFS.t) (gamma : Type_env.t) (loc : vt) :
       action_ret =
-    let loc_name = get_loc_name pfs gamma loc in
-
-    match loc_name with
-    | Some loc_name ->
-        if SHeap.has_loc heap loc_name then (
-          SHeap.remove heap loc_name;
-          Ok [ (heap, [], [], []) ])
-        else raise (Failure "delete_obj. Unknown Location")
-    | None -> raise (Failure "delete_obj. Unknown Location")
+    (* This check also protects partial-mode and direct GIL callers. Whole-object
+       deletion must not discard framed cells, but insertion order is irrelevant.
+       In particular, logically produced metadata can be deleted without
+       inventing an order for subsequent JavaScript enumeration. *)
+    let reject () = Error [ ([ loc ], [], Expr.false_) ] in
+    match get_loc_name pfs gamma loc with
+    | None -> reject ()
+    | Some loc_name -> (
+        match SHeap.get heap loc_name with
+        | Some ((fields, Some domain), Some _) ->
+            let complete : Expr.t =
+              BinOp (domain, Equal, ESet (SFVL.field_names fields))
+            in
+            if
+              FOSolver.check_entailment Containers.SS.empty pfs [ complete ]
+                gamma
+            then (
+              SHeap.remove heap loc_name;
+              Ok [ (heap, [], [], []) ])
+            else reject ()
+        | _ -> reject ())
 
   let get_partial_domain
       (heap : t)
@@ -549,7 +561,8 @@ module M = struct
           let name =
             match key with
             | Expr.Lit (Literal.String s) -> Some s
-            | Expr.Lit (Literal.Utf16String s) -> Some (Gillian.Utils.Utf16.to_canonical s)
+            | Expr.Lit (Literal.Utf16String s) ->
+                Some (Gillian.Utils.Utf16.to_canonical s)
             | _ -> None
           in
           match name with
