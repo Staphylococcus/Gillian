@@ -153,6 +153,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token UTF16LEN
 %token STRBYTES
 %token INTTONUM
+%token BOOLTOINT
 %token NUMTOINT
 (* Expression keywords *)
 %token TYPEOF
@@ -1270,6 +1271,7 @@ unop_target:
   | SETTOLIST   { UnOp.SetToList }
   | INTTONUM    { UnOp.IntToNum }
   | NUMTOINT    { UnOp.NumToInt }
+  | BOOLTOINT { UnOp.BoolToInt }
   | ISINT       { UnOp.IsInt }
 ;
 

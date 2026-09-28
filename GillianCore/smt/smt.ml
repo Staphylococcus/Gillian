@@ -1417,6 +1417,9 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       require_definition def_lrev;
       let>- le = get_list le in
       Axiomatised_operations.lrev <| le.expr >- ListType
+  | BoolToInt ->
+      let>- le = get_bool le in
+      ite le.expr (int_k 1) (int_k 0) >- IntType
   | NumToInt ->
       (* Total-mode execution checks finiteness before evaluating this partial
          conversion. The guarded native conversion and its exact fp.to_real

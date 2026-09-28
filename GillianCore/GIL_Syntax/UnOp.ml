@@ -54,6 +54,7 @@ type t = TypeDef__.unop =
   | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
   (* Integer vs Number *)
   | NumToInt  (** Number to Integer - actual cast *)
+  | BoolToInt  (** Exact Boolean indicator: false is Int 0, true is Int 1 *)
   | IntToNum  (** Integer to Number - actual cast *)
   | IsInt  (** IsInt e <=> (e : float) /\ (e % 1. == 0) *)
 [@@deriving yojson, ord, eq]
@@ -97,4 +98,5 @@ let str = function
   | SetToList -> "set_to_list"
   | IsInt -> "is_int"
   | NumToInt -> "as_int"
+  | BoolToInt -> "bool_to_int"
   | IntToNum -> "as_num"

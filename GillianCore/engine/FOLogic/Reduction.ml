@@ -1415,6 +1415,12 @@ let rec reduce_lexpr_loop
             | CExprEval.EvaluationError err_msg ->
                 raise (ReductionException (def, err_msg))
             | e -> raise e)
+        | BoolToInt, _ -> (
+            match Typing.type_lexpr gamma fle with
+            | Some BooleanType, true | None, true -> def
+            | _ ->
+                raise (ReductionException (def, "BoolToInt requires a Boolean"))
+            )
         (* Negation *)
         | Not, UnOp (Not, ex) -> ex
         | Not, BinOp (ex, And, ey) -> BinOp (UnOp (Not, ex), Or, UnOp (Not, ey))

@@ -115,6 +115,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token LSTLENINT
 %token STRLEN
 %token STRBYTES
+%token BOOLTOINT
 %token NUMTOINT
 %token INTTONUM
 (* Expression keywords *)
@@ -374,6 +375,7 @@ unop_target:
   | SETTOLIST   { UnOp.SetToList }
   | INTTONUM    { UnOp.IntToNum }
   | NUMTOINT    { UnOp.NumToInt }
+  | BOOLTOINT { UnOp.BoolToInt }
 
 binop_target:
   | EQUAL              { BinOp.Equal }

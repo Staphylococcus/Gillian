@@ -149,6 +149,7 @@ and unop =
   | Utf16Len
   | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
   | NumToInt
+  | BoolToInt
   | IntToNum
   | IsInt
 

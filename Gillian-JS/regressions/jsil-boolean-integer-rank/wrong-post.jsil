@@ -1,0 +1,11 @@
+spec step(l, b, terminal)
+[[ (l == #l) * (b == #b) * (terminal == #terminal) *
+   types(#l : Obj, #b : Obj, #terminal : Obj) * (! (#terminal == #b)) ]]
+[[ (ret == false) ]] variant(bool_to_int (l = b)) normal
+proc step(l, b, terminal) {
+  goto [l = b] recurse done;
+recurse: ret := "step"(terminal, b, terminal);
+  return;
+done: ret := true;
+  return
+};

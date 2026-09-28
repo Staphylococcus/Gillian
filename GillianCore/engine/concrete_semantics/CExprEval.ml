@@ -142,6 +142,7 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
   | IntToNum ->
       let x = as_int lit in
       Num (Z.to_float x)
+  | BoolToInt -> Int (if as_bool lit then Z.one else Z.zero)
   | NumToInt ->
       let x = as_num lit in
       Int (Z.of_float x)

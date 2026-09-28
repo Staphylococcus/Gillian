@@ -165,6 +165,7 @@ module UnOp : sig
     | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
     (* Integer vs Number *)
     | NumToInt  (** Number to Integer - actual cast *)
+    | BoolToInt  (** Exact Boolean indicator *)
     | IntToNum  (** Integer to Number - actual cast *)
     | IsInt  (** IsInt e <=> (e : float) /\ (e % 1. == 0) *)
   [@@deriving yojson, eq]
@@ -1497,6 +1498,7 @@ module Visitors : sig
          ; visit_StrToBytes : 'c -> UnOp.t -> UnOp.t
          ; visit_StrLess : 'c -> BinOp.t -> BinOp.t
          ; visit_NumToInt : 'c -> UnOp.t -> UnOp.t
+         ; visit_BoolToInt : 'c -> UnOp.t -> UnOp.t
          ; visit_IntToNum : 'c -> UnOp.t -> UnOp.t
          ; visit_StrLess : 'c -> BinOp.t -> BinOp.t
          ; visit_StrNth : 'c -> BinOp.t -> BinOp.t
@@ -1780,6 +1782,7 @@ module Visitors : sig
     method visit_StrLess : 'c -> BinOp.t -> BinOp.t
     method visit_IntToNum : 'c -> UnOp.t -> UnOp.t
     method visit_NumToInt : 'c -> UnOp.t -> UnOp.t
+    method visit_BoolToInt : 'c -> UnOp.t -> UnOp.t
     method visit_StrLess : 'c -> BinOp.t -> BinOp.t
     method visit_StrNth : 'c -> BinOp.t -> BinOp.t
     method visit_String : 'c -> Literal.t -> string -> Literal.t
@@ -2054,6 +2057,7 @@ module Visitors : sig
          ; visit_StrLess : 'c -> 'f
          ; visit_IntToNum : 'c -> 'f
          ; visit_NumToInt : 'c -> 'f
+         ; visit_BoolToInt : 'c -> 'f
          ; visit_StrLess : 'c -> 'f
          ; visit_StrNth : 'c -> 'f
          ; visit_String : 'c -> string -> 'f
@@ -2292,6 +2296,7 @@ module Visitors : sig
     method visit_StrLess : 'c -> 'f
     method visit_IntToNum : 'c -> 'f
     method visit_NumToInt : 'c -> 'f
+    method visit_BoolToInt : 'c -> 'f
     method visit_StrLess : 'c -> 'f
     method visit_StrNth : 'c -> 'f
     method visit_String : 'c -> string -> 'f
@@ -2530,6 +2535,7 @@ module Visitors : sig
          ; visit_StrLess : 'c -> unit
          ; visit_IntToNum : 'c -> unit
          ; visit_NumToInt : 'c -> unit
+         ; visit_BoolToInt : 'c -> unit
          ; visit_StrNth : 'c -> unit
          ; visit_String : 'c -> string -> unit
          ; visit_Utf16String : 'c -> Utf16.t -> unit
@@ -2772,6 +2778,7 @@ module Visitors : sig
     method visit_StrLess : 'c -> unit
     method visit_IntToNum : 'c -> unit
     method visit_NumToInt : 'c -> unit
+    method visit_BoolToInt : 'c -> unit
     method visit_StrNth : 'c -> unit
     method visit_String : 'c -> string -> unit
     method visit_Utf16String : 'c -> Utf16.t -> unit

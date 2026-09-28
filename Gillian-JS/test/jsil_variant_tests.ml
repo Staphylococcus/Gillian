@@ -142,6 +142,34 @@ let structural_rank_is_not_executable () =
     (Some (Expr.UnOp (NumToInt, numeric)))
     (Some (Lower.jsil2gil_expr (Expr.UnOp (NumToInt, length))))
 
+let boolean_integer_rank () =
+  let original =
+    List.hd
+      (parse "[[ (n == #n) ]] [[ (ret == #n) ]] variant(bool_to_int n) normal")
+        .sspecs
+  in
+  let recovered =
+    List.hd (parse (Format.asprintf "%a" Spec.pp_sspec original)).sspecs
+  in
+  check_case original recovered;
+  let expected = Expr.UnOp (BoolToInt, Expr.PVar "n") in
+  check_expr "exact integer indicator reaches GIL without Number cast"
+    (Some expected) (Lower.jsil2gil_sspec recovered).ss_variant;
+  let comparison =
+    List.hd
+      (parse
+         "[[ (n == #n) ]] [[ (ret == #n) ]] variant(bool_to_int (n = n)) normal")
+        .sspecs
+  in
+  let expected_comparison =
+    Expr.UnOp (BoolToInt, Expr.BinOp (Expr.PVar "n", Equal, Expr.PVar "n"))
+  in
+  check_expr "Boolean identity comparison lowers unchanged"
+    (Some expected_comparison) (Lower.jsil2gil_sspec comparison).ss_variant;
+  Alcotest.(check bool)
+    "ordinary expression lowering retains exact integer conversion" true
+    (Expr.equal expected_comparison (Lower.jsil2gil_expr expected_comparison))
+
 let malformed () =
   List.iter
     (fun suffix ->
@@ -159,6 +187,7 @@ let () =
     [
       ( "frontend",
         [
+          Alcotest.test_case "Boolean integer rank" `Quick boolean_integer_rank;
           Alcotest.test_case "normal roundtrip" `Quick (roundtrip "normal");
           Alcotest.test_case "error roundtrip" `Quick (roundtrip "error");
           Alcotest.test_case "legacy defaults" `Quick legacy;

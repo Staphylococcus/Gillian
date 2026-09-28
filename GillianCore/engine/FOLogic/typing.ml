@@ -54,6 +54,7 @@ module Infer_types_to_gamma = struct
     | LstRev -> tt = ListType && f le ListType
     | IntToNum -> tt = NumberType && f le IntType
     | NumToInt -> tt = IntType && f le NumberType
+    | BoolToInt -> tt = IntType && f le BooleanType
     | StrLen -> tt = NumberType && f le StringType
     | Utf16Len -> tt = IntType && f le Utf16Type
     | StrToBytes -> tt = ListType && f le StringType
@@ -417,7 +418,7 @@ module Type_lexpr = struct
         | Utf16ToNumber -> NumberType
         | Car | Cdr -> ListType
         | LstRev | SetToList | StrToBytes -> ListType
-        | IUnaryMinus | LstLen | Utf16Len | NumToInt -> IntType
+        | IUnaryMinus | LstLen | Utf16Len | NumToInt | BoolToInt -> IntType
         | BitwiseNot
         | FUnaryMinus
         | M_abs

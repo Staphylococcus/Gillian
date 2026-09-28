@@ -138,7 +138,7 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
         check guard e;
         match op with
         | TypeOf -> ()
-        | Not -> need (typ e BooleanType)
+        | Not | BoolToInt -> need (typ e BooleanType)
         | IUnaryMinus | IntToNum -> need (typ e IntType)
         | StrLen | StrToBytes | ToNumberOp -> need (typ e StringType)
         | Utf16Len | Utf16ToNumber -> need (typ e Utf16Type)

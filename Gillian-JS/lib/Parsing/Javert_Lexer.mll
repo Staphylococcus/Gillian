@@ -70,6 +70,7 @@
       "set_to_list",   Javert_Parser.SETTOLIST;
       "as_num",        Javert_Parser.INTTONUM;
       "as_int",        Javert_Parser.NUMTOINT;
+      "bool_to_int",        Javert_Parser.BOOLTOINT;
 
       (* Expression keywords *)
       "typeOf", Javert_Parser.TYPEOF;
