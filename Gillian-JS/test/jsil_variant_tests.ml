@@ -182,11 +182,44 @@ let malformed () =
       Alcotest.(check bool) "malformed rank rejected" true rejected)
     [ "variant() normal"; "variant(n normal"; "variant(n) variant(n) normal" ]
 
+let javascript_invariant_binders () =
+  let parse = Parsing.parse_js_logic_commands_from_string in
+  let check text binders rank =
+    match parse text with
+    | [ Jslogic.JSLCmd.Invariant (_, actual, actual_rank) ] ->
+        Alcotest.(check (list string)) "binders preserved" binders actual;
+        check_expr "rank preserved" rank actual_rank
+    | _ -> Alcotest.fail "expected one JavaScript invariant"
+  in
+  check "invariant (True)" [] None;
+  check "invariant (True) [bind: #key]" [ "#key" ] None;
+  check
+    "invariant (True) [bind: x_counter, #key] variant(as_int (1 - x_counter))"
+    [ "x_counter"; "#key" ]
+    (Some
+       (Expr.UnOp
+          ( NumToInt,
+            Expr.BinOp (Expr.Lit (Literal.Num 1.), FMinus, Expr.PVar "x_counter")
+          )));
+  List.iter
+    (fun text ->
+      let rejected =
+        try
+          ignore (parse text);
+          false
+        with Failure _ -> true
+      in
+      Alcotest.(check bool)
+        "non-invariant program binders remain forbidden" true rejected)
+    [ "assert (True) [bind: x_counter]"; "apply missing() [bind: x_counter]" ]
+
 let () =
   Alcotest.run "JSIL procedure variants"
     [
       ( "frontend",
         [
+          Alcotest.test_case "JavaScript invariant binders" `Quick
+            javascript_invariant_binders;
           Alcotest.test_case "Boolean integer rank" `Quick boolean_integer_rank;
           Alcotest.test_case "normal roundtrip" `Quick (roundtrip "normal");
           Alcotest.test_case "error roundtrip" `Quick (roundtrip "error");

@@ -1257,7 +1257,7 @@ js_logic_cmd_target:
     { JSLCmd.Assume a }
 
 (* invariant a *)
-  | INVARIANT; a = js_assertion_target; binders = option(binders_target); rank = option(jsil_lemma_variant_target)
+  | INVARIANT; a = js_assertion_target; binders = option(invariant_binders_target); rank = option(jsil_lemma_variant_target)
     { JSLCmd.Invariant (a, Option.value ~default:[ ] binders, rank) }
 
 (* apply lemma_name(args) *)
