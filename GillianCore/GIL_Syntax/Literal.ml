@@ -32,7 +32,7 @@ let rec equal la lb =
   | String sl, String sr | Loc sl, Loc sr -> String.equal sl sr
   | Utf16String sl, Utf16String sr -> Utf16.equal sl sr
   | Type tl, Type tr -> Type.equal tl tr
-  | LList ll, LList lr -> List.for_all2 equal ll lr
+  | LList ll, LList lr -> List.equal equal ll lr
   | _ -> false
 
 (** Value identity for logical heap matching. NaN payloads are not separate
