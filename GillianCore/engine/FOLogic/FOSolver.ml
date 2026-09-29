@@ -259,6 +259,26 @@ let check_entailment
         visitor#visit_expr () e;
         !found
       in
+      (* A contained-variable subset observing UTF-16 length may omit the
+         numeric alias that establishes an index bound. Exclude both direct
+         integer lengths and nested rounded forms from this optional path;
+         retain the richer focused and complete fallback queries below. *)
+      let observes_utf16_length e =
+        let found = ref false in
+        let visitor =
+          object
+            inherit [_] Visitors.iter as super
+
+            method! visit_expr () e =
+              (match e with
+              | Expr.UnOp (Utf16Len, _) -> found := true
+              | _ -> ());
+              super#visit_expr () e
+          end
+        in
+        visitor#visit_expr () e;
+        !found
+      in
       let contained =
         if
           !Config.Verification.total && SS.is_empty existentials
@@ -398,17 +418,60 @@ let check_entailment
               | None -> false)
           | _ -> false
       in
+      (* Keep only two original same-access order facts. Native UNSAT of this
+         weaker query suffices; SAT/unknown keeps every existing fallback. No
+         UTF-16 range fact or arithmetic identity is assumed or added. *)
+      let utf16_code_order_proved () =
+        let enabled =
+          !Config.Verification.total
+          && (not !Config.under_approximation)
+          && SS.is_empty existentials
+          && Expr.Set.mem right_f formulae
+        in
+        if not enabled then false
+        else
+          match right_f with
+          | Expr.UnOp
+              ( Not,
+                Expr.BinOp
+                  ( (Expr.Lit (Num _) as bound),
+                    FLessThanEqual,
+                    (Expr.BinOp (_, Utf16CodeUnit, _) as code) ) ) ->
+              let premise =
+                Expr.UnOp (Not, Expr.BinOp (code, FLessThan, bound))
+              in
+              let core = Expr.Set.of_list [ right_f; premise ] in
+              Expr.Set.cardinal core = 2
+              && Expr.Set.subset core formulae
+              && (not (Expr.Set.equal core formulae))
+              && Smt.proves_unsat core gamma_tbl
+          | _ -> false
+      in
       (* This weaker arithmetic query can prove the complete conjunction only
          by native UNSAT. SAT/unknown retain the original focused/full paths. *)
+      (* Optional-shortcut eligibility: a subset observing UTF-16 contents or
+         a rounded length alias may drop the alias that witnesses UNSAT, so its
+         optional query is skipped and the complete fallback below is kept. *)
       let model =
         if length_zero_proved () then None
-        else if contained_omission && Smt.proves_unsat contained gamma_tbl then
-          None
+        else if utf16_code_order_proved () then None
+        else if
+          contained_omission
+          && (not (Expr.Set.exists observes_utf16_length contained))
+          && Smt.proves_unsat contained gamma_tbl
+        then None
         else if
           numeric_omission
           && (numeric_pieces_proved () || Smt.proves_unsat numeric gamma_tbl)
         then None
-        else if useful_omission && Smt.proves_unsat focused gamma_tbl then None
+        else if
+          useful_omission
+          (* A pure-Number query already has the complete numeric path. A
+             focused subset can discard its transitive integrality/bounds. *)
+          && (not (Expr.Set.for_all number_variables formulae))
+          && (not (Expr.Set.exists observes_contents focused))
+          && Smt.proves_unsat focused gamma_tbl
+        then None
         else Smt.check_sat formulae (Type_env.as_hashtbl gamma)
       in
       let ret = Option.is_none model in

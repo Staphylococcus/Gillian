@@ -2414,6 +2414,168 @@ let numeric_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
       in
       if not proper_nonempty then false else proves_unsat subset gamma
 
+(* Sufficient UNSAT checks for observed mixed-theory obligations. Each selected
+   core consists of original expressions. The final length check uses an
+   explicitly weakened projection of an original core. We add no axioms and
+   never infer SAT from a subset or projection. At most one core per shape is
+   tried; native SAT/unknown preserves the complete fallback. *)
+let original_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
+  if (not !Config.Verification.total) || !Config.under_approximation then false
+  else
+    let expressions = Expr.Set.elements fs in
+    let core atoms =
+      let selected = Expr.Set.of_list atoms in
+      if
+        Expr.Set.cardinal selected = List.length atoms
+        && Expr.Set.subset selected fs
+        && Expr.Set.cardinal selected < Expr.Set.cardinal fs
+      then Some selected
+      else None
+    in
+    let try_shape select =
+      match List.find_map select expressions with
+      | None -> false
+      | Some selected -> proves_unsat selected gamma
+    in
+    let number = function
+      | Expr.LVar n -> Hashtbl.find_opt gamma n = Some Type.NumberType
+      | _ -> false
+    in
+    let finite_add = function
+      | (Expr.UnOp
+           (Not, BinOp ((BinOp ((LVar _ as p), FPlus, Lit (Num 1.)) as sum),
+                        Equal, same)) as failed)
+        when Expr.equal sum same && number p ->
+          core [ failed; Expr.UnOp (IsInt, p) ]
+      | _ -> None
+    in
+    let code_upper = function
+      | (Expr.UnOp
+           (Not, BinOp ((BinOp (_, Utf16CodeUnit, _) as code),
+                        FLessThanEqual, (Lit (Num _) as bound))) as failed) ->
+          core [ failed; Expr.UnOp (Not, BinOp (bound, FLessThan, code)) ]
+      | _ -> None
+    in
+    let length_index = function
+      | (Expr.BinOp
+           ((UnOp (Utf16Len, LVar s) as length), ILessThanEqual,
+            UnOp (NumToInt, UnOp (ToIntOp,
+              (BinOp ((LVar _ as p), FPlus, Lit (Num 1.)) as index)))) as failed)
+        when Hashtbl.find_opt gamma s = Some Type.Utf16Type && number p ->
+          let rounded = Expr.UnOp (IntToNum, length) in
+          (* Find existing Number-length and nonnegative counter links. The
+             exact safe-integer bounds remain original premises, not axioms. *)
+          List.find_map
+            (function
+              | (Expr.BinOp ((LVar _ as n), Equal, rhs) as link)
+                when Expr.equal rhs rounded && number n ->
+                  List.find_map
+                    (function
+                      | (Expr.BinOp (Lit (Num 0.), FLessThanEqual,
+                                     (LVar _ as count)) as nonnegative)
+                        when number count ->
+                          core
+                            [ failed;
+                              Expr.UnOp (Not, BinOp (rounded, FLessThanEqual,
+                                                     UnOp (ToIntOp, index)));
+                              Expr.UnOp (IsInt, p);
+                              nonnegative;
+                              Expr.BinOp (count, FLessThanEqual, p);
+                              link;
+                              Expr.BinOp (n, FLessThanEqual,
+                                          Lit (Num 9007199254740991.));
+                              Expr.BinOp (p, FLessThan, n);
+                              Expr.BinOp (length, ILessThanEqual,
+                                          Lit (Int (Z.of_string "9007199254740991")));
+                              Expr.BinOp (index, FLessThan, n) ]
+                      | _ -> None)
+                    expressions
+              | _ -> None)
+            expressions
+      | _ -> None
+    in
+    let mask_test code =
+      Expr.BinOp
+        (BinOp (UnOp (ToInt32Op, code), BitwiseAndF, Lit (Num 64512.)),
+         Equal, Lit (Num 56320.))
+    in
+    let mask_lower = function
+      | (Expr.UnOp
+           (Not, BinOp (Lit (Num 56320.), FLessThanEqual,
+                        (BinOp (_, Utf16CodeUnit, _) as code))) as failed) ->
+          core [ failed; mask_test code ]
+      | _ -> None
+    in
+    let mask_upper = function
+      | (Expr.UnOp
+           (Not, BinOp ((BinOp (_, Utf16CodeUnit, _) as code),
+                        FLessThanEqual, Lit (Num 57343.))) as failed) ->
+          core [ failed; mask_test code ]
+      | _ -> None
+    in
+    let mask_complement = function
+      | (Expr.UnOp
+           (Not, BinOp (Lit (Num 57343.), FLessThan,
+                        (BinOp (_, Utf16CodeUnit, _) as code))) as failed) ->
+          core [ failed;
+                 Expr.UnOp (Not, BinOp (code, FLessThan, Lit (Num 56320.)));
+                 Expr.UnOp (Not, mask_test code) ]
+      | _ -> None
+    in
+    let length_projection = function
+      | (Expr.BinOp
+           ((UnOp (IntToNum, UnOp (Utf16Len, LVar s)) as rounded),
+            FLessThanEqual, (UnOp (ToIntOp,
+              (BinOp ((LVar _ as p), FPlus, Lit (Num 1.)) as sum)) as index))
+         as failed)
+        when Hashtbl.find_opt gamma s = Some Type.Utf16Type && number p ->
+          List.find_map
+            (function
+              | (Expr.BinOp ((LVar _ as n), Equal, rhs) as link)
+                when Expr.equal rhs rounded && number n ->
+                  let integral = Expr.UnOp (IsInt, p) in
+                  let below = Expr.BinOp (sum, FLessThan, n) in
+                  (match core [ failed; integral; link; below ] with
+                  | None -> None
+                  | Some _ ->
+                      (* IntToNum produces a Number. Replacing this identical
+                         subterm twice with one unconstrained fresh Number is
+                         an overapproximation: every original model extends to
+                         a projected model. Only native UNSAT can conclude.
+                         Generic Number comparison also drops the specialised
+                         UTF-16 index guard; that only weakens the formula. *)
+                      let names = Expr.Set.fold
+                        (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty in
+                      let rec fresh i =
+                        let name = "#utf16_length_projection_" ^ string_of_int i in
+                        if Hashtbl.mem gamma name || SS.mem name names then
+                          fresh (i + 1)
+                        else name
+                      in
+                      let name = fresh 0 in
+                      let abstract = Expr.LVar name in
+                      let projected_gamma = Hashtbl.copy gamma in
+                      Hashtbl.add projected_gamma name Type.NumberType;
+                      Some
+                        (Expr.Set.of_list
+                           [ integral;
+                             Expr.BinOp (n, Equal, abstract);
+                             Expr.BinOp (abstract, FLessThanEqual, index);
+                             below ], projected_gamma))
+              | _ -> None)
+            expressions
+      | _ -> None
+    in
+    let try_projection () =
+      match List.find_map length_projection expressions with
+      | None -> false
+      | Some (projected, projected_gamma) ->
+          proves_unsat projected projected_gamma
+    in
+    try_shape finite_add || try_shape code_upper || try_shape length_index
+    || try_shape mask_lower || try_shape mask_upper || try_shape mask_complement
+    || try_projection ()
+
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   let key = formula_key fs gamma in
   match Formula_cache.find_opt sat_cache key with
@@ -2426,7 +2588,8 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   | None ->
       let () = L.verbose (fun m -> m "SAT check not found in cache") in
       let ret =
-        if numeric_unsat_precheck fs gamma then None
+        if original_unsat_precheck fs gamma then None
+        else if numeric_unsat_precheck fs gamma then None
         else
           match seeded_model fs gamma with
           | Some _ as witness -> witness

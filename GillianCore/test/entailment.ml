@@ -1390,6 +1390,802 @@ let length_zero_core () =
     "missing zero equation rejects the empty-length goal" false
     (entail facts_d goal)
 
+let utf16_code_order_core () =
+  (* Original q280 entailment premises. Restore MAX_SAFE_INTEGER from its
+     exact binary64 bits, not the rounded decimal log printer. No new facts. *)
+  let facts = parse_gil_set
+    [
+      "(#len == (as_num (u16-len #s)))";
+      "(#pos == #pos)";
+      "(#len == #len)";
+      "(#this == undefined)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #pos)";
+      "(0. <= #count)";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_437 v== (9007199254740991. - #pos))";
+      "(#pos < #len)";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== ((#pos + 1.) + 1.))";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(is_int #next_pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= (#count + 1.))";
+      "((#count + 1.) <= #next_pos)";
+    ]
+  in
+  let s = Expr.LVar "#s" and pos = Expr.LVar "#pos" in
+  let code = bin Utf16CodeUnit s (Expr.UnOp (ToIntOp, pos)) in
+  let lower = Expr.num 55296. in
+  let goal = bin FLessThanEqual lower code in
+  let premise = not_ (bin FLessThan code lower) in
+  assert (Expr.Set.mem premise facts);
+  let fresh_gamma () =
+    let g = Gamma.init () in
+    Gamma.update g "#s" Type.Utf16Type;
+    Gamma.update g "#this" Type.UndefinedType;
+    List.iter (fun n -> Gamma.update g n Type.NumberType)
+      [ "#pos"; "#len"; "#count"; "#next_pos"; "#lvar_437" ];
+    g
+  in
+  let entail fs goal =
+    Solver.check_entailment Utils.Containers.SS.empty
+      (Engine.PFS.of_list (Expr.Set.elements fs)) [ goal ] (fresh_gamma ())
+  in
+  let queries () =
+    if Sys.file_exists "gillian_smt_queries" then
+      Array.to_list (Sys.readdir "gillian_smt_queries")
+    else []
+  in
+  let before = queries () in
+  let saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) "original lower-bound entailment" true
+      (entail facts goal);
+    (* Require the actual original two-atom native query. An always-success
+       stub emits no query; the prior complete-query path emits larger sets. *)
+    let core = Expr.Set.of_list [ Expr.negate goal; premise ] in
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) core in
+    let fresh = List.filter (fun name -> not (List.mem name before)) (queries ()) in
+    Alcotest.(check int) "one native query establishes the entailment" 1
+      (List.length fresh);
+    let observed = List.filter (fun name ->
+      let path = Filename.concat "gillian_smt_queries" name in
+      let ch = open_in_bin path in
+      let contents = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix contents) fresh in
+    Alcotest.(check int) "one original-fact native core query" 1
+      (List.length observed);
+    Printf.printf "UTF16_ORDER_CORE_NATIVE_QUERY=%s\n%!" (List.hd observed);
+    let literal units = Expr.Lit (Literal.Utf16String
+        (Gillian.Utils.Utf16.of_canonical
+           (Gillian.Utils.Utf16.of_code_units units))) in
+    let concrete units = Expr.Set.of_list
+        [ bin Equal s (literal units); bin Equal pos (Expr.num 0.) ] in
+    let low = Expr.Set.add premise (concrete [55296; 65]) in
+    Alcotest.(check bool) "nearby stronger bound has a counterexample" false
+      (entail low (bin FLessThanEqual (Expr.num 55297.) code));
+    Alcotest.(check bool) "missing premise retains a counterexample" false
+      (entail (concrete [65]) goal);
+    let next = bin Utf16CodeUnit s (Expr.num 1.) in
+    Alcotest.(check bool) "another access cannot borrow the premise" false
+      (entail low (bin FLessThanEqual lower next));
+    let g = fresh_gamma () |> Gamma.as_hashtbl in
+    let sat_core = Expr.Set.of_list
+        [ premise; not_ (bin FLessThanEqual (Expr.num 55297.) code) ] in
+    Alcotest.(check bool) "SAT core is inconclusive, not proof" false
+      (Smt.proves_unsat sat_core g);
+    Alcotest.(check bool) "same core has a native SAT model" true
+      (Option.is_some (Smt.exec_sat sat_core g)))
+
+
+(* These tests call the shared SAT path on retained helper queries, including
+   branch infeasibility. Native core observation rejects an always-success or
+   registry-only implementation; explicit SAT models reject always-UNSAT. *)
+let observe_original_core label facts expected gamma =
+  let queries () =
+    if Sys.file_exists "gillian_smt_queries" then
+      Array.to_list (Sys.readdir "gillian_smt_queries") else []
+  in
+  let before = queries () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) (label ^ " original query is UNSAT") true
+      (Option.is_none (Smt.check_sat facts (Gamma.as_hashtbl gamma)));
+    let fresh = List.filter (fun name -> not (List.mem name before)) (queries ()) in
+    Alcotest.(check int) (label ^ " one native core query") 1 (List.length fresh);
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) expected in
+    let path = Filename.concat "gillian_smt_queries" (List.hd fresh) in
+    let ch = open_in_bin path in
+    let contents = Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+    Alcotest.(check bool) (label ^ " exact original atoms observed") true
+      (String.starts_with ~prefix contents);
+    Printf.printf "ORIGINAL_CORE_NATIVE_QUERY=%s:%s\n%!" label (List.hd fresh))
+
+let original_core_gamma () =
+  let g = Gamma.init () in
+  Gamma.update g "#s" Type.Utf16Type;
+  List.iter (fun n -> Gamma.update g n Type.NumberType)
+    [ "#pos"; "#count"; "#len"; "#next_pos"; "#lvar_375"; "#after" ];
+  g
+
+let original_core_literal units = Expr.Lit (Literal.Utf16String
+  (Gillian.Utils.Utf16.of_canonical (Gillian.Utils.Utf16.of_code_units units)))
+
+let original_finite_add_core () =
+  (* Native query121; only solver-added concrete search seeds removed from
+     the fixture, if present. All selected core facts remain original. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((#pos + 1.) == (#pos + 1.)))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #pos)";
+      "(0. <= #count)";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! ((#pos + 1.) == (#pos + 1.)))";
+      "(is_int #pos)";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "finite_add" facts expected (original_core_gamma ());
+  let counterexample = Expr.Set.add (bin ValueEqual (Expr.LVar "#pos") (Expr.num nan))
+      (Expr.Set.remove (Expr.UnOp (IsInt, Expr.LVar "#pos")) expected) in
+  Alcotest.(check bool) "finite_add removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let original_code_upper_core () =
+  (* Native query204; only solver-added concrete search seeds removed from
+     the fixture, if present. All selected core facts remain original. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(! (u16-code(#s, (num_to_int #pos)) <= 56319.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #next_pos)";
+      "(is_int #pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= #count)";
+      "(0. <= (#count + 1.))";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== ((#pos + 1.) + 1.))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((#count + 1.) <= #next_pos)";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (u16-code(#s, (num_to_int #pos)) <= 56319.))";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "code_upper" facts expected (original_core_gamma ());
+  let counterexample = Expr.Set.union
+      (parse_gil_set [ "(! (u16-code(#s, (num_to_int #pos)) <= 56319.))" ])
+      (Expr.Set.of_list
+         [ bin Equal (Expr.LVar "#pos") (Expr.num 0.);
+           bin Equal (Expr.LVar "#s") (original_core_literal [57344]) ]) in
+  Alcotest.(check bool) "code_upper removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let original_length_index_core () =
+  (* Native query361; only solver-added concrete search seeds removed from
+     the fixture, if present. All selected core facts remain original. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) < 56320.))";
+      "(! (((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #next_pos)";
+      "(is_int #pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= #count)";
+      "(0. <= (#count + 1.))";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== (#pos + 1.))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int (#pos + 1.))))";
+      "((#count + 1.) <= #next_pos)";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(is_int #pos)";
+      "(0. <= #count)";
+      "(#count <= #pos)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int (#pos + 1.))))";
+      "((#pos + 1.) < #len)";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "length_index" facts expected (original_core_gamma ());
+  let counterexample = let failed = bin ILessThanEqual (Expr.UnOp (Utf16Len, Expr.LVar "#s"))
+      (Expr.UnOp (NumToInt, Expr.UnOp (ToIntOp,
+          bin FPlus (Expr.LVar "#pos") (Expr.num 1.)))) in
+    Expr.Set.union (Expr.Set.remove failed expected)
+      (Expr.Set.of_list
+         [ bin Equal (Expr.LVar "#pos") (Expr.num 0.);
+           bin Equal (Expr.LVar "#count") (Expr.num 0.);
+           bin Equal (Expr.LVar "#len") (Expr.num 2.);
+           bin Equal (Expr.LVar "#s") (original_core_literal [65;65]) ]) in
+  Alcotest.(check bool) "length_index removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let numeric_dependency_focus () =
+  let facts = parse_gil_set
+    [
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #pos)";
+      "(0. <= #count)";
+      "(#after <= #len)";
+      "(#count <= #pos)";
+      "(#len <= 9007199254740991.)";
+      "(#pos < #len)";
+      "((#after v== (#pos + 1.)) or (#after v== ((#pos + 1.) + 1.)))";
+    ] in
+  let g = original_core_gamma () in
+  let goal = bin FLessThanEqual
+    (bin FPlus (Expr.LVar "#count") (Expr.num 1.)) (Expr.LVar "#after") in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before = queries () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) "original complete numeric dependency entailment" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+         (Engine.PFS.of_list (Expr.Set.elements facts)) [goal] g);
+    let full = Expr.Set.add (not_ goal) facts in
+    let lossy = parse_gil_set
+      [ "(! ((#count + 1.) <= #after))"; "(is_int #count)";
+        "(0. <= #count)"; "(#after <= #len)"; "(#count <= #pos)";
+        "((#after v== (#pos + 1.)) or (#after v== ((#pos + 1.) + 1.)))" ] in
+    let prefix fs = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs in
+    let fresh = List.filter (fun n -> not (List.mem n before)) (queries ()) in
+    let contents = List.map (fun n ->
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" n) in
+      Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch))) fresh in
+    Alcotest.(check bool) "complete numeric native query observed" true
+      (List.exists (String.starts_with ~prefix:(prefix full)) contents);
+    Alcotest.(check bool) "lossy focused query is not submitted" false
+      (List.exists (String.starts_with ~prefix:(prefix lossy)) contents));
+  let concrete = Expr.Set.union facts
+    (parse_gil_set [ "(#pos == 0.)"; "(#count == 0.)";
+                     "(#after == 1.)"; "(#len == 2.)" ]) in
+  Alcotest.(check bool) "nearby stronger numeric goal retains counterexample" false
+    (Solver.check_entailment Utils.Containers.SS.empty
+       (Engine.PFS.of_list (Expr.Set.elements concrete))
+       [bin FLessThanEqual
+          (bin FPlus (Expr.LVar "#count") (Expr.num 2.)) (Expr.LVar "#after")]
+       (original_core_gamma ()))
+
+
+let original_mask_lower_core () =
+  (* Retained native query190; only concrete search seeds removed. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (56320. <= u16-code(#s, (num_to_int (#pos + 1.)))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #next_pos)";
+      "(is_int #pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= #count)";
+      "(0. <= (#count + 1.))";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== ((#pos + 1.) + 1.))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((#count + 1.) <= #next_pos)";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! (56320. <= u16-code(#s, (num_to_int (#pos + 1.)))))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "mask_lower" facts expected (original_core_gamma ());
+  let counterexample = Expr.Set.union
+    (parse_gil_set
+    [
+      "(! (56320. <= u16-code(#s, (num_to_int (#pos + 1.)))))";
+    ])
+    (Expr.Set.of_list
+       [bin ValueEqual (Expr.LVar "#pos") (Expr.num 0.);
+        bin Equal (Expr.LVar "#s") (original_core_literal [65;55296])]) in
+  Alcotest.(check bool) "mask_lower removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let original_mask_upper_core () =
+  (* Retained native query218; only concrete search seeds removed. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) <= 57343.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #next_pos)";
+      "(is_int #pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= #count)";
+      "(0. <= (#count + 1.))";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== ((#pos + 1.) + 1.))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((#count + 1.) <= #next_pos)";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) <= 57343.))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "mask_upper" facts expected (original_core_gamma ());
+  let counterexample = Expr.Set.union
+    (parse_gil_set
+    [
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) <= 57343.))";
+    ])
+    (Expr.Set.of_list
+       [bin ValueEqual (Expr.LVar "#pos") (Expr.num 0.);
+        bin Equal (Expr.LVar "#s") (original_core_literal [65;57344])]) in
+  Alcotest.(check bool) "mask_upper removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let original_mask_complement_core () =
+  (* Retained native query315; only concrete search seeds removed. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (57343. < u16-code(#s, (num_to_int (#pos + 1.)))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) < 56320.))";
+      "(! (((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #next_pos)";
+      "(is_int #pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= #count)";
+      "(0. <= (#count + 1.))";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== (#pos + 1.))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((#count + 1.) <= #next_pos)";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! (57343. < u16-code(#s, (num_to_int (#pos + 1.)))))";
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) < 56320.))";
+      "(! (((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.))";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "mask_complement" facts expected (original_core_gamma ());
+  let counterexample = Expr.Set.union
+    (parse_gil_set
+    [
+      "(! (57343. < u16-code(#s, (num_to_int (#pos + 1.)))))";
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) < 56320.))";
+    ])
+    (Expr.Set.of_list
+       [bin ValueEqual (Expr.LVar "#pos") (Expr.num 0.);
+        bin Equal (Expr.LVar "#s") (original_core_literal [65;56320])]) in
+  Alcotest.(check bool) "mask_complement removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let observe_length_projection label facts expected gamma =
+  let g = Gamma.as_hashtbl gamma in
+  let before_gamma = Hashtbl.copy g in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before = queries () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) (label ^ " original query is UNSAT") true
+      (Option.is_none (Smt.check_sat facts g));
+    let fresh = List.filter (fun name -> not (List.mem name before)) (queries ()) in
+    Alcotest.(check int) (label ^ " one native projection query") 1 (List.length fresh);
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) expected in
+    let ch = open_in_bin (Filename.concat "gillian_smt_queries" (List.hd fresh)) in
+    let contents = Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+    Alcotest.(check bool) (label ^ " exact numeric projection observed") true
+      (String.starts_with ~prefix contents);
+    Alcotest.(check bool) (label ^ " caller gamma unchanged") true
+      (Hashtbl.length g = Hashtbl.length before_gamma &&
+       Hashtbl.fold (fun k v ok -> ok && Hashtbl.find_opt g k = Some v)
+         before_gamma true);
+    Printf.printf "LENGTH_PROJECTION_NATIVE_QUERY=%s:%s\n%!" label (List.hd fresh))
+
+let original_length_projection () =
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #pos)";
+      "(0. <= #count)";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((as_num (u16-len #s)) <= (num_to_int (#pos + 1.)))";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+    ] in
+  let core = parse_gil_set
+    [
+      "(is_int #pos)";
+      "(#len == (as_num (u16-len #s)))";
+      "((as_num (u16-len #s)) <= (num_to_int (#pos + 1.)))";
+      "((#pos + 1.) < #len)";
+    ] in
+  assert (Expr.Set.subset core facts);
+  let expected name =
+    let p = Expr.LVar "#pos" and n = Expr.LVar "#len" in
+    let abstract = Expr.LVar name in
+    let sum = bin FPlus p (Expr.num 1.) in
+    Expr.Set.of_list [Expr.UnOp (IsInt,p); bin Equal n abstract;
+      bin FLessThanEqual abstract (Expr.UnOp (ToIntOp,sum));
+      bin FLessThan sum n] in
+  observe_length_projection "plain" facts
+    (expected "#utf16_length_projection_0") (original_core_gamma ());
+  let occupied = original_core_gamma () in
+  Gamma.update occupied "#utf16_length_projection_0" Type.StringType;
+  let collision = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#utf16_length_projection_1")
+       (Expr.LVar "#utf16_length_projection_1")) facts in
+  observe_length_projection "collision" collision
+    (expected "#utf16_length_projection_2") occupied;
+  (* Each missing-selector-premise case has a real model in the original
+     UTF16 domain, not merely in the wider numeric projection. *)
+  List.iter
+    (fun (label,removed,pos,length,units) ->
+      let concrete = Expr.Set.union (Expr.Set.remove removed core)
+        (Expr.Set.of_list
+          [bin Equal (Expr.LVar "#pos") (Expr.num pos);
+           bin Equal (Expr.LVar "#len") (Expr.num length);
+           bin Equal (Expr.LVar "#s") (original_core_literal units)]) in
+      Alcotest.(check bool) ("length projection missing " ^ label ^ " is SAT") true
+        (Option.is_some (Smt.check_sat concrete
+           (Gamma.as_hashtbl (original_core_gamma ())))))
+    [ ("integrality", Expr.UnOp (IsInt,Expr.LVar "#pos"), -1.5,0.,[]);
+      ("link", bin Equal (Expr.LVar "#len")
+         (Expr.UnOp (IntToNum,Expr.UnOp (Utf16Len,Expr.LVar "#s"))),0.,2.,[]);
+      ("failed comparison", bin FLessThanEqual
+         (Expr.UnOp (IntToNum,Expr.UnOp (Utf16Len,Expr.LVar "#s")))
+         (Expr.UnOp (ToIntOp,bin FPlus (Expr.LVar "#pos") (Expr.num 1.))),
+         0.,2.,[65;65]) ]
+
+(* Recorded wrong-post definedness obligations: the four-atom contained
+   query dropped the length alias and returned unknown; the richer query was
+   UNSAT. Observe the actual native queries, not just the returned boolean. *)
+let utf16_length_alias_contained () =
+  let cases = [
+    ("direct", "#lvar_396", 0,
+     parse_gil_set [
+      "(is_int #lvar_396)";
+      "(0. <= #lvar_396)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len == (#lvar_396 + 1.))";
+      "(#lvar_396 < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int #lvar_396)))";
+    ],
+     parse_gil_set [
+      "(is_int #lvar_396)";
+      "(0. <= #lvar_396)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int #lvar_396)))";
+    ]);
+    ("next", "#lvar_402", 1,
+     parse_gil_set [
+      "(is_int #lvar_402)";
+      "(0. <= #lvar_402)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len == ((#lvar_402 + 1.) + 1.))";
+      "(#lvar_402 < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int (#lvar_402 + 1.))))";
+      "((#lvar_402 + 1.) < #len)";
+    ],
+     parse_gil_set [
+      "(is_int #lvar_402)";
+      "(0. <= #lvar_402)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int (#lvar_402 + 1.))))";
+    ])
+  ] in
+  List.iter (fun (label, pname, offset, full, lossy) ->
+    let s = Expr.LVar "#s" and p = Expr.LVar pname in
+    let length = Expr.UnOp (Utf16Len, s) in
+    let index = if offset = 0 then p else bin FPlus p (Expr.num 1.) in
+    let converted = Expr.UnOp (NumToInt, Expr.UnOp (ToIntOp, index)) in
+    let failed = bin ILessThanEqual length converted in
+    assert (Expr.Set.mem failed full && Expr.Set.mem failed lossy);
+    let irrelevant = Expr.UnOp (IsInt, Expr.LVar "#irrelevant_count") in
+    let facts = Expr.Set.add irrelevant (Expr.Set.remove failed full) in
+    let fresh_gamma () =
+      let g = Gamma.init () in
+      Gamma.update g "#s" Type.Utf16Type;
+      List.iter (fun n -> Gamma.update g n Type.NumberType)
+        [pname; "#len"; "#irrelevant_count"];
+      g
+    in
+    let entail fs goal = Solver.check_entailment Utils.Containers.SS.empty
+      (Engine.PFS.of_list (Expr.Set.elements fs)) [goal] (fresh_gamma ()) in
+    let goal = bin ILessThan converted length in
+    let queries () = if Sys.file_exists "gillian_smt_queries" then
+      Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+    let prefix fs = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs in
+    let before = queries () and saved = !Config.dump_smt in
+    Config.dump_smt := true;
+    Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+      Alcotest.(check bool) (label ^ " original index bound") true
+        (entail facts goal);
+      let fresh = List.filter (fun n -> not (List.mem n before)) (queries ()) in
+      let contents = List.map (fun n ->
+        let ch = open_in_bin (Filename.concat "gillian_smt_queries" n) in
+        let text = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        (n,text)) fresh in
+      let retained = List.filter (fun (_,text) ->
+        String.starts_with ~prefix:(prefix full) text) contents in
+      Alcotest.(check int) (label ^ " native query retains length alias") 1
+        (List.length retained);
+      Alcotest.(check bool) (label ^ " lossy contained query not submitted") false
+        (List.exists (fun (_,text) -> String.starts_with ~prefix:(prefix lossy) text)
+           contents);
+      Printf.printf "UTF16_LENGTH_ALIAS_NATIVE_QUERY=%s:%s\n%!"
+        label (fst (List.hd retained)));
+    let rounded = Expr.UnOp (IntToNum, length) in
+    let link = bin Equal (Expr.LVar "#len") rounded in
+    let value_link = bin ValueEqual (Expr.LVar "#len") rounded in
+    assert (Expr.Set.mem link facts && Expr.Set.mem value_link facts);
+    let concrete units = Expr.Set.of_list
+      [ bin ValueEqual p (Expr.num 0.);
+        bin ValueEqual (Expr.LVar "#len") (Expr.num (float_of_int (offset + 1)));
+        bin Equal s (original_core_literal units) ] in
+    let without_links = Expr.Set.remove link (Expr.Set.remove value_link facts) in
+    Alcotest.(check bool) (label ^ " missing length aliases reject") false
+      (entail (Expr.Set.union without_links (concrete [])) goal);
+    let actual = concrete (List.init (offset + 1) (fun _ -> 65)) in
+    let stronger = bin ILessThan
+      (Expr.UnOp (NumToInt, Expr.UnOp (ToIntOp, bin FPlus index (Expr.num 1.))))
+      length in
+    Alcotest.(check bool) (label ^ " stronger index bound rejects") false
+      (entail (Expr.Set.union facts actual) stronger)) cases
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -1437,4 +2233,24 @@ let tests =
     Alcotest.test_case "empty-length core sufficient check and rejections"
       `Quick
       (with_total length_zero_core);
+    Alcotest.test_case "original UTF16 code-order core and counterexamples"
+      `Quick (with_total utf16_code_order_core);
+    Alcotest.test_case "original finite_add shared core" `Quick
+      (with_total original_finite_add_core);
+    Alcotest.test_case "original code_upper shared core" `Quick
+      (with_total original_code_upper_core);
+    Alcotest.test_case "original length_index shared core" `Quick
+      (with_total original_length_index_core);
+    Alcotest.test_case "complete numeric dependencies avoid focused loss" `Quick
+      (with_total numeric_dependency_focus);
+    Alcotest.test_case "original mask_lower core" `Quick
+      (with_total original_mask_lower_core);
+    Alcotest.test_case "original mask_upper core" `Quick
+      (with_total original_mask_upper_core);
+    Alcotest.test_case "original mask_complement core" `Quick
+      (with_total original_mask_complement_core);
+    Alcotest.test_case "original numeric length projection and collisions" `Quick
+      (with_total original_length_projection);
+    Alcotest.test_case "UTF16 integer lengths retain numeric aliases" `Quick
+      (with_total utf16_length_alias_contained);
   ]
