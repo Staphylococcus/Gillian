@@ -168,7 +168,7 @@ let consume_pred
     List.fold_left
       (fun (b', i', o', result) candidate ->
         let ccurrent = (b', i', o', result) in
-        if i' = ins_count && o' = known_outs_count then ccurrent
+        if b' && i' = ins_count && o' = known_outs_count then ccurrent
         else
           let b, (i, o) =
             try
