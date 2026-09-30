@@ -2288,6 +2288,36 @@ let seeded_model fs gamma =
                 acc)
             names query
         in
+        (* Propagation only proposes additional witness values. It neither
+           proves an arithmetic identity nor changes the symbolic state. *)
+        let rec extend_values guesses =
+          let next = Expr.Set.fold (fun e acc ->
+            let add left right acc = match left, right with
+              | Expr.LVar x, Expr.BinOp (LVar from, (FPlus | FMinus as op), Lit (Num 1.))
+                when Hashtbl.find_opt gamma x = Some Type.NumberType
+                     && not (List.mem_assoc x acc) ->
+                (match List.assoc_opt from acc with
+                 | Some value -> (x, (if op = FPlus then value +. 1.
+                                      else value -. 1.)) :: acc
+                 | None -> acc)
+              | _ -> acc in
+            match e with
+            | BinOp (left, (Equal | ValueEqual), right) ->
+                add right left (add left right acc)
+            | _ -> acc) fs guesses in
+          if List.length next = List.length guesses then next else extend_values next
+        in
+        let seed_values initial query =
+          let initial = Expr.Set.fold (fun e acc -> match e with
+            | BinOp (LVar x, (Equal | ValueEqual), Lit (Num value))
+            | BinOp (Lit (Num value), (Equal | ValueEqual), LVar x)
+              when Hashtbl.find_opt gamma x = Some Type.NumberType
+                   && not (List.mem_assoc x acc) -> (x, value) :: acc
+            | _ -> acc) fs initial in
+          List.fold_left (fun acc (x, value) -> Expr.Set.add
+            (Expr.BinOp (LVar x, ValueEqual, Expr.num value)) acc)
+            query (extend_values initial)
+        in
         (* Loop feasibility can need a concrete adjacent-index counter even
            in queries without UTF-16 content operations. Keep the existing
            character-position search unchanged for content queries. Otherwise
@@ -2313,7 +2343,172 @@ let seeded_model fs gamma =
           end
         in
         Expr.Set.iter (advancing#visit_expr ()) fs;
+        (* A carried loop limit need not share the advancing counter's value.
+           Guess distinct roots and their adjacent derived values, retaining
+           every original equation. A native validated model, under the same
+           optional budget, is the only success; failed guesses still fall back. *)
+        let counter_roots = SS.inter roots advancing#names in
+        let carried_roots = SS.diff roots advancing#names in
+        let carried =
+          if advancing#observes_contents || SS.is_empty carried_roots then None
+          else
+            (* A chain can begin at an original literal-bound counter as well
+               as a free root. Those bindings remain in the full formula; here
+               they only guide a candidate model. *)
+            let literal_values = Expr.Set.fold (fun e acc -> match e with
+              | BinOp (LVar x, (Equal | ValueEqual), Lit (Num value))
+              | BinOp (Lit (Num value), (Equal | ValueEqual), LVar x)
+                when Hashtbl.find_opt gamma x = Some Type.NumberType
+                     && not (List.mem_assoc x acc) -> (x, value) :: acc
+              | _ -> acc) fs [] in
+            let initial = SS.fold (fun x acc -> (x, 0.) :: acc) counter_roots
+              (SS.fold (fun x acc -> (x, 1.) :: acc) carried_roots literal_values) in
+            let counter_initial = SS.fold (fun x acc -> (x, 0.) :: acc)
+              counter_roots literal_values in
+            if List.length (extend_values counter_initial) < List.length counter_initial + 2
+            then None else
+            (* A deeper adjacent chain may require distinct carried limits.
+               Raise only guessed free limits to observed lower guesses. This
+               never establishes a fact; all original bounds remain checked. *)
+            let rec carry_limits guesses =
+              let values = extend_values guesses in
+              let next = Expr.Set.fold (fun e acc -> match e with
+                | Expr.BinOp (LVar lower, FLessThanEqual, LVar upper)
+                  when SS.mem upper carried_roots ->
+                  (match List.assoc_opt lower values, List.assoc_opt upper acc with
+                   | Some value, Some old when value > old ->
+                       List.map (fun (name, guess) ->
+                         (name, if name = upper then value else guess)) acc
+                   | _ -> acc)
+                | _ -> acc) fs values in
+              if next = values then values else carry_limits next
+            in
+            let values = carry_limits initial in
+            (* Keep allocation bounded even when unrelated Number values are
+               large. Failed short guesses still reach the existing fallback. *)
+            let length = List.fold_left (fun bound (_, value) ->
+              if value >= 0. && value <= 8. && floor value = value
+              then max bound (int_of_float value) else bound) 2 values in
+            let value = Utils.Utf16.of_canonical (Utils.Utf16.of_code_units
+              (List.init length (fun _ -> 0x41))) in
+            let query = SS.fold
+              (fun string acc -> Expr.Set.add
+                (Expr.BinOp (LVar string, Equal,
+                  Lit (Utf16String value))) acc) length_strings fs in
+            let query = seed_values values query in
+            try_seed query
+        in
+        (* Some complete pure/list branch queries require a free counter
+           beyond the existing zero/one guesses. Literal lower bounds select
+           a small candidate only; all original assertions remain checked. *)
+        let root_guess x = Expr.Set.fold (fun e value ->
+          let bound lower strict =
+            if lower >= 0. && lower < 8. then
+              max value (if strict then floor lower +. 1. else ceil lower)
+            else value in
+          match e with
+          | BinOp (Lit (Num lower), FLessThan, LVar name) when name = x ->
+              bound lower true
+          | BinOp (Lit (Num lower), FLessThanEqual, LVar name)
+          | UnOp (Not, BinOp (LVar name, FLessThan, Lit (Num lower)))
+            when name = x -> bound lower false
+          | _ -> value) fs 0. in
+        let bounded =
+          if advancing#observes_contents
+             || not (SS.exists (fun x -> root_guess x > 1.) advancing#names)
+          then None else
+            (* A self-referential identity is not an assignment, but may
+               exclude its counter from the older free-root heuristic. *)
+            let guesses = SS.fold (fun x acc -> (x, root_guess x) :: acc)
+              (SS.union roots advancing#names) [] in
+            let query = SS.fold (fun string acc -> Expr.Set.add
+              (Expr.BinOp (LVar string, Equal,
+                Lit (Utf16String (Utils.Utf16.of_canonical "A")))) acc)
+              length_strings fs in
+            try_seed (seed_values guesses query)
+        in
+        (* Two adjacent units at a fixed zero index can arise during
+           predicate recovery. Select a code-unit hint from the observed
+           surrogate bounds; every fact remains in the complete SAT query. *)
+        let fixed_pair_index string =
+          Expr.Set.fold (fun assertion found -> match found with
+            | Some _ -> found
+            | None ->
+              let matches left right = match left, right with
+                | Expr.UnOp (IntToNum, UnOp (Utf16Len, LVar observed)),
+                  Expr.BinOp (BinOp (LVar index, FPlus, Lit (Num 1.)),
+                    FPlus, Lit (Num 1.)) when observed = string ->
+                  if Hashtbl.find_opt gamma index = Some Type.NumberType
+                    && (Expr.Set.mem (Expr.BinOp (LVar index, Equal, Expr.num 0.)) fs
+                        || Expr.Set.mem (Expr.BinOp (Expr.num 0., Equal, LVar index)) fs)
+                  then Some index else None
+                | _ -> None in
+              match assertion with
+              | Expr.BinOp (left, (Equal | ValueEqual), right) ->
+                  (match matches left right with Some _ as index -> index
+                   | None -> matches right left)
+              | _ -> None) fs None
+        in
+        let fixed_pair_strings = SS.filter (fun string ->
+          Option.is_some (fixed_pair_index string)) length_strings in
+        let unit_hint string position =
+          let code = Expr.BinOp (LVar string, Utf16CodeUnit,
+            UnOp (ToIntOp, position)) in
+          let lower bound = Expr.Set.mem
+            (Expr.BinOp (Expr.num bound, FLessThanEqual, code)) fs in
+          let upper bound = Expr.Set.mem
+            (Expr.BinOp (code, FLessThanEqual, Expr.num bound)) fs in
+          if lower 55296. && upper 56319. then 0xd800
+          else if lower 56320. && upper 57343. then 0xdc00
+          else if lower 55296. || lower 56320. then 0xe000
+          else 0x41
+        in
+        let fixed_pair =
+          if SS.is_empty fixed_pair_strings then None else
+          let query = SS.fold (fun string acc ->
+            let position = Expr.LVar (Option.get (fixed_pair_index string)) in
+            let next = Expr.BinOp (position, FPlus, Expr.num 1.) in
+            let value = Utils.Utf16.of_canonical (Utils.Utf16.of_code_units
+              [unit_hint string position; unit_hint string next]) in
+            Expr.Set.add (Expr.BinOp (LVar string, Equal,
+              Lit (Utf16String value))) acc) fixed_pair_strings fs in
+          let guesses = SS.fold (fun x acc -> (x, 1.) :: acc) roots [] in
+          try_seed (seed_values guesses query)
+        in
+        (* The one-unit shape includes ordinary units and lone high
+           surrogates. Select only a hint; all content/range facts and the
+           original complete-query validation remain authoritative. *)
+        let singleton_index string = List.find_opt (fun index ->
+          let pos = Expr.LVar index in
+          let rounded = Expr.UnOp (IntToNum, UnOp (Utf16Len, LVar string)) in
+          let next = Expr.BinOp (pos, FPlus, Expr.num 1.) in
+          let equal left right = List.exists (fun op ->
+            Expr.Set.mem (Expr.BinOp (left, op, right)) fs
+            || Expr.Set.mem (Expr.BinOp (right, op, left)) fs)
+            [ Equal; ValueEqual ] in
+          Hashtbl.find_opt gamma index = Some Type.NumberType
+          && equal pos (Expr.num 0.) && equal rounded next) (SS.elements vars) in
+        let singleton_strings = SS.filter (fun string ->
+          Option.is_some (singleton_index string)) length_strings in
+        let singleton =
+          if SS.is_empty singleton_strings then None else
+          let query = SS.fold (fun string acc ->
+            let position = Expr.LVar (Option.get (singleton_index string)) in
+            let value = Utils.Utf16.of_canonical (Utils.Utf16.of_code_units
+              [unit_hint string position]) in
+            Expr.Set.add (Expr.BinOp (LVar string, Equal,
+              Lit (Utf16String value))) acc) singleton_strings fs in
+          let guesses = SS.fold (fun x acc -> (x, 1.) :: acc) roots [] in
+          try_seed (seed_values guesses query)
+        in
         let stepped =
+          match bounded with
+          | Some _ as witness -> witness
+          | None ->
+          match (match singleton with Some _ -> singleton
+            | None -> (match fixed_pair with Some _ -> fixed_pair | None -> carried)) with
+          | Some _ as witness -> witness
+          | None ->
           if advancing#observes_contents || SS.is_empty advancing#names then None
           else
             let try_values names base = List.find_map
@@ -2422,6 +2617,43 @@ let with_checked_index_identities fs gamma =
    actually reference a UTF-16 variable are eligible, because pure-numeric
    queries already use the cheaper path and the crash risk is specific to
    mixed UTF-16/Number formulas. *)
+(* A failed Number rank can be a disjunction of up to three negated
+   arithmetic conditions. Prove each branch impossible over original numeric
+   premises. Boolean case splitting and premise omission add no arithmetic law;
+   every branch still needs native UNSAT with unchanged binary64 semantics. *)
+let number_rank_cases fs gamma =
+  let rec number = function
+    | Expr.Lit (Num _) -> true
+    | LVar x -> Hashtbl.find_opt gamma x = Some Type.NumberType
+    | BinOp (a, (FPlus | FMinus), b) -> number a && number b
+    | _ -> false in
+  let atom = function
+    | Expr.UnOp (IsInt, e) -> number e
+    | BinOp (a, (Equal | ValueEqual | FLessThan | FLessThanEqual), b) ->
+        number a && number b
+    | _ -> false in
+  let rec difference = function
+    | Expr.BinOp (_, FMinus, _) -> true
+    | BinOp (a, _, b) -> difference a || difference b
+    | UnOp (_, e) -> difference e
+    | _ -> false in
+  let rec alternatives = function
+    | Expr.BinOp (a, Or, b) ->
+        (match alternatives a, alternatives b with
+         | Some a, Some b when List.length a + List.length b <= 3 -> Some (a @ b)
+         | _ -> None)
+    | (UnOp (Not, e) as failed) when atom e && difference e -> Some [ failed ]
+    | _ -> None in
+  let premises = Expr.Set.filter (function
+    | Expr.UnOp (Not, e) -> atom e
+    | e -> atom e) fs in
+  if Expr.Set.is_empty premises then None else
+  List.find_map (fun e -> match alternatives e with
+    | Some cases when List.length cases >= 2
+        && Expr.Set.cardinal premises + 1 < Expr.Set.cardinal fs ->
+        Some (List.map (fun failed -> Expr.Set.add failed premises) cases)
+    | _ -> None) (Expr.Set.elements fs)
+
 let numeric_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
   if not !Config.Verification.total then false
   else
@@ -2435,7 +2667,12 @@ let numeric_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
             (Expr.lvars e))
         fs
     in
-    if not has_utf16_ref then false
+    let rank_impossible = has_utf16_ref &&
+      (match number_rank_cases fs gamma with
+       | Some cases -> List.for_all (fun branch -> proves_unsat branch gamma) cases
+       | None -> false) in
+    if rank_impossible then true
+    else if not has_utf16_ref then false
     else
       (* A conservative recursive numeric-term recognizer over the original
          gamma: a term is numeric iff it is a numeric literal, a variable of
@@ -2624,6 +2861,54 @@ let original_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
             expressions
       | _ -> None
     in
+    (* A list-prefix restoration check may retain a concrete list equal to
+       prefix ++ suffix while asking whether take(list, length-list - suffix)
+       ++ suffix differs. Submit only that original equality and failed goal;
+       native UNSAT proves the larger conjunction. No list law is assumed. *)
+    let list_prefix = function
+      | (Expr.UnOp (Not, BinOp ((EList items as values),
+          (Equal | ValueEqual), NOp (LstCat,
+            [ LstSub (whole, Lit (Int zero), length); (LVar tail as suffix) ])))
+          as failed)
+        when Z.equal zero Z.zero
+          && Hashtbl.find_opt gamma tail = Some Type.ListType ->
+          let expected = Expr.BinOp
+            (Expr.Lit (Int (Z.of_int (List.length items))), IPlus,
+             BinOp (Lit (Int Z.minus_one), ITimes, UnOp (LstLen, suffix))) in
+          if not (Expr.equal length expected) then None else
+          List.find_map (function
+            | (Expr.BinOp (left, (Equal | ValueEqual), right) as link)
+              when (Expr.equal left values && Expr.equal right whole)
+                || (Expr.equal right values && Expr.equal left whole) ->
+                core [ failed; link ]
+            | _ -> None) expressions
+      | _ -> None
+    in
+    (* The inverse prefix check asks whether the concatenated prefix itself
+       differs from take(prefix ++ suffix, known-length - suffix-length).
+       Only the original decomposition and failed goal are submitted. *)
+    let list_prefix_only = function
+      | (Expr.UnOp (Not, BinOp ((NOp (LstCat, _) as prefix),
+          (Equal | ValueEqual), LstSub ((NOp (LstCat, parts) as whole),
+            Lit (Int zero), length))) as failed)
+        when Z.equal zero Z.zero ->
+          (match List.rev parts with
+           | (LVar tail as suffix) :: before
+             when Hashtbl.find_opt gamma tail = Some Type.ListType
+               && Expr.equal prefix (Expr.NOp (LstCat, List.rev before)) ->
+               List.find_map (function
+                 | (Expr.BinOp ((EList items), (Equal | ValueEqual), right) as link)
+                   when Expr.equal right whole ->
+                     let expected = Expr.BinOp
+                       (Expr.Lit (Int (Z.of_int (List.length items))), IPlus,
+                        BinOp (Lit (Int Z.minus_one), ITimes,
+                          UnOp (LstLen, suffix))) in
+                     if Expr.equal length expected then core [ failed; link ]
+                     else None
+                 | _ -> None) expressions
+           | _ -> None)
+      | _ -> None
+    in
     let try_projection () =
       match List.find_map length_projection expressions with
       | None -> false
@@ -2632,7 +2917,7 @@ let original_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
     in
     try_shape finite_add || try_shape code_upper || try_shape length_index
     || try_shape mask_lower || try_shape mask_upper || try_shape mask_complement
-    || try_projection ()
+    || try_shape list_prefix || try_shape list_prefix_only || try_projection ()
 
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   let key = formula_key fs gamma in

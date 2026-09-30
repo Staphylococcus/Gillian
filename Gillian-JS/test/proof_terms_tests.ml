@@ -657,7 +657,7 @@ let nounfold_demand_selection () =
                (PState.SMatcher.unfold_with_vals ~auto_level state [ x ])))
         [ `Low; `High ])
 
-let nounfold_eager_resources_and_outputs () =
+let nounfold_deferred_resources_and_outputs () =
   with_unfolding (fun () ->
       let x = Expr.LVar "#choice_x" in
       List.iter
@@ -669,18 +669,31 @@ let nounfold_eager_resources_and_outputs () =
             PState.assume ~unfold:true state (bin ILessThanEqual (Expr.int 0) x)
           in
           Alcotest.(check int)
-            "resource/output predicates retain eager alternatives" 2
+            "branch defers opaque resources and outputs" 1
             (List.length outcomes);
+          let after = List.hd outcomes in
+          Alcotest.(check bool) "deferred predicate is still owned" true
+            (List.mem ("SelectionChoice", [x])
+               (Engine.Preds.to_list (PState.get_preds after)));
+          Alcotest.(check bool) "branch cannot invent an output" false
+            (PState.assert_a after [bin Equal x (Expr.int 0)]);
+          let demanded = Option.get
+            (PState.SMatcher.unfold_with_vals ~auto_level:`High after [x]) in
+          Alcotest.(check int) "demand still exposes both alternatives" 2
+            (List.length demanded);
+          let explicit = PState.SMatcher.unfold state "SelectionChoice" [x] in
+          Alcotest.(check int) "explicit unfold still exposes both alternatives" 2
+            (List.length explicit);
           List.iter
             (fun n ->
-              Alcotest.(check bool)
-                "both output values remain represented" true
-                (List.exists
-                   (fun after ->
-                     PState.assert_a after [ bin Equal x (Expr.int n) ])
-                   outcomes))
-            [ 0; 1 ])
-        [ (false, false); (true, true); (false, true) ])
+              Alcotest.(check bool) "demand preserves every value" true
+                (List.exists (fun (_, st) -> PState.assert_a st
+                  [bin Equal x (Expr.int n)]) demanded);
+              Alcotest.(check bool) "explicit unfold preserves every value" true
+                (List.exists (function Ok (_, st) -> PState.assert_a st
+                  [bin Equal x (Expr.int n)] | Error _ -> false) explicit))
+            [0;1])
+        [(false,false);(true,true);(false,true)])
 
 let () =
   Alcotest.run "Proof terms"
@@ -737,6 +750,6 @@ let () =
           Alcotest.test_case "nounfold demand selection" `Quick
             (with_total nounfold_demand_selection);
           Alcotest.test_case "nounfold resource and output selection" `Quick
-            (with_total nounfold_eager_resources_and_outputs);
+            (with_total nounfold_deferred_resources_and_outputs);
         ] );
     ]

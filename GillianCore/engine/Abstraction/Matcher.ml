@@ -507,14 +507,12 @@ module Make (State : SState.S) :
 
     let wrap_strategy f (name, args) =
       let pred = Predicate_selection_strategies.get_pred_def ~pred_defs name in
-      (* Defer fully specified pure relations until they are demanded. Heap
-         predicates and predicates with outputs retain their existing eager
-         behavior; their unfolding can expose resources or output values. *)
-      let defer_relation =
-        auto_level = `Low && pred.pred_nounfold && pred.pred_pure
-        && pred.ins_number = pred.pred_num_params
-      in
-      if pred.pred_abstract || defer_relation then 0 else f (name, args)
+      (* Branch assumptions must not eagerly consume opaque predicates. In
+         particular, a loop condition can mention a spatial segment's bounds
+         without needing its cells. Explicit unfolds and High resource recovery
+         still expose those cells and outputs when they are actually demanded. *)
+      let defer_predicate = auto_level = `Low && pred.pred_nounfold in
+      if pred.pred_abstract || defer_predicate then 0 else f (name, args)
     in
 
     let apply_strategies (strategies : (string * Expr.t list -> int) list) :

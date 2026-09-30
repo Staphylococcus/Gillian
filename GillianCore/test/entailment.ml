@@ -2793,6 +2793,1664 @@ let independent_array_counters () =
   Gamma.update gamma "#lvar_147" Type.ObjectType;
   check_array_counter_witness ~fixed:[("#targetIndex", 0.)] false "independent" facts gamma
 
+let carried_counter_witness () =
+  (* Complete captured evidence-loop feasibility query, including the original
+     aliases, numeric constraints and UTF16 facts. The model guess is optional. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == (#lvar_518 + 1.))";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 <= (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  (* The dump prints both EList [] and literal LList [] as {{ }}. Rebuild
+     this node as EList [], matching the captured native seq.empty encoding. *)
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_519" Type.NumberType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_518" Type.NumberType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before_facts = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "optional carried-counter seed has a native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+      (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "AA")))) facts in
+    let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+      (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+      [ ("#lvar_518", 0.); ("#lvar_517", 1.); ("#lvar_480", 1.);
+        ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.);
+        ("#evidenceLen", 1.); ("#lvar_516", 1.); ("#lvar_489", 2.) ] in
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "native witness includes every captured assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "SAT seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "CARRIED_COUNTER_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "original facts unchanged" true
+    (before_facts = Expr.Set.elements facts);
+  Alcotest.(check bool) "original gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let impossible = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#evidenceLen") (Expr.num 0.)) facts in
+  Alcotest.(check bool) "contradictory complete query has no witness" true
+    (Option.is_none (Smt.check_sat impossible g))
+
+let singleton_surrogate_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(! ((#lvar_517 + 1.) < (as_num (u16-len #confidence))))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_517)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(55296. <= u16-code(#confidence, (num_to_int #lvar_517)))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == 0.)";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 == 0.)";
+    "(#lvar_517 < (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((as_num (u16-len #confidence)) == (#lvar_517 + 1.))";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "(u16-code(#confidence, (num_to_int #lvar_517)) <= 56319.)";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical
+    (Gillian.Utils.Utf16.of_code_units [0xd800]) in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.);
+      ("#lvar_516", 0.); ("#lvar_517", 0.); ("#evidenceLen", 1.);
+      ("#lvar_489", 1.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete singleton-surrogate query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "singleton native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "singleton seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "SINGLETON_SURROGATE_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "singleton facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "singleton gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "A")))) seed in
+  Alcotest.(check bool) "ASCII witness cannot satisfy high-surrogate query" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+let fixed_pair_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_517)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == 0.)";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 == 0.)";
+    "(#lvar_517 < (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((as_num (u16-len #confidence)) == ((#lvar_517 + 1.) + 1.))";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "((#lvar_517 + 1.) < (as_num (u16-len #confidence)))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical "AA" in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.);
+      ("#lvar_516", 0.); ("#lvar_517", 0.); ("#evidenceLen", 1.);
+      ("#lvar_489", 1.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete fixed-pair query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    (* Multiple search shapes may submit the same complete witness. Require
+       its actual native submission; duplicate submissions add no proof. *)
+    Alcotest.(check bool) "fixed pair native query retains every original assertion" true
+      (List.length observed >= 1);
+    (* Query counts depend on cache hits and overlapping witness shapes.
+       Check the actual required fallback was not submitted, rather than
+       treating a count as a proof-phase signal. *)
+    let original_prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) facts in
+    let submitted_original = queries () |> List.exists (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix:original_prefix text) in
+    Alcotest.(check bool) "fixed pair seed returns before required fallback" false
+      submitted_original;
+    Printf.printf "FIXED_PAIR_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "fixed pair facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "fixed pair gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "A")))) seed in
+  Alcotest.(check bool) "single-unit witness cannot satisfy two-unit query" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+let paired_surrogate_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_517)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(55296. <= u16-code(#confidence, (num_to_int #lvar_517)))";
+    "(56320. <= u16-code(#confidence, (num_to_int (#lvar_517 + 1.))))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == 0.)";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 == 0.)";
+    "(#lvar_517 < (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((as_num (u16-len #confidence)) == ((#lvar_517 + 1.) + 1.))";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "(u16-code(#confidence, (num_to_int #lvar_517)) <= 56319.)";
+    "(u16-code(#confidence, (num_to_int (#lvar_517 + 1.))) <= 57343.)";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "((#lvar_517 + 1.) < (as_num (u16-len #confidence)))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical (Gillian.Utils.Utf16.of_code_units [0xd800; 0xdc00]) in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.);
+      ("#lvar_516", 0.); ("#lvar_517", 0.); ("#evidenceLen", 1.);
+      ("#lvar_489", 1.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete paired-surrogate query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "paired surrogate native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "paired surrogate seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "PAIRED_SURROGATE_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "paired surrogate facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "paired surrogate gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "AA")))) seed in
+  Alcotest.(check bool) "ASCII pair cannot satisfy surrogate bounds" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+
+let ordinary_singleton_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_517)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == 0.)";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 == 0.)";
+    "(#lvar_517 < (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((as_num (u16-len #confidence)) == (#lvar_517 + 1.))";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "((u16-code(#confidence, (num_to_int #lvar_517)) < 55296.) or (56319. < u16-code(#confidence, (num_to_int #lvar_517))))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical "A" in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.);
+      ("#lvar_516", 0.); ("#lvar_517", 0.); ("#evidenceLen", 1.);
+      ("#lvar_489", 1.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete ordinary-singleton query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "ordinary singleton native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "ordinary singleton seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "ORDINARY_SINGLETON_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "ordinary singleton facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "ordinary singleton gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical (Gillian.Utils.Utf16.of_code_units [0xd800]))))) seed in
+  Alcotest.(check bool) "high surrogate cannot satisfy ordinary-unit query" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+
+let carried_bounds_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #lvar_518)";
+    "(is_int #lvar_519)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_518)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == (#lvar_518 + 1.))";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 <= (as_num (u16-len #confidence)))";
+    "(#lvar_518 == (#lvar_520 + 1.))";
+    "(#lvar_518 <= #lvar_519)";
+    "(#lvar_519 <= (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_519" Type.NumberType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_520" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#lvar_521" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_518" Type.NumberType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical "AAA" in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.); ("#lvar_520", 0.); ("#lvar_518", 1.); ("#lvar_519", 1.); ("#lvar_516", 2.); ("#lvar_517", 2.); ("#evidenceLen", 1.); ("#lvar_489", 3.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete carried-bounds query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "carried bounds native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "carried bounds seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "CARRIED_BOUNDS_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "carried bounds facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "carried bounds gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "AA")))) seed in
+  Alcotest.(check bool) "short string cannot satisfy carried count" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+
+let fixed_chain_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #lvar_518)";
+    "(is_int #lvar_519)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_518)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == (#lvar_518 + 1.))";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 <= (as_num (u16-len #confidence)))";
+    "(#lvar_518 == 0.)";
+    "(#lvar_518 <= #lvar_519)";
+    "(#lvar_519 == 0.)";
+    "(#lvar_519 <= (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_519" Type.NumberType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_518" Type.NumberType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical "AA" in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.); ("#lvar_518", 0.); ("#lvar_519", 0.); ("#lvar_516", 1.); ("#lvar_517", 1.); ("#evidenceLen", 1.); ("#lvar_489", 2.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete fixed-chain query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "fixed chain native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "fixed chain seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "FIXED_CHAIN_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "fixed chain facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "fixed chain gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "A")))) seed in
+  Alcotest.(check bool) "short string cannot satisfy fixed count" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+
+let bounded_counter_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #targetLen)";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(is_int (#evidenceIndex - 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #evidenceBefore))";
+    "(0i i<= (l-len #lvar_744))";
+    "(0i i<= (l-len #lvar_765))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. < #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(0. <= (#evidenceIndex - 1.))";
+    "(1. < #evidenceIndex)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_748)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_749)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_751)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_752)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((l-len #evidenceBefore) == (l-len #lvar_744))";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#evidenceIndex - 1.) < 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#evidenceIndex - 1.) + 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+    "(l+ (#evidenceBefore, {{ {{ #loc_193, #loc_192 }} }}) == l+ ({{ {{ #loc_223,\n                                                             #loc_222 }} }},\n                                                             #lvar_744))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let locations = object
+    inherit [_] Visitors.endo as super
+    method! visit_expr () e = match e with
+      | Expr.LVar name when String.starts_with ~prefix:"#loc_" name -> Expr.ALoc name
+      | _ -> super#visit_expr () e
+  end in
+  let facts = Expr.Set.fold (fun e acc -> Expr.Set.add
+    (locations#visit_expr () e) acc) facts Expr.Set.empty in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_763" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_765" Type.ListType;
+  Gamma.update gamma "#lvar_753" Type.ObjectType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_754" Type.ObjectType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#evidenceBefore" Type.ListType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_764" Type.ObjectType;
+  Gamma.update gamma "#lvar_744" Type.ListType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical "A" in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 2.); ("#failingLen", 0.); ("#targetLen", 0.); ("#evidenceLen", 3.); ("#lvar_489", 1.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete bounded-counter query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "bounded counter native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "bounded counter seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "BOUNDED_COUNTER_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "bounded counter facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "bounded counter gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin ValueEqual (Expr.LVar "#evidenceIndex")
+    (Expr.num 1.)) seed in
+  Alcotest.(check bool) "one cannot satisfy the strict lower counter bound" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+
+let rank_case_split () =
+  let facts = parse_gil_set [
+    "(! (56319. < u16-code(#s, (num_to_int #lvar_434))))";
+    "(! (#len v== -0.))";
+    "(! (#lvar_434 v== -0.))";
+    "(! (#lvar_435 == none))";
+    "(! ((num_to_int #lvar_434) < 0.))";
+    "(! ((num_to_int (#lvar_434 + 1.)) < 0.))";
+    "(! ((as_num (u16-len #s)) <= (num_to_int #lvar_434)))";
+    "(! ((as_num (u16-len #s)) <= (num_to_int (#lvar_434 + 1.))))";
+    "(! (u16-code(#s, (num_to_int #lvar_434)) < 55296.))";
+    "(is_int #len)";
+    "(is_int #lvar_433)";
+    "(is_int #lvar_434)";
+    "(is_int #next_pos)";
+    "(is_int (#lvar_433 + 1.))";
+    "(0. <= #lvar_433)";
+    "(0. <= (#lvar_433 + 1.))";
+    "(#len v== (as_num (u16-len #s)))";
+    "(#len == #len)";
+    "(#len == (as_num (u16-len #s)))";
+    "(#len <= 9007199254740991.)";
+    "(#lvar_432 v== (9007199254740991. - #lvar_434))";
+    "(#lvar_433 <= #lvar_434)";
+    "(#lvar_434 == #lvar_434)";
+    "(#lvar_434 < #len)";
+    "(#lvar_js_13 v== #lvar_js_21)";
+    "(#lvar_js_13 v== #lvar_js_25)";
+    "(#lvar_js_14 v== #lvar_js_22)";
+    "(#lvar_js_14 v== #lvar_js_26)";
+    "(#lvar_js_15 v== #lvar_js_23)";
+    "(#lvar_js_15 v== #lvar_js_27)";
+    "(#lvar_js_21 v== #lvar_js_13)";
+    "(#lvar_js_22 v== #lvar_js_14)";
+    "(#lvar_js_23 v== #lvar_js_15)";
+    "(#lvar_js_25 v== #lvar_js_13)";
+    "(#lvar_js_26 v== #lvar_js_14)";
+    "(#lvar_js_27 v== #lvar_js_15)";
+    "(#next_pos v== ((#lvar_434 + 1.) + 1.))";
+    "((u16-len #s) i<= 9007199254740991i)";
+    "((#lvar_433 + 1.) <= #next_pos)";
+    "((#lvar_434 + 1.) == (#lvar_434 + 1.))";
+    "((#lvar_434 + 1.) < #len)";
+    "(u16-code(#s, (num_to_int #lvar_434)) == u16-code(#s, (num_to_int #lvar_434)))";
+    "(((! (is_int (9007199254740991. - #next_pos))) or (! (0. <= (9007199254740991. - #next_pos)))) or (! ((9007199254740991. - #next_pos) < #lvar_432)))";
+    "(((num_to_int32 u16-code(#s, (num_to_int (#lvar_434 + 1.)))) &f 64512.) == 56320.)";
+  ] in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#s" Type.Utf16Type;
+  Gamma.update gamma "#len" Type.NumberType;
+  Gamma.update gamma "#lvar_433" Type.NumberType;
+  Gamma.update gamma "#lvar_434" Type.NumberType;
+  Gamma.update gamma "#lvar_432" Type.NumberType;
+  Gamma.update gamma "#next_pos" Type.NumberType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_types = types () in
+  let premises = parse_gil_set [
+    "(! (#len v== -0.))";
+    "(! (#lvar_434 v== -0.))";
+    "(is_int #len)";
+    "(is_int #lvar_433)";
+    "(is_int #lvar_434)";
+    "(is_int #next_pos)";
+    "(is_int (#lvar_433 + 1.))";
+    "(0. <= #lvar_433)";
+    "(0. <= (#lvar_433 + 1.))";
+    "(#len == #len)";
+    "(#len <= 9007199254740991.)";
+    "(#lvar_432 v== (9007199254740991. - #lvar_434))";
+    "(#lvar_433 <= #lvar_434)";
+    "(#lvar_434 == #lvar_434)";
+    "(#lvar_434 < #len)";
+    "(#next_pos v== ((#lvar_434 + 1.) + 1.))";
+    "((#lvar_433 + 1.) <= #next_pos)";
+    "((#lvar_434 + 1.) == (#lvar_434 + 1.))";
+    "((#lvar_434 + 1.) < #len)";
+  ] in
+  let failed = [
+    Expr.Set.choose (parse_gil_set [ "(! (is_int (9007199254740991. - #next_pos)))" ]);
+    Expr.Set.choose (parse_gil_set [ "(! (0. <= (9007199254740991. - #next_pos)))" ]);
+    Expr.Set.choose (parse_gil_set [ "(! ((9007199254740991. - #next_pos) < #lvar_432))" ]);
+  ] in
+  let cases = List.map (fun failed -> Expr.Set.add failed premises) failed in
+  Alcotest.(check bool) "numeric premises belong to original query" true
+    (Expr.Set.subset premises facts);
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "captured rank failure is impossible" true
+      (Option.is_none (Smt.check_sat facts g));
+    List.iteri (fun index branch ->
+      let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) branch in
+      let observed = queries () |> List.filter (fun name ->
+        if List.mem name before_queries then false else
+        let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+        let content = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        String.starts_with ~prefix content) in
+      Alcotest.(check bool) "every rank branch has real native proof" true
+        (observed <> []);
+      Printf.printf "RANK_BRANCH_NATIVE_QUERY=%d:%s\n%!" index (List.hd observed)) cases);
+  Alcotest.(check bool) "rank facts unchanged" true (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "rank gamma unchanged" true (before_types = types ());
+  let bound = bin FLessThanEqual (Expr.LVar "#len") (Expr.num 9007199254740991.) in
+  Alcotest.(check bool) "captured maximum bound is original" true
+    (Expr.Set.mem bound facts);
+  let weak_cases = List.map (Expr.Set.remove bound) cases in
+  Alcotest.(check bool) "missing maximum cannot prove all rank cases" false
+    (List.for_all (fun branch -> Smt.proves_unsat branch g) weak_cases);
+  let descent = List.nth weak_cases 2 in
+  Alcotest.(check bool) "missing maximum has native binary64 counterexample" true
+    (Option.is_some (Smt.exec_sat descent g))
+
+let list_prefix_restore () =
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (0. < #index))";
+    "(! (#evidenceIndex < #evidenceLen))";
+    "(! (#index < #failingLen))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(! ({{ #lvar_1023, #lvar_1109,\n   #lvar_1211 }} == l+ (l-sub(l+ (#targetBefore, {{ #targetPrevious,\n                                  #targetItem }}, #targetTail), 0i, (3i i+ (-1i i* (l-len #targetTail)))),\n                        #targetTail)))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_1348)";
+    "(is_int #lvar_489)";
+    "(is_int (4294967295. - (#lvar_1348 + 1.)))";
+    "(is_int (#lvar_1348 + 1.))";
+    "(is_int (#lvar_1348 - 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #targetBefore))";
+    "(0i i<= (l-len #targetTail))";
+    "(0. == #failingLen)";
+    "(0. < #lvar_1348)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #index)";
+    "(0. <= #lvar_489)";
+    "(0. <= (4294967295. - (#lvar_1348 + 1.)))";
+    "(0. <= (#lvar_1348 + 1.))";
+    "(0. <= (#lvar_1348 - 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex == #evidenceLen)";
+    "(#evidenceIndex <= #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == 0.)";
+    "(#index == #failingLen)";
+    "(#index == #index)";
+    "(#index <= #failingLen)";
+    "(#lvar_1024 v== {{ #lvar_1109,\n#lvar_1211 }})";
+    "(#lvar_1110 v== {{ #lvar_1211 }})";
+    "(#lvar_1324 v== (4294967295. - #index))";
+    "(#lvar_1339 v== (4294967295. - #lvar_1348))";
+    "(#lvar_1340 v== #targetItem)";
+    "(#lvar_1341 v== #targetTail)";
+    "(#lvar_1348 == #lvar_1348)";
+    "(#lvar_1348 < 3.)";
+    "(#lvar_142 v== #lvar_1010)";
+    "(#lvar_142 v== #lvar_1327)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_143 v== #lvar_1011)";
+    "(#lvar_143 v== #lvar_1328)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_145 v== #lvar_1013)";
+    "(#lvar_145 v== #lvar_1330)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_146 v== #lvar_1014)";
+    "(#lvar_146 v== #lvar_1331)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_17 v== #lvar_js_45)";
+    "(#lvar_js_17 v== #lvar_js_53)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_18 v== #lvar_js_46)";
+    "(#lvar_js_18 v== #lvar_js_54)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#lvar_js_45 v== #lvar_js_17)";
+    "(#lvar_js_46 v== #lvar_js_18)";
+    "(#lvar_js_53 v== #lvar_js_17)";
+    "(#lvar_js_54 v== #lvar_js_18)";
+    "((u16-len #confidence) == 1i)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #lvar_1023) i<= 9007199254740991i)";
+    "((u16-len #lvar_1109) i<= 9007199254740991i)";
+    "((u16-len #lvar_1211) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((u16-len #targetItem) i<= 9007199254740991i)";
+    "((u16-len #targetPrevious) i<= 9007199254740991i)";
+    "((4294967295. - (#lvar_1348 + 1.)) < (4294967295. - #lvar_1348))";
+    "((#lvar_1348 + 1.) <= 4294967295.)";
+    "((#lvar_1348 - 1.) < 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#lvar_1348 + 1.) - 1.) == #lvar_1348)";
+    "(((#lvar_1348 - 1.) + 1.) == #lvar_1348)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+    "({{ #lvar_1023, #lvar_1109,\n#lvar_1211 }} == l+ (#targetBefore, {{ #targetPrevious, #targetItem }},\n                     #targetTail))";
+  ] |> Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_1212") (Expr.EList [])) in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#lvar_1339" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_1109" Type.Utf16Type;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_1023" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_1324" Type.NumberType;
+  Gamma.update gamma "#lvar_1348" Type.NumberType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_1211" Type.Utf16Type;
+  Gamma.update gamma "#targetItem" Type.Utf16Type;
+  Gamma.update gamma "#targetBefore" Type.ListType;
+  Gamma.update gamma "#targetTail" Type.ListType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#targetPrevious" Type.Utf16Type;
+  let g = Gamma.as_hashtbl gamma in
+  let failed = Expr.Set.choose (parse_gil_set [ "(! ({{ #lvar_1023, #lvar_1109,\n   #lvar_1211 }} == l+ (l-sub(l+ (#targetBefore, {{ #targetPrevious,\n                                  #targetItem }}, #targetTail), 0i, (3i i+ (-1i i* (l-len #targetTail)))),\n                        #targetTail)))" ]) in
+  let link = Expr.Set.choose (parse_gil_set [ "({{ #lvar_1023, #lvar_1109,\n#lvar_1211 }} == l+ (#targetBefore, {{ #targetPrevious, #targetItem }},\n                     #targetTail))" ]) in
+  let selected = Expr.Set.of_list [ failed; link ] in
+  Alcotest.(check bool) "prefix core consists only of original assertions" true
+    (Expr.Set.subset selected facts);
+  let before = Expr.Set.elements facts in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_types = types () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "captured failed prefix restoration is impossible" true
+      (Option.is_none (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) selected in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let content = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix content) in
+    Alcotest.(check bool) "prefix core has real native proof" true (observed <> []);
+    Printf.printf "LIST_PREFIX_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "prefix facts unchanged" true (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "prefix gamma unchanged" true (before_types = types ());
+  Alcotest.(check bool) "without decomposition permits native counterexample" true
+    (Option.is_some (Smt.exec_sat (Expr.Set.singleton failed) g));
+  Alcotest.(check bool) "without failed goal permits native counterexample" true
+    (Option.is_some (Smt.exec_sat (Expr.Set.singleton link) g))
+
+let list_prefix_only_restore () =
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (0. < #index))";
+    "(! (#evidenceIndex < #evidenceLen))";
+    "(! (#index < #failingLen))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(! (l+ (#targetBefore, {{ #targetPrevious, #targetItem }}) == l-sub(l+ \n   (#targetBefore, {{ #targetPrevious, #targetItem }}, #targetTail), 0i, (3i i+ (-1i i* (l-len #targetTail))))))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_1348)";
+    "(is_int #lvar_489)";
+    "(is_int (4294967295. - (#lvar_1348 + 1.)))";
+    "(is_int (#lvar_1348 + 1.))";
+    "(is_int (#lvar_1348 - 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #targetBefore))";
+    "(0i i<= (l-len #targetTail))";
+    "(0. == #failingLen)";
+    "(0. < #lvar_1348)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #index)";
+    "(0. <= #lvar_489)";
+    "(0. <= (4294967295. - (#lvar_1348 + 1.)))";
+    "(0. <= (#lvar_1348 + 1.))";
+    "(0. <= (#lvar_1348 - 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex == #evidenceLen)";
+    "(#evidenceIndex <= #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == 0.)";
+    "(#index == #failingLen)";
+    "(#index == #index)";
+    "(#index <= #failingLen)";
+    "(#lvar_1024 v== {{ #lvar_1109,\n#lvar_1211 }})";
+    "(#lvar_1110 v== {{ #lvar_1211 }})";
+    "(#lvar_1324 v== (4294967295. - #index))";
+    "(#lvar_1339 v== (4294967295. - #lvar_1348))";
+    "(#lvar_1340 v== #targetItem)";
+    "(#lvar_1341 v== #targetTail)";
+    "(#lvar_1348 == #lvar_1348)";
+    "(#lvar_1348 < 3.)";
+    "(#lvar_142 v== #lvar_1010)";
+    "(#lvar_142 v== #lvar_1327)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_143 v== #lvar_1011)";
+    "(#lvar_143 v== #lvar_1328)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_145 v== #lvar_1013)";
+    "(#lvar_145 v== #lvar_1330)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_146 v== #lvar_1014)";
+    "(#lvar_146 v== #lvar_1331)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_17 v== #lvar_js_45)";
+    "(#lvar_js_17 v== #lvar_js_53)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_18 v== #lvar_js_46)";
+    "(#lvar_js_18 v== #lvar_js_54)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#lvar_js_45 v== #lvar_js_17)";
+    "(#lvar_js_46 v== #lvar_js_18)";
+    "(#lvar_js_53 v== #lvar_js_17)";
+    "(#lvar_js_54 v== #lvar_js_18)";
+    "((u16-len #confidence) == 1i)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #lvar_1023) i<= 9007199254740991i)";
+    "((u16-len #lvar_1109) i<= 9007199254740991i)";
+    "((u16-len #lvar_1211) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((u16-len #targetItem) i<= 9007199254740991i)";
+    "((u16-len #targetPrevious) i<= 9007199254740991i)";
+    "((4294967295. - (#lvar_1348 + 1.)) < (4294967295. - #lvar_1348))";
+    "((#lvar_1348 + 1.) <= 4294967295.)";
+    "((#lvar_1348 - 1.) < 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#lvar_1348 + 1.) - 1.) == #lvar_1348)";
+    "(((#lvar_1348 - 1.) + 1.) == #lvar_1348)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+    "({{ #lvar_1023, #lvar_1109,\n#lvar_1211 }} == l+ (#targetBefore, {{ #targetPrevious, #targetItem }},\n                     #targetTail))";
+  ] |> Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_1212") (Expr.EList [])) in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#lvar_1339" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_1109" Type.Utf16Type;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_1023" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_1324" Type.NumberType;
+  Gamma.update gamma "#lvar_1348" Type.NumberType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_1211" Type.Utf16Type;
+  Gamma.update gamma "#targetItem" Type.Utf16Type;
+  Gamma.update gamma "#targetBefore" Type.ListType;
+  Gamma.update gamma "#targetTail" Type.ListType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#targetPrevious" Type.Utf16Type;
+  let g = Gamma.as_hashtbl gamma in
+  let failed = Expr.Set.choose (parse_gil_set [ "(! (l+ (#targetBefore, {{ #targetPrevious, #targetItem }}) == l-sub(l+ \n   (#targetBefore, {{ #targetPrevious, #targetItem }}, #targetTail), 0i, (3i i+ (-1i i* (l-len #targetTail))))))" ]) in
+  let link = Expr.Set.choose (parse_gil_set [ "({{ #lvar_1023, #lvar_1109,\n#lvar_1211 }} == l+ (#targetBefore, {{ #targetPrevious, #targetItem }},\n                     #targetTail))" ]) in
+  let selected = Expr.Set.of_list [ failed; link ] in
+  Alcotest.(check bool) "prefix core consists only of original assertions" true
+    (Expr.Set.subset selected facts);
+  let before = Expr.Set.elements facts in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_types = types () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "captured failed prefix restoration is impossible" true
+      (Option.is_none (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) selected in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let content = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix content) in
+    Alcotest.(check bool) "prefix core has real native proof" true (observed <> []);
+    Printf.printf "PREFIX_ONLY_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "prefix facts unchanged" true (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "prefix gamma unchanged" true (before_types = types ());
+  Alcotest.(check bool) "without decomposition permits native counterexample" true
+    (Option.is_some (Smt.exec_sat (Expr.Set.singleton failed) g));
+  Alcotest.(check bool) "without failed goal permits native counterexample" true
+    (Option.is_some (Smt.exec_sat (Expr.Set.singleton link) g))
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -2872,4 +4530,26 @@ let tests =
       (with_total array_predecessor_witness);
     Alcotest.test_case "independent array counters retain complete SAT query" `Quick
       (with_total independent_array_counters);
+    Alcotest.test_case "carried counter roots retain complete SAT query" `Quick
+      (with_total carried_counter_witness);
+    Alcotest.test_case "singleton surrogate retains complete SAT query" `Quick
+      (with_total singleton_surrogate_witness);
+    Alcotest.test_case "fixed pair retains complete SAT query" `Quick
+      (with_total fixed_pair_witness);
+    Alcotest.test_case "paired surrogate retains complete SAT query" `Quick
+      (with_total paired_surrogate_witness);
+    Alcotest.test_case "ordinary singleton retains complete SAT query" `Quick
+      (with_total ordinary_singleton_witness);
+    Alcotest.test_case "carried bounds retain complete SAT query" `Quick
+      (with_total carried_bounds_witness);
+    Alcotest.test_case "literal-bound chain retains complete SAT query" `Quick
+      (with_total fixed_chain_witness);
+    Alcotest.test_case "bounded root preserves complete list query" `Quick
+      (with_total bounded_counter_witness);
+    Alcotest.test_case "rank disjunction uses original numeric cases" `Quick
+      (with_total rank_case_split);
+    Alcotest.test_case "original list-prefix restoration core" `Quick
+      (with_total list_prefix_restore);
+    Alcotest.test_case "original inverse list-prefix restoration core" `Quick
+      (with_total list_prefix_only_restore);
   ]
