@@ -2361,6 +2361,99 @@ let utf16_length_focused_dependencies () =
     Alcotest.(check bool) (label ^ " false bound retains counterexample") false
       (entail concrete goal)) cases
 
+(* Native caller rank query337. The printed bound is restored from its
+   captured binary64 bits 433fffffffffffff, not rounded decimal diagnostics. *)
+let simplified_rank_goal () =
+  let module L = Logging in
+  L.Mode.set_mode (Enabled Normal);
+  L.initialize [ L.file_reporter ];
+  Fun.protect ~finally:(fun () ->
+    L.wrap_up (); L.initialize []; L.Mode.set_mode (Enabled Verbose))
+    (fun () ->
+  let facts = parse_gil_set [
+      "(! (56319. < u16-code(#s, (num_to_int #lvar_463))))";
+      "(! (#len v== -0.))";
+      "(! (#lvar_463 v== -0.))";
+      "(! (#lvar_464 == none))";
+      "(! ((num_to_int #lvar_463) < 0.))";
+      "(! ((num_to_int (#lvar_463 + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #lvar_463)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#lvar_463 + 1.))))";
+      "(! (u16-code(#s, (num_to_int #lvar_463)) < 55296.))";
+      "(is_int #len)";
+      "(is_int #lvar_462)";
+      "(is_int #lvar_463)";
+      "(is_int #next_pos)";
+      "(is_int (#lvar_462 + 1.))";
+      "(0. <= #lvar_462)";
+      "(0. <= (#lvar_462 + 1.))";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_461 v== (9007199254740991. - #lvar_463))";
+      "(#lvar_462 <= #lvar_463)";
+      "(#lvar_463 == #lvar_463)";
+      "(#lvar_463 < #len)";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== ((#lvar_463 + 1.) + 1.))";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((#lvar_462 + 1.) <= #next_pos)";
+      "((#lvar_463 + 1.) == (#lvar_463 + 1.))";
+      "((#lvar_463 + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #lvar_463)) == u16-code(#s, (num_to_int #lvar_463)))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#lvar_463 + 1.)))) &f 64512.) == 56320.)";
+  ] in
+  let gamma () =
+    let g = Gamma.init () in
+    Gamma.update g "#s" Type.Utf16Type;
+    List.iter (fun n -> Gamma.update g n Type.NumberType)
+      [ "#len"; "#lvar_461"; "#lvar_462"; "#lvar_463"; "#next_pos" ];
+    g
+  in
+  let rank = bin FMinus (Expr.num 9007199254740991.) (Expr.LVar "#next_pos") in
+  let goals = [ Expr.UnOp (IsInt, rank);
+                bin FLessThanEqual (Expr.num 0.) rank;
+                bin FLessThan rank (Expr.LVar "#lvar_461") ] in
+  let before = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) "captured rank conjunction is proved" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+         (Engine.PFS.of_list (Expr.Set.elements facts)) goals (gamma ()));
+    let fresh = Array.to_list (Sys.readdir "gillian_smt_queries")
+      |> List.filter (fun n -> not (List.mem n before)) in
+    Printf.printf "NORMALIZED_RANK_QUERIES=%d\n%!" (List.length fresh);
+    Alcotest.(check bool) "rank proof used actual native queries" true
+      (List.length fresh > 0));
+  (* Removing the true rank claims cannot let an unrelated false conjunct
+     pass: a concrete numeric state supplies a satisfiable counterexample. *)
+  let concrete = parse_gil_set [
+    "(#lvar_463 v== 0.)"; "(#len v== 2.)";
+    "(#next_pos v== 2.)"; "(#lvar_461 v== 9007199254740991.)" ] in
+  Alcotest.(check bool) "false rank conjunct remains rejected" false
+    (Solver.check_entailment Utils.Containers.SS.empty
+       (Engine.PFS.of_list (Expr.Set.elements concrete))
+       [bin FLessThanEqual (Expr.LVar "#lvar_461") rank] (gamma ()));
+  let ch = open_in_bin "file.log" in
+  let log = Fun.protect ~finally:(fun () -> close_in ch)
+    (fun () -> really_input_string ch (in_channel_length ch)) in
+  Alcotest.(check bool) "rank checks have no SMT unknown" false
+    (List.mem "The solver returned: unknown" (String.split_on_char '\n' log)))
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -2430,4 +2523,6 @@ let tests =
       (with_total utf16_length_alias_contained);
     Alcotest.test_case "UTF16 focused lengths retain numeric dependencies" `Quick
       (with_total utf16_length_focused_dependencies);
+    Alcotest.test_case "simplified rank goal retains numeric pieces" `Quick
+      (with_total simplified_rank_goal);
   ]

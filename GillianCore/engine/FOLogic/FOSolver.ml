@@ -210,8 +210,17 @@ let check_entailment
       in
 
       let formulae = PFS.of_list (right_f :: (left_fs @ [] (* axioms *))) in
-      let _ = Simplifications.simplify_pfs_and_gamma formulae gamma_left in
-
+      let goal_subst, _ =
+        Simplifications.simplify_pfs_and_gamma formulae gamma_left
+      in
+      (* Shortcut selectors must use the goal in the simplified conjunction.
+         This only updates selection metadata: every sufficient query still
+         consists of retained facts and requires native UNSAT; the complete
+         fallback below is unchanged. *)
+      let right_f =
+        SESubst.subst_in_expr goal_subst ~partial:true right_f
+        |> Reduction.reduce_lexpr ~matching ~gamma:gamma_left
+      in
       let formulae = Expr.Set.of_list (PFS.to_list formulae) in
       let focused =
         if !Config.Verification.total && SS.is_empty existentials then
