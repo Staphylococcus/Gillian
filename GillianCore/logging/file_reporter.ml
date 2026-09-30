@@ -12,7 +12,12 @@ let initialize () =
   let () = out_channel := Some (open_out filename) in
   formatter := Some (Format.formatter_of_out_channel (Option.get !out_channel))
 
-let will_log (type_ : string) = List.mem type_ accepted_types
+(* Normal file logs retain diagnostics and phases. Full state/matching traces
+   remain available at verbose level; other reporters keep their own policy. *)
+let will_log (type_ : string) =
+  List.mem type_ accepted_types
+  && (Mode.should_log Verbose
+     || List.mem type_ Logging_constants.Content_type.[ debug; phase ])
 
 let log (report : Report.t) : unit =
   match !formatter with

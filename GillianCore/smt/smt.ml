@@ -2041,7 +2041,8 @@ let exec_sat'
   let () = List.iter cmd encoded_assertions in
   L.verbose (fun fmt -> fmt "Reached SMT.");
   let result = check !solver in
-  L.verbose (fun m ->
+  (* Optional unknowns must remain visible without full symbolic-state tracing. *)
+  (if result = Unknown then L.normal else L.verbose) (fun m ->
       let r =
         match result with
         | Sat -> "satisfiable"

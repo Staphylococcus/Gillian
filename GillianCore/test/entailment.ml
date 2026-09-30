@@ -79,40 +79,73 @@ let finite_position () =
      the short-budget run must remain inconclusive
      and the required-query API must still raise its ordinary totality error. *)
   if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then (
-    Alcotest.(check bool)
-      "optional unknown cannot prove UNSAT" false (Smt.proves_unsat fs g);
-    Alcotest.(check bool)
-      "remembered inconclusive precheck still proves nothing" false
-      (Smt.proves_unsat fs g);
+    (* This resource-control invocation runs alone in a fresh test directory.
+       Check both the rejection semantics and visibility without verbose logs. *)
+    let module L = Logging in
+    L.Mode.set_mode (Enabled Normal);
+    L.initialize [ L.file_reporter ];
+    Fun.protect
+      ~finally:(fun () ->
+        L.wrap_up ();
+        L.initialize [];
+        L.Mode.set_mode (Enabled Verbose))
+      (fun () ->
+        L.verbose (fun m -> m "UNKNOWN_CONTROL_VERBOSE_SENTINEL");
+        let trace = L.Loggable.make_string "UNKNOWN_CONTROL_COMMAND_TRACE" in
+        let trace_type = L.Logging_constants.Content_type.cmd in
+        ignore (L.Specific.normal trace trace_type);
+        Alcotest.(check bool)
+          "optional unknown cannot prove UNSAT" false (Smt.proves_unsat fs g);
+        Alcotest.(check bool)
+          "remembered inconclusive precheck still proves nothing" false
+          (Smt.proves_unsat fs g);
 
-    let rejected check =
-      try
-        check ();
-        false
-      with
-      | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError msg) ->
-        msg = "Incomplete totality proof: SMT returned unknown"
-    in
-    Alcotest.(check bool)
-      "required unknown remains an error" true
-      (rejected (fun () -> ignore (Smt.exec_sat fs g)));
-    Hashtbl.add g "#other_s" Type.Utf16Type;
-    Hashtbl.add g "#other_index" Type.NumberType;
-    let seeded_fs =
-      Expr.Set.add
-        (bin Equal (Expr.LVar "#other_s") s)
-        (Expr.Set.add (bin Equal (Expr.LVar "#other_index") index) fs)
-    in
-    Alcotest.(check bool)
-      "seed failure cannot hide required unknown" true
-      (rejected (fun () -> ignore (Smt.is_sat seeded_fs g)));
-    Hashtbl.remove g "#other_s";
-    Hashtbl.remove g "#other_index";
-    Hashtbl.add g "#length" Type.NumberType;
-    let single_pair = Expr.Set.add (bin Equal (Expr.LVar "#length") len) fs in
-    Alcotest.(check bool)
-      "single-pair seed failure cannot hide required unknown" true
-      (rejected (fun () -> ignore (Smt.is_sat single_pair g))))
+        let rejected check =
+          try
+            check ();
+            false
+          with
+          | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError msg) ->
+            msg = "Incomplete totality proof: SMT returned unknown"
+        in
+        Alcotest.(check bool)
+          "required unknown remains an error" true
+          (rejected (fun () -> ignore (Smt.exec_sat fs g)));
+        Hashtbl.add g "#other_s" Type.Utf16Type;
+        Hashtbl.add g "#other_index" Type.NumberType;
+        let seeded_fs =
+          Expr.Set.add
+            (bin Equal (Expr.LVar "#other_s") s)
+            (Expr.Set.add (bin Equal (Expr.LVar "#other_index") index) fs)
+        in
+        Alcotest.(check bool)
+          "seed failure cannot hide required unknown" true
+          (rejected (fun () -> ignore (Smt.is_sat seeded_fs g)));
+        Hashtbl.remove g "#other_s";
+        Hashtbl.remove g "#other_index";
+        Hashtbl.add g "#length" Type.NumberType;
+        let single_pair = Expr.Set.add (bin Equal (Expr.LVar "#length") len) fs in
+        Alcotest.(check bool)
+          "single-pair seed failure cannot hide required unknown" true
+          (rejected (fun () -> ignore (Smt.is_sat single_pair g)));
+        let ch = open_in_bin "file.log" in
+        let log = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        let lines = String.split_on_char '\n' log in
+        Alcotest.(check bool) "unknown remains visible at normal logging" true
+          (List.mem "The solver returned: unknown" lines);
+        Alcotest.(check bool) "verbose tracing really is disabled" false
+          (List.mem "UNKNOWN_CONTROL_VERBOSE_SENTINEL" lines);
+        Alcotest.(check bool) "normal file logging omits command traces" false
+          (List.mem "UNKNOWN_CONTROL_COMMAND_TRACE" lines);
+        L.Mode.set_mode (Enabled Verbose);
+        ignore (L.Specific.normal trace trace_type);
+        let ch = open_in_bin "file.log" in
+        let verbose_log = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        Alcotest.(check bool) "verbose file logging retains command traces" true
+          (List.mem "UNKNOWN_CONTROL_COMMAND_TRACE"
+            (String.split_on_char '\n' verbose_log))))
   else
     (* The optional API may legitimately use its bounded unknown outcome.
        A false precheck is not a proof: require actual UNSAT from the original
