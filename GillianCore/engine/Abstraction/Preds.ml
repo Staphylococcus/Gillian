@@ -158,7 +158,15 @@ let consume_pred
           | _ -> count)
         0 pairs
     in
-    let icount = count_matches inputs in
+    (* One failed input already disqualifies the candidate. Later input
+       equalities cannot restore ownership, and may ask unrelated SMT queries. *)
+    let rec match_inputs count = function
+      | [] -> count
+      | ((_, cv), Some tv) :: rest
+        when Expr.equal cv tv || f_eq cv tv -> match_inputs (count + 1) rest
+      | _ -> count
+    in
+    let icount = match_inputs 0 inputs in
     (* Outputs cannot rescue a candidate with mismatched inputs. Avoid unrelated
        solver queries for its output witnesses; preserve the existing ranking
        among candidates whose complete input footprint does match. *)

@@ -2454,7 +2454,7 @@ let simplified_rank_goal () =
   Alcotest.(check bool) "rank checks have no SMT unknown" false
     (List.mem "The solver returned: unknown" (String.split_on_char '\n' log)))
 
-let check_array_counter_witness zero label facts gamma =
+let check_array_counter_witness ?(fixed = []) zero label facts gamma =
   let g = Gamma.as_hashtbl gamma in
   let queries () = if Sys.file_exists "gillian_smt_queries" then
     Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
@@ -2467,6 +2467,8 @@ let check_array_counter_witness zero label facts gamma =
         (bin ValueEqual (Expr.LVar "#index") (Expr.num (if zero then 0. else 1.)))
         (Expr.Set.add (bin Equal (Expr.UnOp (Utf16Len, Expr.LVar "#confidence"))
           (Expr.int 1)) facts) in
+    let seed = List.fold_left (fun fs (name, value) -> Expr.Set.add
+        (bin ValueEqual (Expr.LVar name) (Expr.num value)) fs) seed fixed in
     let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
       (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
     let fresh = List.filter (fun n -> not (List.mem n before)) (queries ()) in
@@ -2671,6 +2673,126 @@ let array_predecessor_witness () =
   Gamma.update gamma "#lvar_147" Type.ObjectType;
   check_array_counter_witness false "predecessor" facts gamma
 
+let independent_array_counters () =
+  (* Complete target-loop query: the earlier index is positive, target index zero. *)
+  let facts = parse_gil_set [
+    "(! (0. < #targetIndex))";
+    "(! (#index < #failingLen))";
+    "(! (#key == none))";
+    "(! (#lvar_468 < 1.))";
+    "(! (#lvar_477 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_477)";
+    "(is_int #targetIndex)";
+    "(is_int #targetLen)";
+    "(is_int (4294967295. - (#targetIndex + 1.)))";
+    "(is_int (#index - 1.))";
+    "(is_int (#targetIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #before))";
+    "(0i i<= (l-len #targetTail))";
+    "(0. < #index)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_477)";
+    "(0. <= #targetIndex)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#targetIndex + 1.)))";
+    "(0. <= (#index - 1.))";
+    "(0. <= (#targetIndex + 1.))";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == #failingLen)";
+    "(#index == #index)";
+    "(#index <= #failingLen)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_175)";
+    "(#lvar_142 v== #lvar_575)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_176)";
+    "(#lvar_143 v== #lvar_576)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_178)";
+    "(#lvar_145 v== #lvar_578)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_179)";
+    "(#lvar_146 v== #lvar_579)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_175 v== #lvar_142)";
+    "(#lvar_176 v== #lvar_143)";
+    "(#lvar_178 v== #lvar_145)";
+    "(#lvar_179 v== #lvar_146)";
+    "(#lvar_477 == #lvar_477)";
+    "(#lvar_477 <= (as_num (u16-len #confidence)))";
+    "(#lvar_481 v== (4294967295. - #index))";
+    "(#lvar_587 v== (4294967295. - #targetIndex))";
+    "(#lvar_588 v== #targetItem)";
+    "(#lvar_589 v== #targetTail)";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_17 v== #lvar_js_45)";
+    "(#lvar_js_17 v== #lvar_js_53)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_18 v== #lvar_js_46)";
+    "(#lvar_js_18 v== #lvar_js_54)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#lvar_js_45 v== #lvar_js_17)";
+    "(#lvar_js_46 v== #lvar_js_18)";
+    "(#lvar_js_53 v== #lvar_js_17)";
+    "(#lvar_js_54 v== #lvar_js_18)";
+    "(#targetIndex == 0.)";
+    "(#targetIndex == #targetIndex)";
+    "(#targetIndex < #targetLen)";
+    "(#targetLen == #targetLen)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #previous) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((u16-len #targetItem) i<= 9007199254740991i)";
+    "((4294967295. - (#targetIndex + 1.)) < (4294967295. - #targetIndex))";
+    "((#index - 1.) < 4294967295.)";
+    "((#lvar_468 == 0.) or (#lvar_468 == 1.))";
+    "((#targetIndex + 1.) <= 4294967295.)";
+    "(((#index - 1.) + 1.) == #index)";
+    "(((#lvar_468 == 0.) and (#key == undefined)) or ((#lvar_468 == 1.) and (#key == u16\"classification\")))";
+    "(((#lvar_477 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_477) and (0. < (as_num (u16-len #confidence)))))";
+    "(((#targetIndex + 1.) - 1.) == #targetIndex)";
+  ] in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#targetIndex" Type.NumberType;
+  Gamma.update gamma "#lvar_477" Type.NumberType;
+  Gamma.update gamma "#before" Type.ListType;
+  Gamma.update gamma "#lvar_580" Type.ObjectType;
+  Gamma.update gamma "#previous" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_468" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#targetItem" Type.Utf16Type;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#lvar_587" Type.NumberType;
+  Gamma.update gamma "#lvar_581" Type.ObjectType;
+  Gamma.update gamma "#targetTail" Type.ListType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#lvar_481" Type.NumberType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  check_array_counter_witness ~fixed:[("#targetIndex", 0.)] false "independent" facts gamma
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -2748,4 +2870,6 @@ let tests =
       (with_total (array_counter_witness true));
     Alcotest.test_case "array predecessor keeps complete SAT query" `Quick
       (with_total array_predecessor_witness);
+    Alcotest.test_case "independent array counters retain complete SAT query" `Quick
+      (with_total independent_array_counters);
   ]

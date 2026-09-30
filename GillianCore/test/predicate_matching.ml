@@ -86,9 +86,45 @@ let semantic_input_and_output_only () =
        SI.empty eq);
   expect "both exclusive resources were consumed" [] (Preds.to_list predicates)
 
+let reject_remaining_inputs () =
+  let wrong_object = Expr.ALoc "wrong" and wanted_object = Expr.ALoc "wanted" in
+  let wrong_length = Expr.LVar "#unrelated_length" in
+  let length_alias = Expr.LVar "#length_alias" and wanted_length = Expr.int 7 in
+  let output = Expr.LVar "#output" in
+  let wrong = ("Segment", [ wrong_object; wrong_length; output ]) in
+  let right = ("Segment", [ wanted_object; wanted_length; output ]) in
+  let predicates = Preds.init [ wrong; right ] in
+  let unrelated_queries = ref 0 and semantic_queries = ref 0 in
+  let eq left right =
+    if Expr.equal left wrong_length then (
+      incr unrelated_queries;
+      failwith "unrelated length must not be queried")
+    else if Expr.equal left wanted_length && Expr.equal right length_alias then (
+      incr semantic_queries;
+      true)
+    else Expr.equal left right
+  in
+  let args = [ Some wanted_object; Some length_alias; None ] in
+  expect "select the owned object with a semantic length match" (Some right)
+    (Preds.consume_pred ~maintain:false predicates "Segment" args
+       (SI.of_list [ 0; 1 ]) eq);
+  Alcotest.(check int) "no remaining input query after object mismatch" 0
+    !unrelated_queries;
+  Alcotest.(check int) "a later input of a viable candidate is checked" 1
+    !semantic_queries;
+  expect "wrong-object ownership remains" [ wrong ] (Preds.to_list predicates);
+  expect "wrong object cannot supply the requested ownership" None
+    (Preds.consume_pred ~maintain:false predicates "Segment" args
+       (SI.of_list [ 0; 1 ]) eq);
+  Alcotest.(check int) "rejection still avoids unrelated length queries" 0
+    !unrelated_queries;
+  expect "failed consumption preserves ownership" [ wrong ]
+    (Preds.to_list predicates)
+
 let tests =
   List.map (fun (name, test) -> Alcotest.test_case name `Quick test)
     [
+      ("reject remaining inputs", reject_remaining_inputs);
       ("reject inputs before outputs", reject_inputs_before_outputs);
       ("semantic output ranking", semantic_output_ranking);
       ("semantic input and output-only matching", semantic_input_and_output_only);

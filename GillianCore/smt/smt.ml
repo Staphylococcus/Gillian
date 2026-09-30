@@ -2316,14 +2316,32 @@ let seeded_model fs gamma =
         let stepped =
           if advancing#observes_contents || SS.is_empty advancing#names then None
           else
-            List.find_map
+            let try_values names base = List.find_map
               (fun value ->
                 let query = SS.fold
                   (fun x acc -> Expr.Set.add
                     (Expr.BinOp (LVar x, ValueEqual, Lit (Num value))) acc)
-                  advancing#names (with_length 1) in
+                  names base in
                 try_seed query)
-              [ 0.; 1. ]
+              [ 0.; 1. ] in
+            match try_values advancing#names (with_length 1) with
+            | Some _ as witness -> witness
+            | None ->
+                (* Independent loops may need different counter values.
+                   Preserve the existing guesses, then use literal-bound values
+                   in this optional witness, including the literal zero sign.
+                   Original equalities remain; only a validated SAT model wins. *)
+                let fixed, base = Expr.Set.fold
+                  (fun e (names, query) -> match e with
+                   | BinOp (LVar x, (Equal | ValueEqual), Lit (Num value))
+                   | BinOp (Lit (Num value), (Equal | ValueEqual), LVar x)
+                     when SS.mem x advancing#names ->
+                       (SS.add x names, Expr.Set.add
+                         (Expr.BinOp (LVar x, ValueEqual, Lit (Num value))) query)
+                   | _ -> (names, query)) fs (SS.empty, with_length 1) in
+                let remaining = SS.diff advancing#names fixed in
+                if SS.is_empty remaining || SS.equal remaining advancing#names
+                then None else try_values remaining base
         in
         let positioned =
           match stepped with
