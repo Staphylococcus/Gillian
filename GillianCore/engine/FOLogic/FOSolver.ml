@@ -470,6 +470,10 @@ let check_entailment
              focused subset can discard its transitive integrality/bounds. *)
           && (not (Expr.Set.for_all number_variables formulae))
           && (not (Expr.Set.exists observes_contents focused))
+          (* Length/index goals can omit numeric facts connected through an
+             alias, even when the focused query retains the string itself.
+             Use the complete query rather than this optional weakening. *)
+          && (not (Expr.Set.exists observes_utf16_length focused))
           && Smt.proves_unsat focused gamma_tbl
         then None
         else Smt.check_sat formulae (Type_env.as_hashtbl gamma)

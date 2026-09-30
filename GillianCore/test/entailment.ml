@@ -2160,7 +2160,7 @@ let utf16_length_alias_contained () =
           (fun () -> really_input_string ch (in_channel_length ch)) in
         (n,text)) fresh in
       let retained = List.filter (fun (_,text) ->
-        String.starts_with ~prefix:(prefix full) text) contents in
+        String.starts_with ~prefix:(prefix (Expr.Set.add irrelevant full)) text) contents in
       Alcotest.(check int) (label ^ " native query retains length alias") 1
         (List.length retained);
       Alcotest.(check bool) (label ^ " lossy contained query not submitted") false
@@ -2185,6 +2185,148 @@ let utf16_length_alias_contained () =
       length in
     Alcotest.(check bool) (label ^ " stronger index bound rejects") false
       (entail (Expr.Set.union facts actual) stronger)) cases
+
+(* Captured Ucs2ZeroCount definedness obligations: focused queries 30/69/92
+   returned unknown, while complete queries 31/70/93 were UNSAT. *)
+let utf16_length_focused_dependencies () =
+  let cases = [
+    ("direct", 0, parse_gil_set [
+        "(is_int #count)";
+        "(is_int #pos)";
+        "(is_int #zeroPrevious)";
+        "(0. <= #count)";
+        "(0. <= #zeroPrevious)";
+        "(#count == 0.)";
+        "(#count == (#zeroPreviousCount + 1.))";
+        "(#count <= #pos)";
+        "(#len == 0.)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == 0.)";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#pos <= #len)";
+        "(#s == u16\"\")";
+        "(#zeroPrevious == 0.)";
+        "(#zeroPrevious < #pos)";
+        "(#zeroPreviousCount == 0.)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int #zeroPrevious)))";
+      ],
+     parse_gil_set [
+        "(is_int #zeroPrevious)";
+        "(0. <= #zeroPrevious)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#zeroPrevious < #pos)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int #zeroPrevious)))";
+      ]);
+    ("terminal", 0, parse_gil_set [
+        "(! ((#zeroPrevious + 1.) < #len))";
+        "(is_int #count)";
+        "(is_int #pos)";
+        "(is_int #zeroPrevious)";
+        "(0. <= #count)";
+        "(0. <= #zeroPrevious)";
+        "(#count == 0.)";
+        "(#count == (#zeroPreviousCount + 1.))";
+        "(#count <= #pos)";
+        "(#len == 0.)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == 0.)";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#pos <= #len)";
+        "(#s == u16\"\")";
+        "(#zeroPrevious == 0.)";
+        "(#zeroPrevious < #pos)";
+        "(#zeroPreviousCount == 0.)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int #zeroPrevious)))";
+      ],
+     parse_gil_set [
+        "(! ((#zeroPrevious + 1.) < #len))";
+        "(is_int #zeroPrevious)";
+        "(0. <= #zeroPrevious)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#zeroPrevious < #pos)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int #zeroPrevious)))";
+      ]);
+    ("next", 1, parse_gil_set [
+        "(is_int #count)";
+        "(is_int #pos)";
+        "(is_int #zeroPrevious)";
+        "(0. <= #count)";
+        "(0. <= #zeroPrevious)";
+        "(#count == 0.)";
+        "(#count == (#zeroPreviousCount + 1.))";
+        "(#count <= #pos)";
+        "(#len == 0.)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == 0.)";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#pos <= #len)";
+        "(#s == u16\"\")";
+        "(#zeroPrevious == 0.)";
+        "(#zeroPrevious < #pos)";
+        "(#zeroPreviousCount == 0.)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int (#zeroPrevious + 1.))))";
+        "((#zeroPrevious + 1.) < #len)";
+      ],
+     parse_gil_set [
+        "(is_int #zeroPrevious)";
+        "(0. <= #zeroPrevious)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#zeroPrevious < #pos)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int (#zeroPrevious + 1.))))";
+        "((#zeroPrevious + 1.) < #len)";
+      ])
+  ] in
+  List.iter (fun (label, offset, full, lossy) ->
+    let s = Expr.LVar "#s" and p = Expr.LVar "#zeroPrevious" in
+    let length = Expr.UnOp (Utf16Len, s) in
+    let index = if offset = 0 then p else bin FPlus p (Expr.num 1.) in
+    let converted = Expr.UnOp (NumToInt, Expr.UnOp (ToIntOp, index)) in
+    let failed = bin ILessThanEqual length converted in
+    assert (Expr.Set.mem failed full && Expr.Set.subset lossy full);
+    let facts = Expr.Set.remove failed full in
+    let fresh_gamma () =
+      let g = Gamma.init () in
+      Gamma.update g "#s" Type.Utf16Type;
+      List.iter (fun n -> Gamma.update g n Type.NumberType)
+        ["#count"; "#pos"; "#len"; "#zeroPrevious"; "#zeroPreviousCount"];
+      g
+    in
+    let entail fs goal = Solver.check_entailment Utils.Containers.SS.empty
+      (Engine.PFS.of_list (Expr.Set.elements fs)) [goal] (fresh_gamma ()) in
+    let goal = bin ILessThan converted length in
+    let queries () = if Sys.file_exists "gillian_smt_queries" then
+      Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+    let before = queries () and saved = !Config.dump_smt in
+    Config.dump_smt := true;
+    Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+      Alcotest.(check bool) (label ^ " complete contradiction proves goal") true
+        (entail facts goal);
+      let fresh = List.filter (fun n -> not (List.mem n before)) (queries ()) in
+      let lossy_prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) lossy in
+      List.iter (fun n ->
+        let ch = open_in_bin (Filename.concat "gillian_smt_queries" n) in
+        let text = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        Alcotest.(check bool) (label ^ " no lossy focused query") false
+          (String.starts_with ~prefix:lossy_prefix text)) fresh;
+      Printf.printf "UTF16_FOCUSED_LENGTH_QUERIES=%s:%d\n%!" label (List.length fresh));
+    (* A satisfiable state with index equal to length must not prove index <
+       length. Concrete values make this a genuine original-domain witness. *)
+    let concrete = Expr.Set.of_list
+      [ bin ValueEqual p (Expr.num 0.);
+        bin Equal s (original_core_literal (List.init offset (fun _ -> 65))) ] in
+    Alcotest.(check bool) (label ^ " false bound retains counterexample") false
+      (entail concrete goal)) cases
 
 let tests =
   [
@@ -2253,4 +2395,6 @@ let tests =
       (with_total original_length_projection);
     Alcotest.test_case "UTF16 integer lengths retain numeric aliases" `Quick
       (with_total utf16_length_alias_contained);
+    Alcotest.test_case "UTF16 focused lengths retain numeric dependencies" `Quick
+      (with_total utf16_length_focused_dependencies);
   ]
