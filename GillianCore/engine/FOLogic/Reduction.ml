@@ -2294,7 +2294,7 @@ and reduce_lexpr
   let result = reduce_lexpr_loop ~matching ~reduce_lvars pfs gamma le in
   (* Utils.Statistics.update_statistics "Reduce Expression" (Unix.gettimeofday () -. t); *)
   if not @@ Expr.equal le result then
-    Logging.normal (fun f ->
+    Logging.verbose (fun f ->
         f "reduce_lexpr: @[%a -> %a@]" Expr.pp le Expr.pp result);
   result
 

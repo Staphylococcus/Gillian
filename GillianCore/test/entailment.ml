@@ -94,6 +94,13 @@ let finite_position () =
         let trace = L.Loggable.make_string "UNKNOWN_CONTROL_COMMAND_TRACE" in
         let trace_type = L.Logging_constants.Content_type.cmd in
         ignore (L.Specific.normal trace trace_type);
+        let reduction = bin IPlus (Expr.int 9001) (Expr.int 1) in
+        let expected = Expr.int 9002 in
+        let reduction_line =
+          Fmt.str "reduce_lexpr: @[%a -> %a@]" Expr.pp reduction Expr.pp expected
+        in
+        Alcotest.(check bool) "normal reduction preserves result" true
+          (Expr.equal (Engine.Reduction.reduce_lexpr reduction) expected);
         Alcotest.(check bool)
           "optional unknown cannot prove UNSAT" false (Smt.proves_unsat fs g);
         Alcotest.(check bool)
@@ -138,14 +145,20 @@ let finite_position () =
           (List.mem "UNKNOWN_CONTROL_VERBOSE_SENTINEL" lines);
         Alcotest.(check bool) "normal file logging omits command traces" false
           (List.mem "UNKNOWN_CONTROL_COMMAND_TRACE" lines);
+        Alcotest.(check bool) "normal file logging omits reduction traces" false
+          (List.mem reduction_line lines);
         L.Mode.set_mode (Enabled Verbose);
         ignore (L.Specific.normal trace trace_type);
+        Alcotest.(check bool) "verbose reduction preserves result" true
+          (Expr.equal (Engine.Reduction.reduce_lexpr reduction) expected);
         let ch = open_in_bin "file.log" in
         let verbose_log = Fun.protect ~finally:(fun () -> close_in ch)
           (fun () -> really_input_string ch (in_channel_length ch)) in
+        let verbose_lines = String.split_on_char '\n' verbose_log in
         Alcotest.(check bool) "verbose file logging retains command traces" true
-          (List.mem "UNKNOWN_CONTROL_COMMAND_TRACE"
-            (String.split_on_char '\n' verbose_log))))
+          (List.mem "UNKNOWN_CONTROL_COMMAND_TRACE" verbose_lines);
+        Alcotest.(check bool) "verbose file logging retains reduction traces" true
+          (List.mem reduction_line verbose_lines)))
   else
     (* The optional API may legitimately use its bounded unknown outcome.
        A false precheck is not a proof: require actual UNSAT from the original
@@ -689,59 +702,64 @@ let contained_goal () =
     (entails content (bin Equal code (Expr.num 65.)))
 
 let numeric_rank () =
-  let position = Expr.LVar "#rank_pos" and len = Expr.LVar "#rank_len" in
-  let count = Expr.LVar "#rank_count" and before = Expr.LVar "#rank_before" in
-  let text = Expr.LVar "#rank_text" in
-  let maximum = Expr.num 9007199254740991. in
-  let gamma = Gamma.init () in
-  List.iter
-    (fun name -> Gamma.update gamma name Type.NumberType)
-    [ "#rank_pos"; "#rank_len"; "#rank_count"; "#rank_before" ];
-  Gamma.update gamma "#rank_text" Type.Utf16Type;
-  let next = bin FPlus position (Expr.num 1.) in
-  let twice = bin FPlus next (Expr.num 1.) in
-  let base =
-    [
-      Expr.UnOp (IsInt, position);
-      Expr.UnOp (IsInt, len);
-      Expr.UnOp (IsInt, count);
-      bin FLessThanEqual (Expr.num 0.) count;
-      bin FLessThanEqual count position;
-      bin FLessThan position len;
-      bin FLessThanEqual len maximum;
-      bin ValueEqual before (bin FMinus maximum position);
-      bin ValueEqual len (Expr.UnOp (IntToNum, Expr.UnOp (Utf16Len, text)));
-      bin ILessThanEqual
-        (Expr.UnOp (Utf16Len, text))
-        (Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))));
-      bin FLessThanEqual (Expr.num 55296.)
-        (bin Utf16CodeUnit text (Expr.UnOp (ToIntOp, position)));
-    ]
+  let run () =
+    let position = Expr.LVar "#rank_pos" and len = Expr.LVar "#rank_len" in
+    let count = Expr.LVar "#rank_count" and before = Expr.LVar "#rank_before" in
+    let text = Expr.LVar "#rank_text" in
+    let maximum = Expr.num 9007199254740991. in
+    let gamma = Gamma.init () in
+    List.iter
+      (fun name -> Gamma.update gamma name Type.NumberType)
+      [ "#rank_pos"; "#rank_len"; "#rank_count"; "#rank_before" ];
+    Gamma.update gamma "#rank_text" Type.Utf16Type;
+    let next = bin FPlus position (Expr.num 1.) in
+    let twice = bin FPlus next (Expr.num 1.) in
+    let base =
+      [
+        Expr.UnOp (IsInt, position);
+        Expr.UnOp (IsInt, len);
+        Expr.UnOp (IsInt, count);
+        bin FLessThanEqual (Expr.num 0.) count;
+        bin FLessThanEqual count position;
+        bin FLessThan position len;
+        bin FLessThanEqual len maximum;
+        bin ValueEqual before (bin FMinus maximum position);
+        bin ValueEqual len (Expr.UnOp (IntToNum, Expr.UnOp (Utf16Len, text)));
+        bin ILessThanEqual
+          (Expr.UnOp (Utf16Len, text))
+          (Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))));
+        bin FLessThanEqual (Expr.num 55296.)
+          (bin Utf16CodeUnit text (Expr.UnOp (ToIntOp, position)));
+      ]
+    in
+    let entails facts goals =
+      Solver.check_entailment Utils.Containers.SS.empty (Engine.PFS.of_list facts)
+        goals gamma
+    in
+    List.iter
+      (fun (name, after_position, facts) ->
+        let rank = bin FMinus maximum after_position in
+        Alcotest.(check bool)
+          (name ^ " actual Number rank")
+          true
+          (entails facts
+             [
+               Expr.UnOp (IsInt, rank);
+               bin FLessThanEqual (Expr.num 0.) rank;
+               bin FLessThan rank before;
+             ]);
+        Alcotest.(check bool)
+          (name ^ " wrong nondecreasing rank")
+          false
+          (entails facts [ bin FLessThanEqual before rank ]))
+      [
+        ("one increment", next, base);
+        ("two increments", twice, bin FLessThan next len :: base);
+      ]
   in
-  let entails facts goals =
-    Solver.check_entailment Utils.Containers.SS.empty (Engine.PFS.of_list facts)
-      goals gamma
-  in
-  List.iter
-    (fun (name, after_position, facts) ->
-      let rank = bin FMinus maximum after_position in
-      Alcotest.(check bool)
-        (name ^ " actual Number rank")
-        true
-        (entails facts
-           [
-             Expr.UnOp (IsInt, rank);
-             bin FLessThanEqual (Expr.num 0.) rank;
-             bin FLessThan rank before;
-           ]);
-      Alcotest.(check bool)
-        (name ^ " wrong nondecreasing rank")
-        false
-        (entails facts [ bin FLessThanEqual before rank ]))
-    [
-      ("one increment", next, base);
-      ("two increments", twice, bin FLessThan next len :: base);
-    ]
+  let saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) run
 
 let numeric_conjuncts () =
   let x = Expr.LVar "#conj_x" and s = Expr.LVar "#conj_s" in
