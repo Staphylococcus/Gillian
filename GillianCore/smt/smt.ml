@@ -2919,6 +2919,54 @@ let original_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
     || try_shape mask_lower || try_shape mask_upper || try_shape mask_complement
     || try_shape list_prefix || try_shape list_prefix_only || try_projection ()
 
+(* Small bounded natural counters guide only an optional complete-query
+   model search. Native SAT must validate every original assertion; a failed
+   hint leaves all existing searches and the required-query policy unchanged. *)
+let natural_counter_model fs gamma =
+  (* Existing UTF16 witness paths keep their query order and bounds. *)
+  let strings = object
+    inherit [_] Visitors.iter as super
+    val mutable observed = false
+    method observed = observed
+    method! visit_expr () e =
+      (match e with
+       | Expr.Lit (Utf16String _ | String _)
+       | Expr.UnOp ((Utf16Len | Utf16ToNumber), _)
+       | Expr.BinOp (_, (Utf16Nth | Utf16CodeUnit | Utf16Cat | Utf16Less), _) ->
+           observed <- true
+       | Expr.LVar x when Hashtbl.find_opt gamma x = Some Type.Utf16Type
+           || Hashtbl.find_opt gamma x = Some Type.StringType -> observed <- true
+       | _ -> ());
+      super#visit_expr () e
+  end in
+  Expr.Set.iter (strings#visit_expr ()) fs;
+  let counters = Expr.Set.fold (fun assertion names -> match assertion with
+    | Expr.UnOp (IsInt, LVar x)
+      when Hashtbl.find_opt gamma x = Some Type.NumberType ->
+        let nonnegative = Expr.Set.mem
+          (Expr.BinOp (Expr.num 0., FLessThanEqual, LVar x)) fs
+          || Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThan, LVar x)) fs in
+        let bounded = Expr.Set.exists (function
+          | Expr.BinOp (LVar y, FLessThanEqual, Lit (Num limit))
+            when x = y -> limit >= 0. && limit <= 9007199254740991.
+          | _ -> false) fs in
+        if nonnegative && bounded then SS.add x names else names
+    | _ -> names) fs SS.empty in
+  if not !Config.Verification.total || strings#observed
+     || SS.cardinal counters < 2 then None else
+  let query = SS.fold (fun x acc ->
+    let literal = Expr.Set.fold (fun assertion found -> match found, assertion with
+      | None, Expr.BinOp (LVar y, (Equal | ValueEqual), Lit (Num value))
+      | None, Expr.BinOp (Lit (Num value), (Equal | ValueEqual), LVar y)
+        when x = y -> Some value
+      | _ -> found) fs None in
+    Expr.Set.add (Expr.BinOp (LVar x, ValueEqual,
+      Expr.num (Option.value literal ~default:1.))) acc) counters fs in
+  if Expr.Set.equal query fs then None else
+  try run_sat ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+      ~raw_unknown:true query gamma
+  with SMT_unknown -> None
+
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   let key = formula_key fs gamma in
   match Formula_cache.find_opt sat_cache key with
@@ -2934,9 +2982,11 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
         if original_unsat_precheck fs gamma then None
         else if numeric_unsat_precheck fs gamma then None
         else
-          match seeded_model fs gamma with
+          match natural_counter_model fs gamma with
           | Some _ as witness -> witness
-          | None -> exec_sat (with_checked_index_identities fs gamma) gamma
+          | None -> (match seeded_model fs gamma with
+            | Some _ as witness -> witness
+            | None -> exec_sat (with_checked_index_identities fs gamma) gamma)
       in
       let () =
         L.verbose (fun m ->

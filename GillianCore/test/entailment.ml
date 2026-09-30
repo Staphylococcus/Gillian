@@ -4469,6 +4469,119 @@ let list_prefix_only_restore () =
   Alcotest.(check bool) "without failed goal permits native counterexample" true
     (Option.is_some (Smt.exec_sat (Expr.Set.singleton link) g))
 
+let natural_counter_query () =
+  (* Original caller feasibility query; capture SHA256: 76623267e07e1752b2373970bccb281ed770d27761170d70c392337537fb4b37. *)
+  let facts = parse_gil_set [
+    "(! (#evidenceIndex < #evidenceLen))";
+    "(! (#index < #failingLen))";
+    "(! (#lvar_473 < 1.))";
+    "(! (#lvar_873 < 1.))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_873)";
+    "(is_int #targetIndex)";
+    "(is_int #targetLen)";
+    "(is_int (#evidenceIndex - 1.))";
+    "(is_int (#index - 1.))";
+    "(0. < #evidenceIndex)";
+    "(0. < #index)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_873)";
+    "(0. <= #targetIndex)";
+    "(0. <= #targetLen)";
+    "(0. <= (#evidenceIndex - 1.))";
+    "(0. <= (#index - 1.))";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex == #evidenceLen)";
+    "(#evidenceIndex <= #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == #failingLen)";
+    "(#index == #index)";
+    "(#index <= #failingLen)";
+    "(#lvar_1057 v== (4294967295. - #targetIndex))";
+    "(#lvar_873 == #lvar_873)";
+    "(#lvar_875 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_985 v== (4294967295. - #index))";
+    "(#targetIndex == #targetIndex)";
+    "(#targetIndex <= #targetLen)";
+    "(#targetLen <= 4294967295.)";
+    "((#evidenceIndex - 1.) < 4294967295.)";
+    "((#index - 1.) < 4294967295.)";
+    "((#lvar_473 == 0.) or (#lvar_473 == 1.))";
+    "(((#evidenceIndex - 1.) + 1.) == #evidenceIndex)";
+    "(((#index - 1.) + 1.) == #index)";
+  ] in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#targetIndex" Type.NumberType;
+  Gamma.update gamma "#before" Type.ListType;
+  Gamma.update gamma "#previous" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_1057" Type.NumberType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#targetSuffix" Type.ListType;
+  Gamma.update gamma "#lvar_873" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_875" Type.NumberType;
+  Gamma.update gamma "#evidenceBefore" Type.ListType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#lvar_473" Type.NumberType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#targetPrefix" Type.ListType;
+  Gamma.update gamma "#lvar_985" Type.NumberType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_types = types () in
+  let saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    let counters = ["#evidenceLen"; "#failingLen"; "#targetLen"] in
+    let seeded = List.fold_left (fun acc name -> Expr.Set.add
+      (bin ValueEqual (Expr.LVar name) (Expr.num 1.)) acc) facts counters in
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seeded in
+    Alcotest.(check bool) "original bounded-counter query has native full SAT witness" true
+      (Option.is_some (Smt.check_sat facts g));
+    let observed = Array.to_list (Sys.readdir "gillian_smt_queries")
+      |> List.filter (fun name ->
+        let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+        let content = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        String.starts_with ~prefix content) in
+    Alcotest.(check bool) "native hint retains every original assertion" true
+      (observed <> []);
+    Printf.printf "NATURAL_COUNTER_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "counter hint does not mutate facts" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "counter hint does not mutate gamma" true
+    (before_types = types ());
+  Hashtbl.add g "#counter_list" Type.ListType;
+  let len = Expr.UnOp (LstLen, Expr.LVar "#counter_list") in
+  let conflict = Expr.Set.add (bin Equal len (Expr.int 1))
+    (Expr.Set.add (bin Equal len (Expr.int 2)) facts) in
+  Alcotest.(check bool) "non-numeric contradiction cannot become a counter witness" true
+    (Option.is_none (Smt.check_sat conflict g));
+  let zero = Expr.Set.add (bin ValueEqual (Expr.LVar "#targetLen") (Expr.num 0.)) facts in
+  Alcotest.(check bool) "original zero binding survives the candidate hint" true
+    (Option.is_some (Smt.check_sat zero g));
+  let rounding = Expr.LVar "#rounding_counter" in
+  Hashtbl.add g "#rounding_counter" Type.NumberType;
+  let rounded = Expr.Set.of_list [Expr.UnOp (IsInt, rounding);
+    bin FLessThanEqual (Expr.num 0.) rounding;
+    bin ValueEqual rounding (Expr.num 9007199254740992.);
+    not_ (bin ValueEqual (bin FPlus rounding (Expr.num 1.)) rounding)] in
+  Alcotest.(check bool) "binary64 rounded increment remains impossible" true
+    (Option.is_none (Smt.check_sat (Expr.Set.union facts rounded) g))
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -4570,4 +4683,6 @@ let tests =
       (with_total list_prefix_restore);
     Alcotest.test_case "original inverse list-prefix restoration core" `Quick
       (with_total list_prefix_only_restore);
+    Alcotest.test_case "bounded natural counters retain complete SAT query" `Quick
+      (with_total natural_counter_query);
   ]
