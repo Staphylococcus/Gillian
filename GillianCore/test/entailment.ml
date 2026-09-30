@@ -4582,6 +4582,92 @@ let natural_counter_query () =
   Alcotest.(check bool) "binary64 rounded increment remains impossible" true
     (Option.is_none (Smt.check_sat (Expr.Set.union facts rounded) g))
 
+let literal_counter_contradiction () =
+  (* Original caller query SHA256: 7c71c39111f11a4db5d198c537a90dbeab3ee116eb4c539ef93daef47e0b6a90. *)
+  let facts = parse_gil_set [
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_873)";
+    "(is_int #targetLen)";
+    "(0. < #evidenceIndex)";
+    "(0. < #index)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_873)";
+    "(0. <= #targetLen)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex == #evidenceLen)";
+    "(#evidenceIndex <= #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == 0.)";
+    "(#index == #index)";
+    "(#index < #failingLen)";
+    "(#lvar_873 == #lvar_873)";
+    "(#targetLen <= 4294967295.)";
+  ] in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_873" Type.NumberType;
+  Gamma.update gamma "#suffix" Type.ListType;
+  Gamma.update gamma "#targetValues" Type.ListType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_1171" Type.NumberType;
+  Gamma.update gamma "#lvar_875" Type.NumberType;
+  Gamma.update gamma "#evidenceBefore" Type.ListType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_473" Type.NumberType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let comparison = Expr.Set.choose (parse_gil_set ["(0. < #index)"]) in
+  let binding = Expr.Set.choose (parse_gil_set ["(#index == 0.)"]) in
+  let core = Expr.Set.of_list [ comparison; binding ] in
+  let original_facts = Expr.Set.elements facts in
+  let original_gamma = Hashtbl.fold (fun n t acc -> (n,t)::acc) g []
+    |> List.sort Stdlib.compare in
+  let saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete original literal contradiction is UNSAT" true
+      (Option.is_none (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) core in
+    let observed = Array.to_list (Sys.readdir "gillian_smt_queries")
+      |> List.filter (fun name ->
+        let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+        let content = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        String.starts_with ~prefix content) in
+    Alcotest.(check bool) "native contradiction query is exactly two original atoms" true
+      (observed <> []);
+    Printf.printf "LITERAL_COUNTER_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "literal core does not mutate original facts" true
+    (original_facts = Expr.Set.elements facts);
+  Alcotest.(check bool) "literal core does not mutate original gamma" true
+    (original_gamma = (Hashtbl.fold (fun n t acc -> (n,t)::acc) g []
+      |> List.sort Stdlib.compare));
+  Alcotest.(check bool) "removing original literal binding permits native SAT" true
+    (Option.is_some (Smt.check_sat (Expr.Set.singleton comparison) g));
+  Alcotest.(check bool) "removing original comparison permits native SAT" true
+    (Option.is_some (Smt.check_sat (Expr.Set.singleton binding) g));
+  let possible = parse_gil_set ["(#index v== 1.)"; "(0. < #index)"] in
+  Alcotest.(check bool) "consistent literal comparison remains native SAT" true
+    (Option.is_some (Smt.check_sat possible g));
+  let signed_zero = parse_gil_set ["(#index == -0.)"; "(0. < #index)"] in
+  Alcotest.(check bool) "signed zero cannot satisfy positive comparison" true
+    (Option.is_none (Smt.check_sat signed_zero g))
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -4685,4 +4771,6 @@ let tests =
       (with_total list_prefix_only_restore);
     Alcotest.test_case "bounded natural counters retain complete SAT query" `Quick
       (with_total natural_counter_query);
+    Alcotest.test_case "original literal counter contradiction core" `Quick
+      (with_total literal_counter_contradiction);
   ]

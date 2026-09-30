@@ -2736,6 +2736,30 @@ let original_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
       | Expr.LVar n -> Hashtbl.find_opt gamma n = Some Type.NumberType
       | _ -> false
     in
+    (* Select only two unchanged original atoms: a Number literal binding and
+       a comparison it contradicts. Host arithmetic chooses an optional core;
+       only native binary64 UNSAT proves anything about the complete query. *)
+    let literal_comparison = function
+      | (Expr.BinOp ((LVar x as variable),
+          ((FLessThan | FLessThanEqual) as op), Lit (Num bound)) as comparison)
+        when number variable ->
+          List.find_map (function
+            | (Expr.BinOp (LVar y, (Equal | ValueEqual), Lit (Num value)) as binding)
+            | (Expr.BinOp (Lit (Num value), (Equal | ValueEqual), LVar y) as binding)
+              when x = y && not (if op = FLessThan then value < bound
+                                 else value <= bound) -> core [ comparison; binding ]
+            | _ -> None) expressions
+      | (Expr.BinOp (Lit (Num bound),
+          ((FLessThan | FLessThanEqual) as op), (LVar x as variable)) as comparison)
+        when number variable ->
+          List.find_map (function
+            | (Expr.BinOp (LVar y, (Equal | ValueEqual), Lit (Num value)) as binding)
+            | (Expr.BinOp (Lit (Num value), (Equal | ValueEqual), LVar y) as binding)
+              when x = y && not (if op = FLessThan then bound < value
+                                 else bound <= value) -> core [ comparison; binding ]
+            | _ -> None) expressions
+      | _ -> None
+    in
     let finite_add = function
       | (Expr.UnOp
            (Not, BinOp ((BinOp ((LVar _ as p), FPlus, Lit (Num 1.)) as sum),
@@ -2915,7 +2939,8 @@ let original_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
       | Some (projected, projected_gamma) ->
           proves_unsat projected projected_gamma
     in
-    try_shape finite_add || try_shape code_upper || try_shape length_index
+    try_shape literal_comparison || try_shape finite_add
+    || try_shape code_upper || try_shape length_index
     || try_shape mask_lower || try_shape mask_upper || try_shape mask_complement
     || try_shape list_prefix || try_shape list_prefix_only || try_projection ()
 
