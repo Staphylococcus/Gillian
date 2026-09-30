@@ -10,6 +10,7 @@ let test_suites : unit Alcotest.test list =
     ("UTF-16 values", Utf16_values.tests);
     ("Sufficient entailment", Entailment.tests);
     ("Predicate matching", Predicate_matching.tests);
+    ("Assertion domains", Assertion_domains.tests);
   ]
 
 let () = Alcotest.run "Gillian" test_suites
