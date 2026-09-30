@@ -2288,8 +2288,47 @@ let seeded_model fs gamma =
                 acc)
             names query
         in
+        (* Loop feasibility can need a concrete adjacent-index counter even
+           in queries without UTF-16 content operations. Keep the existing
+           character-position search unchanged for content queries. Otherwise
+           try zero and one with length one;
+           retain the complete formula and accept only a validated native model.
+           Failure leaves every existing search and the required query intact. *)
+        let advancing =
+          object
+            inherit [_] Visitors.iter as super
+            val mutable names = SS.empty
+            val mutable contents = false
+            method names = names
+            method observes_contents = contents
+            method! visit_expr () e =
+              (match e with
+              | BinOp (_, (Utf16Nth | Utf16CodeUnit | Utf16Cat | Utf16Less), _)
+              | UnOp (Utf16ToNumber, _) -> contents <- true
+              | BinOp (LVar x, (FPlus | FMinus), Lit (Num 1.))
+                when Hashtbl.find_opt gamma x = Some Type.NumberType ->
+                  names <- SS.add x names
+              | _ -> ());
+              super#visit_expr () e
+          end
+        in
+        Expr.Set.iter (advancing#visit_expr ()) fs;
+        let stepped =
+          if advancing#observes_contents || SS.is_empty advancing#names then None
+          else
+            List.find_map
+              (fun value ->
+                let query = SS.fold
+                  (fun x acc -> Expr.Set.add
+                    (Expr.BinOp (LVar x, ValueEqual, Lit (Num value))) acc)
+                  advancing#names (with_length 1) in
+                try_seed query)
+              [ 0.; 1. ]
+        in
         let positioned =
-          if SS.is_empty numbers then None
+          match stepped with
+          | Some _ as witness -> witness
+          | None -> if SS.is_empty numbers then None
           else
             List.find_map
               (fun length ->

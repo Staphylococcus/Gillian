@@ -146,18 +146,24 @@ let consume_pred
       (targets : vt option list)
       (f_eq : vt -> vt -> bool) : bool * (int * int) =
     let candidate = List.mapi (fun i cv -> (i, cv)) candidate in
-    let icount, ocount =
-      List.fold_left2
-        (fun (ic, oc) (i, cv) tv ->
-          match tv with
-          | None -> (ic, oc)
-          (* First check syntactic equality and only then try f_eq *)
-          | Some tv when (not (Expr.equal cv tv)) && not (f_eq cv tv) -> (ic, oc)
-          | _ -> if Containers.SI.mem i ins then (ic + 1, oc) else (ic, oc + 1))
-        (0, 0) candidate targets
+    let inputs, outputs =
+      List.partition (fun ((i, _), _) -> Containers.SI.mem i ins)
+        (List.combine candidate targets)
     in
-    let result = (icount = ins_count, (icount, ocount)) in
-    result
+    let count_matches pairs =
+      List.fold_left
+        (fun count ((_, cv), tv) ->
+          match tv with
+          | Some tv when Expr.equal cv tv || f_eq cv tv -> count + 1
+          | _ -> count)
+        0 pairs
+    in
+    let icount = count_matches inputs in
+    (* Outputs cannot rescue a candidate with mismatched inputs. Avoid unrelated
+       solver queries for its output witnesses; preserve the existing ranking
+       among candidates whose complete input footprint does match. *)
+    if icount <> ins_count then (false, (icount, 0))
+    else (true, (icount, count_matches outputs))
   in
   (* Sort the candidate predicates according to the number of ins matched,
      and then the number of outs matched, in decreasing order of matches *)

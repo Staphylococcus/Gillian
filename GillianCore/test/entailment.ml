@@ -2454,6 +2454,223 @@ let simplified_rank_goal () =
   Alcotest.(check bool) "rank checks have no SMT unknown" false
     (List.mem "The solver returned: unknown" (String.split_on_char '\n' log)))
 
+let check_array_counter_witness zero label facts gamma =
+  let g = Gamma.as_hashtbl gamma in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before = queries () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) "complete array feasibility has a native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let seed = Expr.Set.add
+        (bin ValueEqual (Expr.LVar "#index") (Expr.num (if zero then 0. else 1.)))
+        (Expr.Set.add (bin Equal (Expr.UnOp (Utf16Len, Expr.LVar "#confidence"))
+          (Expr.int 1)) facts) in
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let fresh = List.filter (fun n -> not (List.mem n before)) (queries ()) in
+    let observed = List.filter (fun name ->
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) fresh in
+    Alcotest.(check int) "native witness retains every original assertion" 1
+      (List.length observed);
+    Printf.printf "ARRAY_STEP_NATIVE_QUERY=%s:%s\n%!"
+      label (List.hd observed));
+  let impossible = Expr.Set.add
+      (bin ValueEqual (Expr.LVar "#failingLen") (Expr.num 0.)) facts in
+  Alcotest.(check bool) "complete contradictory query remains UNSAT" true
+    (Option.is_none (Smt.check_sat impossible g))
+
+let array_counter_witness zero () =
+  (* Complete feasibility query from the original AJV string-array loop.
+     No assumptions are removed; the seed is only a native model search. *)
+  let facts = parse_gil_set [
+    "(! (#key == none))";
+    "(! (#lvar_464 < 1.))";
+    "(! (#lvar_473 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_473)";
+    "(is_int (4294967295. - (#index + 1.)))";
+    "(is_int (#index + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #before))";
+    "(0i i<= (l-len #tail))";
+    "(0. < #index)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_473)";
+    "(0. <= (4294967295. - (#index + 1.)))";
+    "(0. <= (#index + 1.))";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == #index)";
+    "(#index < #failingLen)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_175)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_176)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_178)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_179)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_175 v== #lvar_142)";
+    "(#lvar_176 v== #lvar_143)";
+    "(#lvar_178 v== #lvar_145)";
+    "(#lvar_179 v== #lvar_146)";
+    "(#lvar_473 == #lvar_473)";
+    "(#lvar_473 <= (as_num (u16-len #confidence)))";
+    "(#lvar_477 v== (4294967295. - #index))";
+    "(#lvar_478 v== #item)";
+    "(#lvar_479 v== #tail)";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_17 v== #lvar_js_45)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_18 v== #lvar_js_46)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#lvar_js_45 v== #lvar_js_17)";
+    "(#lvar_js_46 v== #lvar_js_18)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #item) i<= 9007199254740991i)";
+    "((u16-len #previous) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((4294967295. - (#index + 1.)) < (4294967295. - #index))";
+    "((#index + 1.) <= 4294967295.)";
+    "((#lvar_464 == 0.) or (#lvar_464 == 1.))";
+    "(((#index + 1.) - 1.) == #index)";
+    "(((#lvar_464 == 0.) and (#key == undefined)) or ((#lvar_464 == 1.) and (#key == u16\"classification\")))";
+    "(((#lvar_473 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_473) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = if not zero then facts else
+    let remove = parse_gil_set ["(0. < #index)";
+      "(0i i<= (l-len #before))";
+      "((u16-len #previous) i<= 9007199254740991i)"] in
+    let add = parse_gil_set ["(! (0. < #index))";
+      "(0. <= #index)"; "(#index == 0.)"] in
+    Expr.Set.union add (Expr.Set.diff facts remove) in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#lvar_477" Type.NumberType;
+  Gamma.update gamma "#before" Type.ListType;
+  Gamma.update gamma "#previous" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#tail" Type.ListType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#item" Type.Utf16Type;
+  Gamma.update gamma "#lvar_464" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_473" Type.NumberType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  if zero then List.iter (Gamma.remove gamma) ["#before"; "#previous"];
+  check_array_counter_witness zero (if zero then "zero" else "positive") facts gamma
+
+let array_predecessor_witness () =
+  (* Complete captured feasibility query after the checked prefix inverse. *)
+  let facts = parse_gil_set [
+    "(! (#key == none))";
+    "(! (#lvar_466 < 1.))";
+    "(! (#lvar_475 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_475)";
+    "(is_int (#index - 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #before))";
+    "(0i i<= (l-len #lvar_481))";
+    "(0i i<= (l-len #tail))";
+    "(0. < #index)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_475)";
+    "(0. <= (#index - 1.))";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == #index)";
+    "(#index < #failingLen)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_175)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_176)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_178)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_179)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_175 v== #lvar_142)";
+    "(#lvar_176 v== #lvar_143)";
+    "(#lvar_178 v== #lvar_145)";
+    "(#lvar_179 v== #lvar_146)";
+    "(#lvar_475 == #lvar_475)";
+    "(#lvar_475 <= (as_num (u16-len #confidence)))";
+    "(#lvar_479 v== (4294967295. - #index))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_17 v== #lvar_js_45)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_18 v== #lvar_js_46)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#lvar_js_45 v== #lvar_js_17)";
+    "(#lvar_js_46 v== #lvar_js_18)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #lvar_480) i<= 9007199254740991i)";
+    "((u16-len #previous) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((#index - 1.) < 4294967295.)";
+    "((#lvar_466 == 0.) or (#lvar_466 == 1.))";
+    "(((#index - 1.) + 1.) == #index)";
+    "(((#lvar_466 == 0.) and (#key == undefined)) or ((#lvar_466 == 1.) and (#key == u16\"classification\")))";
+    "(((#lvar_475 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_475) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#lvar_479" Type.NumberType;
+  Gamma.update gamma "#before" Type.ListType;
+  Gamma.update gamma "#previous" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_475" Type.NumberType;
+  Gamma.update gamma "#tail" Type.ListType;
+  Gamma.update gamma "#lvar_480" Type.Utf16Type;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#lvar_466" Type.NumberType;
+  Gamma.update gamma "#item" Type.Utf16Type;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#lvar_481" Type.ListType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  check_array_counter_witness false "predecessor" facts gamma
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -2525,4 +2742,10 @@ let tests =
       (with_total utf16_length_focused_dependencies);
     Alcotest.test_case "simplified rank goal retains numeric pieces" `Quick
       (with_total simplified_rank_goal);
+    Alcotest.test_case "positive array counter keeps complete SAT query" `Quick
+      (with_total (array_counter_witness false));
+    Alcotest.test_case "zero array counter keeps complete SAT query" `Quick
+      (with_total (array_counter_witness true));
+    Alcotest.test_case "array predecessor keeps complete SAT query" `Quick
+      (with_total array_predecessor_witness);
   ]

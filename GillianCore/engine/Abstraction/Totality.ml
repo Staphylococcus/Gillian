@@ -308,8 +308,14 @@ let check_assertion_production ~evaluate ~assertion ~assume state a =
   if !Config.Verification.total then
     let obligations = List.filter_map Asrt.as_definedness a in
     let facts, values = List.partition fst obligations in
-    let check state (fact, e) =
-      let proves c = assertion state (evaluate state c) in
+    let check ~quick state (fact, e) =
+      let proves c =
+        let condition = evaluate state c in
+        if not quick then assertion state condition
+        else if Expr.equal condition Expr.true_ then true
+        else if Expr.equal condition Expr.false_ then false
+        else raise (Pending_domain e)
+      in
       check_expression ~proof:true ~proves ~evaluate:(evaluate state)
         ~require:(fun partial condition ->
           if not (proves condition) then raise (Pending_domain partial))
@@ -318,18 +324,18 @@ let check_assertion_production ~evaluate ~assertion ~assume state a =
     (* Already established value domains need no extra facts. Check against
        the current state before assuming a final batch into the disposable
        context; actual assertion production still retains every fact. *)
-    let values_defined state =
+    let values_defined ~quick state =
       try
-        List.iter (check state) values;
+        List.iter (check ~quick state) values;
         true
       with Pending_domain _ -> false
     in
-    let rec establish state pending =
+    let rec establish ~quick state pending =
       let ready, deferred =
         List.fold_left
           (fun (ready, deferred) ((_, e) as obligation) ->
             try
-              check state obligation;
+              check ~quick state obligation;
               (* A defined fact already reduced to true adds no information.
                  Avoid rechecking consistency of the entire scratch context for
                  batches of such facts (common in matched predicate outputs). *)
@@ -338,16 +344,22 @@ let check_assertion_production ~evaluate ~assertion ~assume state a =
             with Pending_domain _ -> (ready, obligation :: deferred))
           ([], []) pending
       in
-      if ready = [] then List.iter (check state) (List.rev deferred @ values)
-      else if deferred = [] && values_defined state then ()
+      (* Stage facts whose domains reduce to true before asking the solver
+         about dependent expressions. In particular, a fresh invariant type
+         fact must enter the disposable context before a partial operator uses
+         that variable. No unchecked fact enters either context. *)
+      if ready = [] && quick then establish ~quick:false state pending
+      else if ready = [] then
+        List.iter (check ~quick:false state) (List.rev deferred @ values)
+      else if deferred = [] && values_defined ~quick state then ()
       else
         (* Batch independently checked facts: no pending fact enters the context,
            and one consistency query suffices for this round. *)
         match assume state (List.rev ready) with
         | None -> ()
-        | Some state -> establish state (List.rev deferred)
+        | Some state -> establish ~quick:true state (List.rev deferred)
     in
-    try establish state facts
+    try establish ~quick:true state facts
     with Pending_domain e ->
       raise
         (Gillian_result.Exc.analysis_failure

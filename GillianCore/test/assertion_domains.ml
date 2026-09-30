@@ -20,7 +20,7 @@ let value e = Asrt.definedness ~fact:false e
 let typ e t = Expr.BinOp (Expr.UnOp (TypeOf, e), Equal, Expr.Lit (Type t))
 let at = Expr.BinOp (xs, LstNth, Expr.int 0)
 
-let check ?(unknown = false) bindings facts obligations =
+let check ?(unknown = false) ?(unknown_before_type = false) bindings facts obligations =
   let gamma = Gamma.init () in
   List.iter (fun (n, t) -> Gamma.update gamma n t) bindings;
   let calls = ref 0 in
@@ -28,6 +28,9 @@ let check ?(unknown = false) bindings facts obligations =
     Reduction.reduce_lexpr ~gamma ~pfs:(Engine.PFS.of_list facts) e
   in
   let assertion facts e =
+    if unknown_before_type && Expr.equal e (typ index Type.NumberType)
+       && not (List.exists (Expr.equal (typ index Type.NumberType)) facts) then
+      raise Required_unknown;
     Solver.check_entailment Utils.Containers.SS.empty (Engine.PFS.of_list facts)
       [e] gamma
   in
@@ -73,7 +76,14 @@ let required_unknown () =
     Required_unknown (fun () -> ignore (check ~unknown:true [] []
       [fact (typ index Type.NumberType); value (Expr.UnOp (NumberToUtf16, index))]))
 
+let type_before_dependent_fact () =
+  let calls = check ~unknown_before_type:true [] []
+    [fact (Expr.UnOp (IsInt, index)); fact (typ index Type.NumberType);
+     value (Expr.UnOp (NumberToUtf16, index))] in
+  Alcotest.(check int) "type fact precedes dependent domain queries" 1 calls
+
 let tests = List.map (fun (name, f) -> Alcotest.test_case name `Quick (with_total f))
   ["existing value domain", already_defined; "new type fact", needs_fact;
    "missing domain", missing_domain; "no self justification", no_self_justification;
-   "required unknown", required_unknown]
+   "required unknown", required_unknown;
+   "type before dependent fact", type_before_dependent_fact]
