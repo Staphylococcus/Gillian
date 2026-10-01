@@ -904,6 +904,53 @@ let insertion_total_domains () =
   check "insertion rejects greater-than-length bound" (not (accepts (Expr.NOp (LstInsert, [ukeys []; Expr.int 1; Expr.Lit Literal.Null]))));
   check "insertion accepts exact integer endpoint" (accepts (Expr.NOp (LstInsert, [ukeys []; Expr.int 0; Expr.Lit Literal.Null])))
 
+let insertion_symbolic_bounds () =
+  let c = insertion_context () in
+  let position = Expr.BinOp (sequence_keys, KeyInsertIndex, absent_key) in
+  let bounds = [ Expr.BinOp (Expr.zero_i, ILessThanEqual, position);
+    Expr.BinOp (position, ILessThanEqual, UnOp (LstLen, sequence_keys)) ] in
+  List.iter (fun bound ->
+    check "typed structural position bound reduces without recursive SMT"
+      (Gillian.Logic.Reduction.reduce_lexpr ~gamma:c.gamma bound = Expr.true_)) bounds;
+  List.iter (fun outside ->
+    check "negated endpoint bound reduces after comparison normalization"
+      (Gillian.Logic.Reduction.reduce_lexpr ~gamma:c.gamma outside = Expr.false_))
+    [ Expr.BinOp (position, ILessThan, Expr.zero_i);
+      Expr.BinOp (UnOp (LstLen, sequence_keys), ILessThan, position) ];
+  check "total insertion accepts symbolic position without assumed bounds"
+    (let evaluate = Gillian.Logic.Reduction.reduce_lexpr ~pfs:c.pfs ~gamma:c.gamma in
+     let proves f = Gillian.Logic.FOSolver.check_entailment Gillian.Utils.Containers.SS.empty c.pfs [f] c.gamma in
+     try Engine.Totality.check_expression ~proof:true ~proves ~evaluate
+       ~require:(fun _ f -> if not (proves f) then failwith "bound")
+       (Expr.NOp (LstInsert, [sequence_keys; position; Expr.Lit Literal.Null])); true
+     with Failure message when message = "bound" -> false)
+
+let insertion_bound_domains () =
+  let c = insertion_context () in
+  let p = Expr.BinOp (sequence_keys, KeyInsertIndex, absent_key) in
+  let lower = Expr.BinOp (Expr.zero_i, ILessThanEqual, p) in
+  let reduce gamma e = Gillian.Logic.Reduction.reduce_lexpr ~gamma e in
+  let unknown = Gillian.Symbolic.Type_env.init () in
+  check "missing list/key types cannot authorize a bound" (reduce unknown lower <> Expr.true_);
+  let list_only = Gillian.Symbolic.Type_env.init () in
+  Gillian.Symbolic.Type_env.update list_only "#sequence_keys" Type.ListType;
+  check "missing key type cannot authorize a bound" (reduce list_only lower <> Expr.true_);
+  let other = Expr.LVar "#other_keys" in
+  Gillian.Symbolic.Type_env.update c.gamma "#other_keys" Type.ListType;
+  check "unrelated length is not a position bound"
+    (reduce c.gamma (Expr.BinOp (p, ILessThanEqual, UnOp (LstLen, other))) <> Expr.true_);
+  check "strict endpoint is not implied"
+    (reduce c.gamma (Expr.BinOp (Expr.zero_i, ILessThan, p)) <> Expr.true_);
+  let partial = Expr.UnOp (Car, Expr.EList []) in
+  check "shortcut does not erase a partial list input"
+    (try ignore (reduce c.gamma (Expr.BinOp (Expr.zero_i, ILessThanEqual,
+       Expr.BinOp (partial, KeyInsertIndex, absent_key)))); false
+     with Gillian.Logic.Reduction.ReductionException _ -> true);
+  let wrong = Expr.BinOp (sequence_keys, KeyInsertIndex, Expr.num 1.) in
+  check "Number key is not UTF16"
+    (try reduce c.gamma (Expr.BinOp (Expr.zero_i, ILessThanEqual, wrong)) <> Expr.true_
+     with Failure message -> String.starts_with ~prefix:"TYPE ERROR:" message)
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -944,6 +991,8 @@ let () =
             ("insertion ownership rejection", insertion_reject_guards);
             ("insertion no raw logical production", insertion_no_logical_production);
             ("insertion total domains", insertion_total_domains);
+            ("symbolic insertion position bounds", insertion_symbolic_bounds);
+            ("insertion bound domains", insertion_bound_domains);
             ("membership literal identity", membership_literals);
             ("membership exact symbolic sequence", membership_symbolic);
             ("membership total domains", membership_domains);

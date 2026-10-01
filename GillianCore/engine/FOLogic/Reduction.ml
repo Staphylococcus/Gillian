@@ -820,6 +820,38 @@ let reduce_length_index_comparison gamma left op right =
     Some (Expr.UnOp (Not, BinOp (right, FLessThanEqual, left)))
   else None
 
+(* insertion_position either returns the current prefix length or advances by
+   one into the remaining suffix. Induction on that suffix gives 0 <= p <= len.
+   Restrict this shortcut to typed atomic inputs: it must not erase a partial
+   computation embedded in the list/key, or infer an input's missing type. *)
+let reduce_key_insert_bound gamma left op right =
+  let typed_variable e t =
+    match e with
+    | Expr.LVar x -> Type_env.get gamma x = Some t
+    | _ -> false
+  in
+  let typed_key = function
+    | Expr.Lit (Utf16String _) -> true
+    | e -> typed_variable e Type.Utf16Type
+  in
+  let position = function
+    | Expr.BinOp (keys, KeyInsertIndex, key)
+      when typed_variable keys Type.ListType && typed_key key -> Some keys
+    | _ -> None
+  in
+  match op, left, right with
+  | BinOp.ILessThanEqual, Expr.Lit (Int n), p when Z.equal n Z.zero ->
+      Option.map (fun _ -> Expr.true_) (position p)
+  | ILessThanEqual, p, Expr.UnOp (LstLen, keys) ->
+      Option.bind (position p) (fun same ->
+        if Expr.equal same keys then Some Expr.true_ else None)
+  | ILessThan, p, Expr.Lit (Int n) when Z.equal n Z.zero ->
+      Option.map (fun _ -> Expr.false_) (position p)
+  | ILessThan, Expr.UnOp (LstLen, keys), p ->
+      Option.bind (position p) (fun same ->
+        if Expr.equal same keys then Some Expr.false_ else None)
+  | _ -> None
+
 (* TODO: can this whole mess be removed since we did sth similar with formulae? *)
 
 (** Reduction of logical expressions
@@ -872,6 +904,9 @@ let rec reduce_lexpr_loop
 
   let le =
     match le with
+    | BinOp (left, ((ILessThan | ILessThanEqual) as op), right) ->
+        Option.value ~default:le
+          (reduce_key_insert_bound gamma left op right)
     | BinOp (left, ((Equal | FLessThan | FLessThanEqual) as op), right) ->
         Option.value ~default:le
           (reduce_length_index_comparison gamma left op right)
