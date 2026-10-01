@@ -399,6 +399,158 @@ let symbolic_rejections () =
   check "overlap rejection preserves original"
     (snapshot occupied = occupied_before)
 
+let sequence_keys = Expr.LVar "#sequence_keys"
+let sequence_values = Expr.LVar "#sequence_values"
+
+let sequence_context () =
+  let context = pc () in
+  List.iter
+    (fun name -> Gillian.Symbolic.Type_env.update context.gamma name Type.ListType)
+    [ "#sequence_keys"; "#sequence_values" ];
+  Gillian.Symbolic.Pure_context.extend context.pfs
+    (Expr.BinOp (UnOp (LstLen, sequence_keys), Equal,
+                 UnOp (LstLen, sequence_values)));
+  context
+
+let sequence_make context =
+  let heap = Heap.init () in
+  Heap.set heap loc_name Fields.empty None (Some metadata);
+  produce ~context heap sequence_keys sequence_values
+
+let sequence_roundtrip () =
+  let context = sequence_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  check "whole sequence actual enumeration"
+    (snd (action ~context heap getAllProps [ loc ]) = [ loc; sequence_keys ]);
+  let remainder, outs = consume ~context heap in
+  check "whole sequence consume preserves both witnesses"
+    (outs = [ sequence_keys; sequence_values ]);
+  check "whole sequence consumption is persistent" (snapshot heap = before);
+  check "whole sequence consumption leaves metadata only"
+    (Heap.get remainder loc_name = Some ((Fields.empty, None), Some metadata));
+  let restored = produce ~context remainder (List.hd outs) (List.nth outs 1) in
+  check "whole sequence production preserves metadata"
+    (snd (action ~context restored getMetadata [ loc ]) = [ loc; metadata ]);
+  Heap.clean_up restored;
+  check "cleanup retains complete ownership"
+    (snd (action ~context restored getAllProps [ loc ]) = [ loc; sequence_keys ]);
+  Heap.is_well_formed restored
+
+let sequence_export_copy () =
+  let context = sequence_context () in
+  let heap = sequence_make context in
+  let assertions = Heap.assertions heap in
+  check "export contains whole witness, not raw empty cells"
+    (List.exists
+       (function Asrt.CorePred (name, [ l ], [ ks; vs ]) ->
+          name = aOrderedFields && l = loc && ks = sequence_keys && vs = sequence_values
+        | _ -> false) assertions);
+  let restore = List.fold_left
+      (fun h -> function
+        | Asrt.CorePred (name, ins, outs) -> (match Memory.produce name h context (ins @ outs) with
+            | [ { Branch.value = h; _ } ] -> h
+            | _ -> Alcotest.fail "sequence frame restoration failed")
+        | _ -> Alcotest.fail "unexpected exported assertion") (Heap.init ()) assertions in
+  let serialized = match Heap.of_yojson (Heap.to_yojson heap) with
+    | Ok h -> h | Error text -> Alcotest.fail text in
+  List.iter (fun h ->
+      check "copy/JSON/frame preserve arbitrary sequence"
+        (snd (action ~context h getAllProps [ loc ]) = [ loc; sequence_keys ]);
+      check "witness variables remain visible to substitution"
+        (Var.Set.mem "#sequence_keys" (Heap.lvars h)
+         && Var.Set.mem "#sequence_values" (Heap.lvars h));
+      Heap.is_well_formed h)
+    [ Heap.copy heap; serialized; restore ]
+
+let sequence_substitution () =
+  let context = sequence_context () in
+  let substitute ks vs =
+    let heap = sequence_make context in
+    let subst = Gillian.Symbolic.Subst.init
+        [ sequence_keys, ks; sequence_values, vs ] in
+    Heap.substitution_in_place subst heap; heap
+  in
+  let h = substitute (keys [ "z"; "a" ]) values in
+  check "concrete substitution retains supplied order" (has_order h [ "z"; "a" ]);
+  let remainder, out = consume h in
+  let exposed = produce remainder (List.hd out) (List.nth out 1) in
+  check "valid concrete witness can become exposed again"
+    (snd (action exposed getCell [ loc; key "z" ]) = [ loc; key "z"; Expr.num 1. ]);
+  List.iter (fun (ks, vs) -> reject_consume (substitute ks vs))
+    [ keys [ "z"; "z" ], values;
+      keys [ "z" ], values;
+      keys [ "10"; "2" ], values;
+      keys [ "z"; "a" ], Expr.EList [ Expr.num 1.; Expr.Lit Literal.Nono ] ];
+  let child = Expr.ALoc "#loc_sequence_child" in
+  let h = substitute (keys [ "z" ]) (Expr.EList [ child ]) in
+  check "child identities remain visible to freshness"
+    (Var.Set.mem "#loc_sequence_child" (Heap.alocs h))
+
+let sequence_aliases () =
+  let context = sequence_context () in
+  let target = "#loc_sequence_target" in
+  let h = sequence_make context in
+  Heap.merge_loc h loc_name loc_name;
+  check "identity substitution cannot delete ownership" (Heap.get_ordered h loc_name <> None);
+  Heap.merge_loc h target loc_name;
+  check "fresh location substitution moves whole ownership"
+    (Heap.get_ordered h target = Some (sequence_keys, sequence_values)
+     && not (Heap.has_loc h loc_name));
+  let collides expose =
+    let h = sequence_make context in
+    expose h;
+    let before = snapshot h in
+    let rejected = try Heap.merge_loc h target loc_name; false
+      with Gillian.Utils.Exceptions.Unsupported _ -> true in
+    check "aliasing exclusive ownership rejects" rejected;
+    check "alias rejection does not drop either footprint" (before = snapshot h)
+  in
+  collides (fun h -> Heap.set_ordered h target sequence_keys sequence_values);
+  collides (fun h -> Heap.init_object h target None);
+  collides (fun h -> Heap.set h target (Fields.add_abstract (key "z") (Expr.num 3.) Fields.empty) None None);
+  let h = sequence_make context in
+  Heap.set h target Fields.empty None (Some metadata);
+  Heap.merge_loc h target loc_name;
+  check "metadata-only alias frames without duplicate cells"
+    (Heap.get_ordered h target = Some (sequence_keys, sequence_values)
+     && Heap.get_met h target = Some metadata)
+
+let sequence_exclusivity () =
+  let context = sequence_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  List.iter (fun (name, args) ->
+      let rejected = try ignore (action ~context heap name args); false
+        with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError text) ->
+          text = "Unsupported ordered fields: operation requires exposed cells." in
+      check (name ^ " cannot bypass opaque ownership") rejected;
+      check "unsupported action retains original footprint" (snapshot heap = before))
+    [ getCell, [ loc; key "z" ]; setCell, [ loc; key "z"; Expr.num 4. ];
+      delCell, [ loc; key "z" ]; setProps, [ loc; Expr.ESet [] ];
+      delProps, [ loc; Expr.ESet [] ]; delObj, [ loc ];
+      Legacy.ga_to_setter aCell, [ loc; key "z"; Expr.Lit Literal.Nono ] ];
+  check "second whole sequence cannot overlap"
+    (Memory.produce aOrderedFields heap context [ loc; sequence_keys; sequence_values ] = []);
+  reject_produce heap (keys [ "z"; "a" ]) values;
+  let occupied = make () in
+  check "whole sequence cannot overlap exposed ownership"
+    (Memory.produce aOrderedFields occupied context [ loc; sequence_keys; sequence_values ] = []);
+  check "whole sequence is not discarded by rejection" (snapshot heap = before)
+
+let sequence_shape_rejections () =
+  let heap = Heap.init () in
+  check "untyped list witnesses cannot create whole fields"
+    (Memory.produce aOrderedFields heap (pc ()) [ loc; sequence_keys; sequence_values ] = []);
+  let context = sequence_context () in
+  List.iter (fun (ks, vs) ->
+      check "known malformed fragment cannot hide in opaque witness"
+        (Memory.produce aOrderedFields heap context [ loc; ks; vs ] = []))
+    [ keys [ "z"; "z" ], sequence_values;
+      keys [ "10"; "2" ], sequence_values;
+      Expr.num 1., sequence_values;
+      sequence_keys, Expr.EList [ Expr.Lit Literal.Nono ] ]
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -420,5 +572,11 @@ let () =
             ("conservative frame export", conservative_export);
             ("typed symbolic singleton roundtrip", symbolic_singleton);
             ("symbolic witness and ownership rejection", symbolic_rejections);
+            ("whole sequence roundtrip and metadata", sequence_roundtrip);
+            ("whole sequence export copy serialization", sequence_export_copy);
+            ("whole sequence value substitution", sequence_substitution);
+            ("whole sequence location aliases", sequence_aliases);
+            ("whole sequence exclusive action guards", sequence_exclusivity);
+            ("whole sequence known-shape rejection", sequence_shape_rejections);
           ] );
     ]
