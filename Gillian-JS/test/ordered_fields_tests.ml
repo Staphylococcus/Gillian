@@ -23,8 +23,7 @@ let pc () =
 let check msg condition = Alcotest.(check bool) msg true condition
 let snapshot h = Yojson.Safe.to_string (Heap.to_yojson h)
 
-let action h name args =
-  let context = pc () in
+let action ?(context = pc ()) h name args =
   match Legacy.execute_action name h context.pfs context.gamma args with
   | Ok [ (heap, out, _, _) ] -> (heap, out)
   | _ -> Alcotest.fail ("action failed: " ^ name)
@@ -37,13 +36,13 @@ let make () =
   let heap, _ = action heap setProps [ loc; Expr.ESet [ key "z"; key "a" ] ] in
   heap
 
-let consume heap =
-  match Memory.consume aOrderedFields heap (pc ()) [ loc ] with
+let consume ?(context = pc ()) heap =
+  match Memory.consume aOrderedFields heap context [ loc ] with
   | [ { Branch.value = Ok (heap, out); _ } ] -> (heap, out)
   | _ -> Alcotest.fail "real consume failed"
 
-let produce heap ks vs =
-  match Memory.produce aOrderedFields heap (pc ()) [ loc; ks; vs ] with
+let produce ?(context = pc ()) heap ks vs =
+  match Memory.produce aOrderedFields heap context [ loc; ks; vs ] with
   | [ { Branch.value = heap; _ } ] -> heap
   | _ -> Alcotest.fail "real produce failed"
 
@@ -328,6 +327,78 @@ let conservative_export () =
   in
   check "export never certifies an unknown order" rejected
 
+let symbolic_context typ =
+  let context = pc () in
+  Gillian.Symbolic.Type_env.update context.gamma "#symbolic_key" typ;
+  context
+
+let symbolic_key = Expr.LVar "#symbolic_key"
+
+let symbolic_singleton () =
+  List.iter
+    (fun typ ->
+      let context = symbolic_context typ in
+      let heap = Heap.init () in
+      (* Logical cell production has no insertion provenance. Singleton order
+         must be derived, not stamped onto this original frame. *)
+      Heap.set heap loc_name
+        (Fields.add_abstract symbolic_key (Expr.num 7.) Fields.empty)
+        (Some (Expr.ESet [ symbolic_key ])) (Some metadata);
+      let before = snapshot heap in
+      let expected_keys = Expr.EList [ symbolic_key ] in
+      check "typed singleton enumeration"
+        (snd (action ~context heap getAllProps [ loc ])
+        = [ loc; expected_keys ]);
+      let remainder, outs = consume ~context heap in
+      check "symbolic witness and value preserved"
+        (outs = [ expected_keys; Expr.EList [ Expr.num 7. ] ]);
+      check "consume/enumeration does not promote original history"
+        (snapshot heap = before);
+      let restored = produce ~context remainder (List.hd outs) (List.nth outs 1) in
+      check "roundtrip enumeration remains the symbolic key"
+        (snd (action ~context restored getAllProps [ loc ])
+        = [ loc; expected_keys ]);
+      check "roundtrip retains metadata"
+        (snd (action ~context restored getMetadata [ loc ]) = [ loc; metadata ]))
+    [ Type.Utf16Type; Type.StringType ]
+
+let symbolic_rejections () =
+  let heap = Heap.init () in
+  let before = snapshot heap in
+  let ks = Expr.EList [ symbolic_key ] in
+  let vs = Expr.EList [ Expr.num 7. ] in
+  List.iter
+    (fun context ->
+      check "untyped and non-string singleton keys rejected"
+        (Memory.produce aOrderedFields heap context [ loc; ks; vs ] = []);
+      let invalid = Heap.init () in
+      Heap.set invalid loc_name
+        (Fields.add_abstract symbolic_key (Expr.num 7.) Fields.empty)
+        (Some (Expr.ESet [ symbolic_key ])) (Some metadata);
+      check "consumer cannot admit a non-string singleton"
+        (match Memory.consume aOrderedFields invalid context [ loc ] with
+        | [ { Branch.value = Error _; _ } ] -> true
+        | _ -> false))
+    [ pc (); symbolic_context Type.NumberType; symbolic_context Type.BooleanType ];
+  let context = symbolic_context Type.Utf16Type in
+  List.iter
+    (fun (ks, vs) ->
+      check "typed key does not bypass witness validity"
+        (Memory.produce aOrderedFields heap context [ loc; ks; vs ] = []))
+    [
+      (ks, Expr.EList [ Expr.Lit Literal.Nono ]);
+      (ks, Expr.EList [ Expr.LVar "#possibly_absent" ]);
+      (Expr.EList [ symbolic_key; symbolic_key ], values);
+      (Expr.EList [ symbolic_key; key "other" ], values);
+    ];
+  check "failed symbolic production preserves heap" (snapshot heap = before);
+  let occupied = make () in
+  let occupied_before = snapshot occupied in
+  check "symbolic witness cannot overwrite an owned footprint"
+    (Memory.produce aOrderedFields occupied context [ loc; ks; vs ] = []);
+  check "overlap rejection preserves original"
+    (snapshot occupied = occupied_before)
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -347,5 +418,7 @@ let () =
             ("complete frame assertion roundtrip", frame_export);
             ("frame export after mutation", frame_export_mutation);
             ("conservative frame export", conservative_export);
+            ("typed symbolic singleton roundtrip", symbolic_singleton);
+            ("symbolic witness and ownership rejection", symbolic_rejections);
           ] );
     ]

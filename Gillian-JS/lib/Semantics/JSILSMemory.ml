@@ -500,6 +500,35 @@ module M = struct
     in
     result
 
+  (* A single present string key has only one observable order, independently
+     of its contents or insertion history. Keep this at the typed memory layer:
+     SFVL alone cannot establish that a symbolic expression denotes a key. *)
+  let single_string_key pfs gamma = function
+    | [ key ] ->
+        FOSolver.check_entailment Containers.SS.empty pfs
+          [
+            Expr.BinOp
+              ( BinOp (UnOp (TypeOf, key), Equal, Lit (Type StringType)),
+                Or,
+                BinOp (UnOp (TypeOf, key), Equal, Lit (Type Utf16Type)) );
+          ]
+          gamma
+    | _ -> false
+
+  let observable_field_names pfs gamma fields =
+    let keys = SFVL.field_names fields in
+    match keys with
+    | [ key ]
+      when single_string_key pfs gamma keys
+           && FOSolver.check_entailment Containers.SS.empty pfs
+                [
+                  Expr.UnOp
+                    (Not, BinOp (Option.get (SFVL.get key fields), Equal, Lit Nono));
+                ]
+                gamma ->
+        keys
+    | _ -> SFVL.ordered_field_names fields
+
   let get_full_domain (heap : t) (pfs : PFS.t) (gamma : Type_env.t) (loc : vt) :
       action_ret =
     let loc_name = get_loc_name pfs gamma loc in
@@ -526,7 +555,7 @@ module M = struct
             Ok
               [
                 ( heap,
-                  [ loc; EList (SFVL.ordered_field_names pos_fv_list) ],
+                  [ loc; EList (observable_field_names pfs gamma pos_fv_list) ],
                   [],
                   [] );
               ]
@@ -598,11 +627,14 @@ module M = struct
               let _, present =
                 SFVL.partition (fun _ v -> v = Lit Nono) fields
               in
-              match ordered_key_names (SFVL.field_names present) with
-              | None -> ordered_fields_error loc
-              | Some _ ->
+              let keys = SFVL.field_names present in
+              if
+                Option.is_none (ordered_key_names keys)
+                && not (single_string_key pfs gamma keys)
+              then ordered_fields_error loc
+              else
                   (* Keep the existing unknown-order rejection authoritative. *)
-                  let keys = SFVL.ordered_field_names present in
+                  let keys = observable_field_names pfs gamma present in
                   let values =
                     List.map (fun k -> Option.get (SFVL.get k present)) keys
                   in
@@ -640,10 +672,12 @@ module M = struct
     in
     match (as_list keys, as_list values) with
     | Some keys, Some values when List.length keys = List.length values -> (
-        match ordered_key_names keys with
-        | Some names
-          when Property_order.sort names = names
-               && ordered_values_present pfs gamma values ->
+        let valid_order =
+          match ordered_key_names keys with
+          | Some names -> Property_order.sort names = names
+          | None -> single_string_key pfs gamma keys
+        in
+        if valid_order && ordered_values_present pfs gamma values then
             let fields =
               List.fold_left2
                 (fun fs key value -> SFVL.add key value fs)
@@ -657,7 +691,10 @@ module M = struct
               | Some ((existing, None), _) -> SFVL.is_empty existing
               | _ -> false
             in
-            if (not vacant) || SFVL.ordered_field_names fields <> keys then
+            if
+              (not vacant)
+              || observable_field_names pfs gamma fields <> keys
+            then
               ordered_fields_error loc
             else
               let metadata =
@@ -668,7 +705,7 @@ module M = struct
               let heap = SHeap.copy heap in
               SHeap.set heap name fields (Some (ESet keys)) metadata;
               Ok [ (heap, [], new_pfs, []) ]
-        | _ -> ordered_fields_error loc)
+        else ordered_fields_error loc)
     | _ -> ordered_fields_error loc
 
   (* Program actions and logical producers share this legacy implementation.
