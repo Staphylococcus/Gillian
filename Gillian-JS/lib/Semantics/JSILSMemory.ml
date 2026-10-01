@@ -595,10 +595,9 @@ module M = struct
      owned value. No raw cell is exposed or consumed by this read. *)
   let ordered_cell_index pfs gamma keys values prop =
     let reduce = Reduction.reduce_lexpr ~pfs ~gamma in
-    match reduce prop with
+    let selection = function
     | Expr.BinOp (selected_keys, LstNth, index)
-      when reduce selected_keys = reduce keys
-           && ordered_sequence_valid pfs gamma keys values ->
+      when reduce selected_keys = reduce keys ->
         let bounds =
           [ Expr.BinOp (UnOp (TypeOf, index), Equal, Lit (Type IntType));
             Expr.BinOp (Expr.zero_i, ILessThanEqual, index);
@@ -609,6 +608,30 @@ module M = struct
           Some index
         else None
     | _ -> None
+    in
+    if not (ordered_sequence_valid pfs gamma keys values) then None
+    else match selection (reduce prop) with
+    | Some _ as selected -> selected
+    | None ->
+        (* Named runtime accesses may denote an entry of the complete owned
+           sequence. A pure equality supplies a candidate, never ownership:
+           check the same-list selection, its bounds and the equality before
+           reading/updating the paired value. Unrelated lists cannot qualify. *)
+        let named selected name =
+          if reduce name <> reduce prop then None
+          else match selection selected with
+          | Some index when FOSolver.is_equal ~pfs ~gamma selected prop ->
+              Some index
+          | _ -> None
+        in
+        List.find_map
+          (function
+            | Expr.BinOp (left, (Equal | ValueEqual), right) ->
+                (match named left right with
+                | Some _ as index -> index
+                | None -> named right left)
+            | _ -> None)
+          (PFS.to_list pfs)
 
   (* Nonmembership is checked against the complete owned sequence; a missing
      positive witness or an unrelated list cannot establish absence. *)

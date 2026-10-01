@@ -1042,6 +1042,91 @@ let update_slice_domains () =
   Engine.Totality.check_expression ~proof:true ~proves ~evaluate
     ~require:(fun _ condition -> if not (proves condition) then Alcotest.fail "replacement slice domain") term
 
+let length_key = ukey "length"
+
+let named_context ?(lower = true) ?(upper = true) ?(reverse = false)
+    ?(identity = false) () =
+  let c = update_context ~lower ~upper () in
+  let left, right = if reverse then length_key, selected_key else selected_key, length_key in
+  Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (left, (if identity then ValueEqual else Equal), right));
+  c
+
+let named_sequence_read () =
+  List.iter (fun (reverse, identity) ->
+    let c = named_context ~reverse ~identity () in
+    let heap = sequence_make c in
+    let before = snapshot heap in
+    check "named owned key passes total read guard"
+      (Legacy.prepare_total_action getCell heap c.pfs c.gamma [loc; length_key] = [loc; length_key]);
+    check "literal lookup returns the owned paired value"
+      (snd (action ~context:c heap getCell [loc; length_key]) = [loc; length_key; selected_value]);
+    check "named read leaves metadata and complete ownership intact"
+      (snapshot heap = before && snd (consume ~context:c heap) = [sequence_keys; sequence_values]))
+    [false, false; true, false; false, true; true, true]
+
+let named_sequence_update () =
+  let c = named_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let desc = Expr.EList [ukey "d"; Expr.num 4294967295.; Expr.bool true;
+    Expr.bool false; Expr.bool false] in
+  let args = [loc; length_key; desc] in
+  check "named descriptor update passes total write guard"
+    (Legacy.prepare_total_action setCell heap c.pfs c.gamma args = args);
+  let after, out = action ~context:c heap setCell args in
+  check "named write changes only the selected descriptor"
+    (out = [] && Heap.get_ordered after loc_name = Some
+      (sequence_keys, replacement sequence_values sequence_index desc));
+  check "named write preserves metadata and original heap branch"
+    (snapshot heap = before && Heap.get_met after loc_name = Some metadata)
+
+let named_sequence_wrong_list () =
+  let c = update_context () in
+  let other = Expr.LVar "#other_named_keys" in
+  Gillian.Symbolic.Type_env.update c.gamma "#other_named_keys" Type.ListType;
+  Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (BinOp (other, LstNth, sequence_index), Equal, length_key));
+  reject_update c length_key (Expr.bool true)
+
+let named_sequence_bounds () =
+  reject_update (named_context ~lower:false ()) length_key (Expr.bool true);
+  reject_update (named_context ~upper:false ()) length_key (Expr.bool true)
+
+let named_sequence_missing_equality () =
+  reject_update (update_context ()) length_key (Expr.bool true);
+  reject_update (named_context ()) (ukey "unrelated") (Expr.bool true)
+
+let named_sequence_no_logical_write () =
+  let c = named_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try ignore (Memory.produce aCell heap c
+      [loc; length_key; Expr.bool true]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "named alias cannot authorize logical production" rejected;
+  check "rejected named production preserves whole ownership" (snapshot heap = before)
+
+let named_sequence_no_split () =
+  let c = named_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try ignore (Memory.consume aCell heap c [loc; length_key]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "named read cannot split a Cell from complete ownership" rejected;
+  check "rejected named split leaves the original resource" (snapshot heap = before)
+
+let named_sequence_no_ownership () =
+  let c = named_context () in
+  let heap = Heap.init () in
+  Heap.init_object heap loc_name (Some metadata);
+  let before = snapshot heap in
+  let rejected = try ignore (Legacy.prepare_total_action setCell heap c.pfs c.gamma
+      [loc; length_key; Expr.bool true]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "pure key equality supplies no cell ownership" rejected;
+  check "unowned named write preserves metadata-only input" (snapshot heap = before)
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -1101,5 +1186,13 @@ let () =
             ("presence cannot authorize absence", absence_present);
             ("absence requires string key", absence_nonkey);
             ("absence cannot split ownership", absence_no_cell_split);
+            ("named whole-field read equality", named_sequence_read);
+            ("named whole-field descriptor update", named_sequence_update);
+            ("named access requires owned key list", named_sequence_wrong_list);
+            ("named access requires proved index bounds", named_sequence_bounds);
+            ("named access requires key equality", named_sequence_missing_equality);
+            ("named access cannot authorize logical production", named_sequence_no_logical_write);
+            ("named access cannot split ownership", named_sequence_no_split);
+            ("named equality cannot supply ownership", named_sequence_no_ownership);
           ] );
     ]
