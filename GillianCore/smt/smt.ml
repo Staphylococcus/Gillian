@@ -1274,8 +1274,24 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- keys = get_list p1 in
       let>- name = get_utf16 p2 in
       let index = app_ "gil_key_index" [ name.expr ] in
-      ite (num_lt index (int_k 0)) (seq_len keys.expr)
-        (app_ "gil_index_position" [ keys.expr; index ]) >- IntType
+      let length = seq_len keys.expr in
+      let position = ite (num_lt index (int_k 0)) length
+          (app_ "gil_index_position" [ keys.expr; index ]) in
+      let last = seq_nth keys.expr (num_sub length (int_k 1)) in
+      let last_index = ite (Lit_operations.Utf16String.recognize last)
+          (app_ "gil_key_index" [ Lit_operations.Utf16String.access last ])
+          (int_k (-1)) in
+      (* Induction on the finite key suffix: if its final element stops the
+         scan, the first stop is at most length-1. This is a consequence of
+         gil_index_position, not an order/ownership assumption about the list.
+         Empty lists, ordinary inserted names, and a smaller terminal index
+         must retain their possible position == length. *)
+      let stops_at_last = bool_and (num_lt (int_k 0) length)
+          (bool_and (num_leq (int_k 0) index)
+             (bool_or (num_lt last_index (int_k 0)) (num_lt index last_index))) in
+      native ~facts:[ num_leq (int_k 0) position; num_leq position length;
+          bool_implies stops_at_last (num_lt position length) ]
+        IntType position
   | LstContains ->
       let>- list = get_list p1 in
       let>- value = simple_wrap p2 in
@@ -1823,9 +1839,19 @@ let rec encode_logical_expression
       let>- xs = get_list xs in
       let>- i = get_int i in
       let>- value = simple_wrap value in
-      seq_concat [ seq_extract xs.expr (int_k 0) i.expr;
+      let length = seq_len xs.expr in
+      let inserted = seq_concat [ seq_extract xs.expr (int_k 0) i.expr;
         seq_unit value.expr;
-        seq_extract xs.expr i.expr (num_sub (seq_len xs.expr) i.expr) ] >- ListType
+        seq_extract xs.expr i.expr (num_sub length i.expr) ] in
+      (* With 0 <= i < length, the nonempty suffix still ends in the old final
+         element, now at index length. Keep this exact sequence consequence
+         separate from heap ownership and from the append case i == length. *)
+      let before_end = bool_and (num_leq (int_k 0) i.expr)
+          (num_lt i.expr length) in
+      native ~facts:[ bool_implies before_end
+          (eq (seq_nth inserted length)
+             (seq_nth xs.expr (num_sub length (int_k 1)))) ]
+        ListType inserted
   | NOp (LstInsert, _) -> exceptf "List insertion requires exactly three arguments"
   | NOp (LstCat, les) ->
       let>-- les = List.map f les in

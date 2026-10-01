@@ -813,6 +813,74 @@ let uint32_formatter_fallback () =
           (Gamma.as_hashtbl (Gamma.init ()))))
     [ (1.5, "01.5"); (-1., "-01"); (4294967296., "04294967296") ]
 
+let insertion_terminal_bound () =
+  let keys = Expr.LVar "#terminal_keys" in
+  let number = Expr.LVar "#terminal_number" in
+  let types () =
+    let g = Gamma.init () in
+    Gamma.update g "#terminal_keys" ListType;
+    Gamma.update g "#terminal_name" Utf16Type;
+    Gamma.update g "#terminal_position" IntType;
+    Gamma.update g "#terminal_number" NumberType; g in
+  let text s = Expr.Lit (Literal.Utf16String (Codec.of_canonical s)) in
+  let len = Expr.UnOp (LstLen, keys) in
+  let last = bin LstNth keys (bin IMinus len (Expr.int 1)) in
+  let nonempty = bin ILessThanEqual (Expr.int 1) len in
+  let position key = bin KeyInsertIndex keys key in
+  let before key = bin ILessThan (position key) len in
+  let interval = [ Expr.UnOp (IsInt, number);
+      bin FLessThanEqual (Expr.num 0.) number;
+      bin FLessThan number (Expr.num 4294967295.) ] in
+  let checks () =
+    let arbitrary_position = position (Expr.LVar "#terminal_name") in
+    check ~types "all insertion scans retain a nonnegative position" false
+      [ not_ (bin ILessThanEqual (Expr.int 0) arbitrary_position) ];
+    check ~types "all insertion scans retain a position at most list length"
+      false [ not_ (bin ILessThanEqual arbitrary_position len) ];
+    let p = Expr.LVar "#terminal_position" in
+    let inserted = Expr.NOp (LstInsert, [ keys; p; Expr.EList [] ]) in
+    check ~types "insertion before the end preserves an arbitrary final element"
+      false [ bin ILessThanEqual (Expr.int 0) p; bin ILessThan p len;
+        not_ (bin ValueEqual (bin LstNth inserted len) last) ];
+    List.iter (fun (label, list, position) ->
+        let inserted = Expr.NOp (LstInsert, [ keys; Expr.int position; Expr.EList [] ]) in
+        check ~types label true [ bin ValueEqual keys (Expr.EList list);
+          bin ValueEqual (bin LstNth inserted len) (Expr.EList []) ])
+      [ "append leaves the new element last", [text "length"], 1;
+        "insertion into empty leaves the new element last", [], 0 ];
+    check ~types "every allowed index stops before an arbitrary final length cell"
+      false (interval @ [ nonempty; bin ValueEqual last (text "length");
+        not_ (before (Expr.UnOp (NumberToUtf16, number))) ]);
+    check ~types "a larger final index also stops the finite scan" false
+      [ nonempty; bin ValueEqual last (text "3"); not_ (before (text "2")) ];
+    check ~types "a non-UTF16 final element stops without inventing its type"
+      false [ nonempty; bin ValueEqual last (Expr.num 7.);
+        not_ (before (text "0")) ];
+    (* Each disabled guard has an actual position == length witness. A
+       blanket strict bound would erase these SAT models. *)
+    List.iter (fun (label, list, key) ->
+        check ~types label true [ bin ValueEqual keys (Expr.EList list);
+          eq (position key) len ])
+      [ "empty list retains the append position", [], text "0";
+        "ordinary inserted names retain append", [ text "length" ], text "z";
+        "the excluded Uint32 boundary retains append", [ text "length" ],
+          text "4294967295";
+        "a smaller terminal index retains append", [ text "1" ], text "2";
+        "an equal terminal index retains append", [ text "2" ], text "2" ];
+    let store = Engine.CExprEval.CStore.init [] in
+    List.iter (fun (list, key, expected) ->
+        let term = bin KeyInsertIndex (Expr.EList list) key in
+        Alcotest.(check bool) "terminal bound agrees with concrete insertion" true
+          (Literal.equal (Engine.CExprEval.evaluate_expr store term)
+             (Literal.Int (Z.of_int expected))))
+      [ [text "0"; text "length"], text "2", 1;
+        [text "3"; text "length"], text "2", 0;
+        [text "0"; Expr.num 7.], text "2", 1 ]
+  in
+  let saved = !Gillian.Utils.Config.dump_smt in
+  Gillian.Utils.Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Gillian.Utils.Config.dump_smt := saved) checks
+
 let concrete_legacy_operations () =
   let store = Engine.CExprEval.CStore.init [] in
   let eval = Engine.CExprEval.evaluate_expr store in
@@ -1330,4 +1398,5 @@ let tests =
     ("exact Uint32 decimal literals", `Quick, uint32_formatter_literals);
     ("symbolic Uint32 index spelling", `Quick, uint32_formatter_indices);
     ("Uint32 formatter fallback guards", `Quick, uint32_formatter_fallback);
+    ("insertion terminal bound", `Quick, insertion_terminal_bound);
   ]
