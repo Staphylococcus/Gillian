@@ -155,6 +155,9 @@ let rec missing_expr (kb : KB.t) (e : Expr.t) : KB.t list =
        are known if and only if they are in the knowledge base *)
     | PVar _ | LVar _ | ALoc _ -> [ KB.singleton e ]
     | UnOp (LstLen, UnOp (StrToBytes, bytes)) -> f bytes
+    (* Symbolic insertion can survive reduction. Knowing its operands permits
+       evaluation; this dependency analysis proves no length or domain fact. *)
+    | UnOp (LstLen, NOp (LstInsert, args)) -> join args
     | UnOp (LstLen, e1) -> (
         (* If a LstLen exists, then it must be of a program or a logical variable.
            All other cases (literal list, expression list, list concat, sub-list)
@@ -213,7 +216,7 @@ let rec learn_expr
   let f = learn_expr kb in
   match e with
   (* Literals, abstract locations, sublists, and sets are never invertible *)
-  | Lit _ | LstSub _ | ESet _ -> []
+  | Lit _ | LstSub _ | ESet _ | UnOp (LstLen, NOp (LstInsert, _)) -> []
   (* Nothing is learned if the top-level expr is a program or a logical variable *)
   (* Nothing is learned if the program or logical variable is already known *)
   | (PVar _ | LVar _ | ALoc _ | UnOp (LstLen, _)) when top_level || KB.mem e kb

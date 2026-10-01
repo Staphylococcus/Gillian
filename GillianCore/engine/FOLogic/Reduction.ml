@@ -335,7 +335,16 @@ let rec get_nth_of_list (pfs : PFS.t) (lst : Expr.t) (idx : int) : Expr.t option
       in
       f lst idx
   | Expr.BinOp (x, LstRepeat, _) -> Some x
-  | _ -> None
+  | _ ->
+      (* A supplied value-identity with a finite list fixes each component,
+         including signed zeros. Do not infer a list or its elements from
+         ordinary scalar equality or an unknown output witness. *)
+      List.find_map (function
+        | Expr.BinOp (e, ValueEqual, EList xs) when Expr.equal e lst ->
+            f (Expr.EList xs) idx
+        | Expr.BinOp (EList xs, ValueEqual, e) when Expr.equal e lst ->
+            f (Expr.EList xs) idx
+        | _ -> None) (PFS.to_list pfs)
 
 (* Finding the nth element of a list *)
 let get_head_and_tail_of_list ~pfs lst =
@@ -824,7 +833,7 @@ let reduce_length_index_comparison gamma left op right =
    one into the remaining suffix. Induction on that suffix gives 0 <= p <= len.
    Restrict this shortcut to typed atomic inputs: it must not erase a partial
    computation embedded in the list/key, or infer an input's missing type. *)
-let reduce_key_insert_bound gamma left op right =
+let reduce_key_insert_bound pfs gamma left op right =
   let typed_variable e t =
     match e with
     | Expr.LVar x -> Type_env.get gamma x = Some t
@@ -839,6 +848,39 @@ let reduce_key_insert_bound gamma left op right =
       when typed_variable keys Type.ListType && typed_key key -> Some keys
     | _ -> None
   in
+  (* A canonical array index must stop before a known final ordinary length
+     key. Keep every premise explicit; missing type, spelling, range or final
+     key information must retain the general (possibly append) position. *)
+  let stops_before_length keys key =
+    let len = Expr.UnOp (LstLen, keys) in
+    let nonempty = PFS.mem pfs (Expr.BinOp (Expr.one_i, ILessThanEqual, len)) in
+    let is_last e =
+      Expr.equal e (Expr.BinOp (keys, LstNth,
+        BinOp (len, IMinus, Expr.one_i))) ||
+      Expr.equal e (Expr.BinOp (keys, LstNth,
+        BinOp (Expr.int (-1), IPlus, len))) in
+    let length_key = Expr.Lit (Utf16String (Utf16.of_canonical "length")) in
+    let last_known = PFS.fold_left (fun found (a : Expr.t) -> found ||
+      match a with
+      | BinOp (a, (Equal | ValueEqual), b) ->
+          (is_last a && Expr.equal b length_key) ||
+          (is_last b && Expr.equal a length_key)
+      | _ -> false) false pfs in
+    let canonical_number n =
+      let typed = typed_variable n Type.NumberType ||
+        (match n with
+        | Expr.UnOp (Utf16ToNumber, k) -> typed_key k
+        | _ -> false) in
+      typed && PFS.mem pfs (Expr.UnOp (IsInt, n)) &&
+      PFS.mem pfs (Expr.BinOp (Expr.num 0., FLessThanEqual, n)) &&
+      PFS.mem pfs (Expr.BinOp (n, FLessThan, Expr.num 4294967295.)) in
+    let canonical = PFS.fold_left (fun found (a : Expr.t) -> found ||
+      match a with
+      | BinOp (k, Equal, UnOp (NumberToUtf16, n))
+      | BinOp (UnOp (NumberToUtf16, n), Equal, k) ->
+          Expr.equal k key && canonical_number n
+      | _ -> false) false pfs in
+    nonempty && last_known && canonical in
   match op, left, right with
   | BinOp.ILessThanEqual, Expr.Lit (Int n), p when Z.equal n Z.zero ->
       Option.map (fun _ -> Expr.true_) (position p)
@@ -850,6 +892,11 @@ let reduce_key_insert_bound gamma left op right =
   | ILessThan, Expr.UnOp (LstLen, keys), p ->
       Option.bind (position p) (fun same ->
         if Expr.equal same keys then Some Expr.false_ else None)
+  | ILessThan, (Expr.BinOp (_, KeyInsertIndex, key) as p),
+      Expr.UnOp (LstLen, keys) ->
+      Option.bind (position p) (fun same ->
+        if Expr.equal same keys && stops_before_length keys key
+        then Some Expr.true_ else None)
   | _ -> None
 
 (* TODO: can this whole mess be removed since we did sth similar with formulae? *)
@@ -906,7 +953,7 @@ let rec reduce_lexpr_loop
     match le with
     | BinOp (left, ((ILessThan | ILessThanEqual) as op), right) ->
         Option.value ~default:le
-          (reduce_key_insert_bound gamma left op right)
+          (reduce_key_insert_bound pfs gamma left op right)
     | BinOp (left, ((Equal | FLessThan | FLessThanEqual) as op), right) ->
         Option.value ~default:le
           (reduce_length_index_comparison gamma left op right)
@@ -1490,6 +1537,17 @@ let rec reduce_lexpr_loop
             let les = List.map Expr.list_length les in
             List.fold_left Expr.Infix.( + ) (List.hd les) (List.tl les)
         | LstLen, LstSub (_, _, len) when lexpr_is_list gamma fle -> len
+        | LstLen, NOp (LstInsert, [ xs; position; _ ]) ->
+            let known_list = match xs with
+              | LVar x | PVar x -> Type_env.get gamma x = Some Type.ListType
+              | Lit (LList _) | EList _ -> true
+              | _ -> false in
+            let lower : Expr.t = BinOp (Expr.zero_i, ILessThanEqual, position) in
+            let upper : Expr.t = BinOp (position, ILessThanEqual, UnOp (LstLen, xs)) in
+            let proved bound = PFS.mem pfs bound || Expr.equal (f bound) Expr.true_ in
+            if known_list && proved lower && proved upper then
+              f (BinOp (UnOp (LstLen, xs), IPlus, Expr.one_i))
+            else def
         | LstLen, UnOp (LstRev, le) -> UnOp (LstLen, f le)
         | LstLen, _ when lexpr_is_list gamma fle -> def
         (* List operations: reverse *)
@@ -1973,11 +2031,49 @@ let rec reduce_lexpr_loop
         | _ -> BinOp (list, LstContains, value))
     (* BinOps: List indexing *)
     | BinOp (le, LstNth, idx) -> (
+        (* Snapshot input types before recursive reduction can infer them.
+           Inference in a bound probe cannot authorize this new shortcut. *)
+        let typed_atom (e : Expr.t) t = match e with
+          | LVar x | PVar x -> Type_env.get gamma x = Some t
+          | Lit l -> Literal.type_of l = t
+          | _ -> false in
+        let transfer_inputs_known = match le with
+          | NOp (LstInsert, [ xs; position; _ ]) ->
+              typed_atom xs Type.ListType &&
+              (typed_atom position Type.IntType || match position with
+               | BinOp (keys, KeyInsertIndex, key) ->
+                   typed_atom keys Type.ListType && typed_atom key Type.Utf16Type
+               | _ -> false)
+          | _ -> false in
         let fle = f le in
         let fidx = f idx in
-        match fidx with
+        let transferred = match fle with
+          | NOp (LstInsert, [ xs; position; _ ]) ->
+              let known_list = match xs with
+                | LVar x | PVar x -> Type_env.get gamma x = Some Type.ListType
+                | _ -> false in
+              let len = Expr.UnOp (LstLen, xs) in
+              let lengths = len :: get_equal_expressions pfs len in
+              let proved bound = PFS.mem pfs bound ||
+                Expr.equal (f bound) Expr.true_ in
+              let lower : Expr.t = BinOp (Expr.zero_i, ILessThanEqual, position) in
+              let strict = List.exists (fun length ->
+                proved (Expr.BinOp (position, ILessThan, length))) lengths in
+              if transfer_inputs_known && known_list &&
+                 List.exists (Expr.equal fidx) lengths &&
+                 proved lower && strict then
+                (* Inserting strictly before the old end shifts its last
+                   element right by one. Equal list-length premises permit a
+                   separate key list to index the descriptor list; they do not
+                   identify the lists or produce any heap resource. *)
+                Some (f (Expr.BinOp (xs, LstNth,
+                  f (Expr.BinOp (fidx, IMinus, Expr.one_i)))))
+              else None
+          | _ -> None in
+        match transferred, fidx with
+        | Some result, _ -> result
         (* Index is a non-negative integer *)
-        | Lit (Int n) when Z.leq Z.zero n ->
+        | None, Lit (Int n) when Z.leq Z.zero n ->
             if lexpr_is_list gamma fle then
               Option.value
                 ~default:(Expr.BinOp (fle, LstNth, fidx))
@@ -1990,13 +2086,13 @@ let rec reduce_lexpr_loop
               L.normal (fun fmt -> fmt "%s" err_msg);
               raise (ReductionException (BinOp (fle, LstNth, fidx), err_msg))
         (* Index is a number, but is either not an integer or is negative *)
-        | Lit (Int _) | Lit (Num _) ->
+        | None, (Lit (Int _) | Lit (Num _)) ->
             let err_msg =
               "LstNth(list, index): index is smaller than zero or a float."
             in
             raise (ReductionException (BinOp (fle, LstNth, fidx), err_msg))
         (* All other cases *)
-        | _ -> BinOp (fle, LstNth, fidx))
+        | None, _ -> BinOp (fle, LstNth, fidx))
     | BinOp (x, LstRepeat, Lit (Int i)) when Z.lt i (Z.of_int 100) ->
         let fx = f x in
         let result = List.init (Z.to_int i) (fun _ -> fx) in

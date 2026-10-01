@@ -1848,7 +1848,13 @@ let rec encode_logical_expression
          separate from heap ownership and from the append case i == length. *)
       let before_end = bool_and (num_leq (int_k 0) i.expr)
           (num_lt i.expr length) in
-      native ~facts:[ bool_implies before_end
+      let in_bounds = bool_and (num_leq (int_k 0) i.expr)
+          (num_leq i.expr length) in
+      (* The two in-range slices have lengths i and length-i. Their singleton
+         insertion therefore adds exactly one, including at either endpoint. *)
+      native ~facts:[ bool_implies in_bounds
+          (eq (seq_len inserted) (num_add length (int_k 1)));
+          bool_implies before_end
           (eq (seq_nth inserted length)
              (seq_nth xs.expr (num_sub length (int_k 1)))) ]
         ListType inserted

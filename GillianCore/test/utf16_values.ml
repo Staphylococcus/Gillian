@@ -881,6 +881,147 @@ let insertion_terminal_bound () =
   Gillian.Utils.Config.dump_smt := true;
   Fun.protect ~finally:(fun () -> Gillian.Utils.Config.dump_smt := saved) checks
 
+let insertion_array_width () =
+  let xs = Expr.LVar "#width_list" and p = Expr.LVar "#width_position" in
+  let types () =
+    let g = Gamma.init () in
+    Gamma.update g "#width_list" ListType;
+    Gamma.update g "#width_position" IntType; g in
+  let len = Expr.UnOp (LstLen, xs) in
+  let inserted = Expr.NOp (LstInsert, [ xs; p; Expr.EList [] ]) in
+  let after = Expr.UnOp (LstLen, inserted) in
+  let bounds = [ bin ILessThanEqual (Expr.int 0) p;
+      bin ILessThanEqual p len ] in
+  let context assumptions =
+    let pfs = Gillian.Symbolic.Pure_context.init () in
+    List.iter (Gillian.Symbolic.Pure_context.extend pfs) assumptions; pfs in
+  let reduced assumptions = Reduction.reduce_lexpr ~gamma:(types ())
+      ~pfs:(context assumptions) after in
+  let successor = Reduction.reduce_lexpr ~gamma:(types ())
+      (bin IPlus len (Expr.int 1)) in
+  let unchanged = reduced [] in
+  Alcotest.(check bool) "proved insertion bounds canonicalize its length" true
+    (Expr.equal (reduced bounds) successor);
+  Alcotest.(check bool) "unknown bounds cannot authorize the successor" false
+    (Expr.equal unchanged successor);
+  List.iter (fun assumptions ->
+      Alcotest.(check bool) "missing insertion bound preserves the operation"
+        true (Expr.equal (reduced assumptions) unchanged))
+    [ []; [ List.hd bounds ]; [ List.nth bounds 1 ] ];
+  let position = bin KeyInsertIndex xs (value [ 48 ]) in
+  let scan_insert = Expr.UnOp (LstLen, Expr.NOp (LstInsert,
+      [ xs; position; Expr.EList [] ])) in
+  Alcotest.(check bool) "typed scan bounds canonicalize insertion length" true
+    (Expr.equal (Reduction.reduce_lexpr ~gamma:(types ()) scan_insert)
+      successor);
+  Alcotest.(check bool) "missing list type cannot authorize length reduction"
+    false (try Expr.equal (Reduction.reduce_lexpr scan_insert)
+      successor
+      with Reduction.ReductionException _ -> false);
+  check ~types "in-range insertion preserves the complete array-width bound"
+    false (bounds @ [ bin ILessThanEqual len (Expr.int 4294967295);
+      bin ILessThan (Expr.int 4294967296) after ]);
+  check ~types "the maximum footprint retains its exact successor"
+    false (bounds @ [ eq len (Expr.int 4294967295);
+      eq p len; not_ (eq after (Expr.int 4294967296)) ]);
+  List.iter (fun (count, position) ->
+      let list = Expr.EList (List.init count (fun _ -> Expr.bool true)) in
+      let term = Expr.NOp (LstInsert, [ list; Expr.int position; Expr.EList [] ]) in
+      let expected = Literal.Int (Z.of_int (count + 1)) in
+      Alcotest.(check bool) "endpoint/interior lengths agree with concrete insertion"
+        true (Literal.equal expected
+          (Engine.CExprEval.evaluate_expr (Engine.CExprEval.CStore.init [])
+            (Expr.UnOp (LstLen, term)))))
+    [ 0, 0; 1, 0; 1, 1; 2, 1; 2, 2 ];
+  (* Outside the GIL operation's domain, only inspect the SMT encoding. The
+     ordinary reducer must keep rejecting this invalid insertion. *)
+  Alcotest.(check bool) "negative indices do not acquire an unguarded length identity"
+    true (Smt.is_sat (Expr.Set.of_list
+      [ eq xs (Expr.EList [ Expr.bool true; Expr.bool false ]);
+        eq p (Expr.int (-1)); not_ (eq after (bin IPlus len (Expr.int 1))) ])
+      (Gamma.as_hashtbl (types ())));
+  check ~types "a false insertion length has a genuine countermodel" true
+    [ eq xs (Expr.EList []); eq p (Expr.int 0);
+      not_ (eq after (Expr.int 2)) ]
+
+let insertion_terminal_reduction () =
+  let keys = Expr.LVar "#transfer_keys" and values = Expr.LVar "#transfer_values" in
+  let key = Expr.LVar "#transfer_key" and old = Expr.LVar "#transfer_old" in
+  let types () =
+    let g = Gamma.init () in
+    List.iter (fun name -> Gamma.update g name ListType)
+      [ "#transfer_keys"; "#transfer_values" ];
+    Gamma.update g "#transfer_key" Utf16Type;
+    Gamma.update g "#transfer_old" NumberType; g in
+  let len = Expr.UnOp (LstLen, keys) in
+  let last_index = bin IPlus (Expr.int (-1)) len in
+  let old_descriptor = bin LstNth values last_index in
+  let text s = Expr.Lit (Literal.Utf16String (Codec.of_canonical s)) in
+  let descriptor = Expr.EList [ text "d"; old; Expr.bool true;
+    Expr.bool false; Expr.bool false ] in
+  let number = Expr.UnOp (Utf16ToNumber, key) in
+  let position = bin KeyInsertIndex keys key in
+  let inserted = Expr.NOp (LstInsert, [ values; position; Expr.EList [] ]) in
+  let read = bin LstNth (bin LstNth inserted len) (Expr.int 1) in
+  let assumptions = [
+    bin ILessThanEqual (Expr.int 1) len;
+    eq (bin LstNth keys last_index) (text "length");
+    eq key (Expr.UnOp (NumberToUtf16, number));
+    Expr.UnOp (IsInt, number);
+    bin FLessThanEqual (Expr.num 0.) number;
+    bin FLessThan number (Expr.num 4294967295.);
+    eq len (Expr.UnOp (LstLen, values));
+    bin ValueEqual old_descriptor descriptor ] in
+  let context assumptions =
+    let pfs = Gillian.Symbolic.Pure_context.init () in
+    List.iter (Gillian.Symbolic.Pure_context.extend pfs) assumptions; pfs in
+  let reduce ?(gamma = types ()) assumptions e =
+    Reduction.reduce_lexpr ~gamma ~pfs:(context assumptions) e in
+  Alcotest.(check bool) "key/descriptor length alias preserves the old Number witness"
+    true (Expr.equal (reduce assumptions read) old);
+  Alcotest.(check bool) "preserved descriptor type is proved structurally"
+    true (Expr.equal (reduce assumptions
+      (eq (Expr.UnOp (TypeOf, read)) (Expr.Lit (Literal.Type NumberType)))) Expr.true_);
+  List.iteri (fun omitted _ ->
+    let fewer = List.filteri (fun i _ -> i <> omitted) assumptions in
+    Alcotest.(check bool) "every terminal transfer premise is required" false
+      (try Expr.equal (reduce fewer read) old
+       with Reduction.ReductionException _ -> false)) assumptions;
+  List.iter (fun name ->
+    let g = types () in Gamma.remove g name;
+    Alcotest.(check bool) "missing input type cannot authorize terminal transfer"
+      false (try Expr.equal (reduce ~gamma:g assumptions read) old
+        with Reduction.ReductionException _ -> false))
+    [ "#transfer_keys"; "#transfer_values"; "#transfer_key" ];
+  let p = Expr.LVar "#transfer_position" in
+  let len_values = Expr.UnOp (LstLen, values) in
+  let end_read = bin LstNth
+    (Expr.NOp (LstInsert, [ values; p; Expr.bool false ])) len_values in
+  let before = [ bin ILessThanEqual (Expr.int 0) p;
+    bin ILessThan p len_values ] in
+  let g = types () in Gamma.update g "#transfer_position" IntType;
+  let expected = bin LstNth values (bin IPlus (Expr.int (-1)) len_values) in
+  Alcotest.(check bool) "explicit strict insertion bounds transfer the final element"
+    true (Expr.equal (reduce ~gamma:g before end_read) expected);
+  List.iter (fun bounds ->
+    Alcotest.(check bool) "missing or append bound cannot transfer the old last value"
+      false (Expr.equal (reduce ~gamma:g bounds end_read) expected))
+    [ []; [ List.hd before ]; [ List.nth before 1 ];
+      [ List.hd before; bin ILessThanEqual p len_values ] ];
+  let zero_descriptor = Expr.EList [ Expr.num (-0.) ] in
+  Alcotest.(check bool) "value identity retains the sign of a fixed component"
+    true (Expr.equal (reduce [ bin ValueEqual old_descriptor zero_descriptor ]
+      (bin LstNth old_descriptor (Expr.int 0))) (Expr.num (-0.)));
+  let saved = !Gillian.Utils.Config.Verification.total in
+  Gillian.Utils.Config.Verification.total := true;
+  Fun.protect ~finally:(fun () -> Gillian.Utils.Config.Verification.total := saved)
+    (fun () ->
+      let invalid = bin LstNth (Expr.EList []) (Expr.int 0) in
+      Alcotest.(check bool) "terminal transfer cannot erase a failing insertion value"
+        true (try ignore (reduce assumptions (bin LstNth
+          (Expr.NOp (LstInsert, [ values; position; invalid ])) len)); false
+          with Reduction.ReductionException _ -> true))
+
 let concrete_legacy_operations () =
   let store = Engine.CExprEval.CStore.init [] in
   let eval = Engine.CExprEval.evaluate_expr store in
@@ -1399,4 +1540,6 @@ let tests =
     ("symbolic Uint32 index spelling", `Quick, uint32_formatter_indices);
     ("Uint32 formatter fallback guards", `Quick, uint32_formatter_fallback);
     ("insertion terminal bound", `Quick, insertion_terminal_bound);
+    ("insertion complete array width", `Quick, insertion_array_width);
+    ("guarded insertion terminal reduction", `Quick, insertion_terminal_reduction);
   ]

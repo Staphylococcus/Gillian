@@ -121,6 +121,32 @@ let reject_remaining_inputs () =
   expect "failed consumption preserves ownership" [ wrong ]
     (Preds.to_list predicates)
 
+let insertion_length_dependencies () =
+  let module MP = Gillian.Abstraction.MP in
+  let keys = Expr.LVar "#keys" and position = Expr.LVar "#position" in
+  let key = Expr.LVar "#key" and result = Expr.LVar "#result" in
+  let length = Expr.UnOp (LstLen, Expr.NOp (LstInsert, [ keys; position; key ])) in
+  let known = Expr.Set.of_list [ keys; position; key ] in
+  let equality = Asrt.Pure (Expr.BinOp (result, Equal, length)) in
+  let plan known = MP.s_init_atoms ~preds:(Hashtbl.create 0)
+      (Expr.Set.add result known) [ equality ] in
+  Alcotest.(check bool) "known insertion operands no longer crash planning" true
+    (Result.is_ok (plan known));
+  List.iter
+    (fun operand ->
+      Alcotest.(check bool) "every insertion operand is required" false
+        (Result.is_ok (plan (Expr.Set.remove operand known))))
+    [ keys; position; key ];
+  let length_only = Expr.Set.add (Expr.UnOp (LstLen, keys))
+      (Expr.Set.remove keys known) in
+  Alcotest.(check bool) "list length alone cannot supply the inserted list" false
+    (Result.is_ok (plan length_only));
+  expect "result length cannot invent insertion witnesses" []
+    (MP.learn_expr (Expr.Set.singleton result) result length);
+  match plan known with
+  | Ok [ (_, outs) ] -> expect "equality invents no insertion outputs" [] outs
+  | _ -> Alcotest.fail "expected one complete equality matching step"
+
 let tests =
   List.map (fun (name, test) -> Alcotest.test_case name `Quick test)
     [
@@ -132,4 +158,5 @@ let tests =
       ("output-only witness", output_only);
       ("maintain and multiplicity", maintain);
       ("missing name and mismatched input", missing_and_wrong_input);
+      ("insertion length dependencies", insertion_length_dependencies);
     ]
