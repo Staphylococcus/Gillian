@@ -632,6 +632,29 @@ module M = struct
         Expr.UnOp (Not, BinOp (value, Equal, Lit Nono));
         Expr.UnOp (Not, BinOp (UnOp (TypeOf, value), Equal, Lit (Type SetType))) ] gamma
 
+  (* An indexed update changes exactly one value in complete ownership; keys
+     and insertion history stay unchanged. The list-slice implementation needs
+     an explicit native length bound, as do the corresponding GIL operations. *)
+  let ordered_updatable pfs gamma keys values prop value =
+    match ordered_cell_index pfs gamma keys values prop with
+    | None -> None
+    | Some index ->
+        if FOSolver.check_entailment Containers.SS.empty pfs
+             [ Expr.BinOp (UnOp (LstLen, values), ILessThanEqual,
+                 Lit (Int (Z.of_int max_int)));
+               Expr.UnOp (Not, BinOp (value, Equal, Lit Nono));
+               Expr.UnOp (Not, BinOp (UnOp (TypeOf, value), Equal, Lit (Type SetType))) ] gamma
+        then Some index
+        else None
+
+  let ordered_replaced values index value =
+    let after = Expr.BinOp (index, IPlus, Expr.one_i) in
+    Expr.NOp (LstCat,
+      [ Expr.LstSub (values, Expr.zero_i, index);
+        Expr.EList [ value ];
+        Expr.LstSub (values, after,
+          Expr.BinOp (UnOp (LstLen, values), IMinus, after)) ])
+
   let set_cell ?(abstract = false) heap pfs gamma loc prop value : action_ret =
     let packed = Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) in
     match packed with
@@ -653,6 +676,18 @@ module M = struct
             Expr.BinOp (UnOp (LstLen, next_keys), Equal, UnOp (LstLen, next_values));
             Expr.UnOp (LstAllUtf16, next_keys) ] in
         Ok [ (result, [], facts, []) ]
+    | Some (keys, values) when not abstract -> (
+        match ordered_updatable pfs gamma keys values prop value with
+        | Some index ->
+            let next_values = ordered_replaced values index value in
+            let result = SHeap.copy heap in
+            let name = Option.get (get_loc_name pfs gamma loc) in
+            SHeap.clear_ordered result name;
+            SHeap.set_ordered result name keys next_values;
+            Ok [ (result, [], [ ordered_length_equality keys next_values ], []) ]
+        | None ->
+            SHeap.require_exposed heap (Option.get (get_loc_name pfs gamma loc));
+            assert false)
     | Some _ ->
         SHeap.require_exposed heap (Option.get (get_loc_name pfs gamma loc));
         assert false
@@ -875,12 +910,14 @@ module M = struct
        to the legacy syntactic setter/deleter. Argument reduction can turn an
        equal symbolic key into a literal between GetCell and SetCell. A relaxed
        guard alone would permit inserting a second, aliased heap entry. *)
-    let packed_insertion = action = JSILNames.setCell && (match args with
+    let packed_write = action = JSILNames.setCell && (match args with
       | [ loc; prop; value ] -> (match Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) with
-          | Some (keys, values) -> ordered_insertable pfs gamma keys values prop value
+          | Some (keys, values) ->
+              ordered_insertable pfs gamma keys values prop value
+              || Option.is_some (ordered_updatable pfs gamma keys values prop value)
           | None -> false)
       | _ -> false) in
-    if packed_insertion then args
+    if packed_write then args
     else if action = JSILNames.setCell || action = JSILNames.delCell then
       match args with
       | loc :: prop :: rest -> (

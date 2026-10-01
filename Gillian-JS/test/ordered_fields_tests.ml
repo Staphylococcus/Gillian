@@ -951,6 +951,97 @@ let insertion_bound_domains () =
     (try reduce c.gamma (Expr.BinOp (Expr.zero_i, ILessThanEqual, wrong)) <> Expr.true_
      with Failure message -> String.starts_with ~prefix:"TYPE ERROR:" message)
 
+let update_context ?(lower = true) ?(upper = true) ?(bounded = true) () =
+  let c = indexed_context ~lower ~upper () in
+  if bounded then Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (UnOp (LstLen, sequence_values), ILessThanEqual,
+      Lit (Int (Z.of_int max_int))));
+  c
+
+let replacement values index value =
+  let next = Expr.BinOp (index, IPlus, Expr.one_i) in
+  Expr.NOp (LstCat, [ Expr.LstSub (values, Expr.zero_i, index);
+    Expr.EList [value]; Expr.LstSub (values, next,
+      Expr.BinOp (UnOp (LstLen, values), IMinus, next)) ])
+
+let sequence_runtime_update () =
+  let c = update_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let args = [loc; selected_key; Expr.bool true] in
+  check "total setter accepts proved complete indexed update"
+    (Legacy.prepare_total_action setCell heap c.pfs c.gamma args = args);
+  (match Legacy.execute_action setCell heap c.pfs c.gamma args with
+  | Ok [(after, [], facts, [])] ->
+      let next = replacement sequence_values sequence_index (Expr.bool true) in
+      check "real update keeps exact keys and replaces one value"
+        (Heap.get_ordered after loc_name = Some (sequence_keys, next));
+      check "update derives only the justified unchanged length"
+        (facts = [Expr.BinOp (UnOp (LstLen, sequence_keys), Equal, UnOp (LstLen, next))]);
+      check "update preserves input branch and metadata"
+        (snapshot heap = before && Heap.get_met after loc_name = Some metadata);
+      check "updated complete resource remains consumable"
+        (snd (consume ~context:c after) = [sequence_keys; next])
+  | _ -> Alcotest.fail "indexed update failed")
+
+let reject_update c prop value =
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try ignore (Legacy.prepare_total_action setCell heap c.pfs c.gamma
+      [loc; prop; value]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "update rejects unproved ownership/domain/value" rejected;
+  check "rejected update keeps the original resource" (snapshot heap = before)
+
+let update_index_bounds () =
+  reject_update (update_context ~lower:false ()) selected_key (Expr.bool true);
+  reject_update (update_context ~upper:false ()) selected_key (Expr.bool true)
+
+let update_native_bound () =
+  reject_update (update_context ~bounded:false ()) selected_key (Expr.bool true)
+
+let update_wrong_list () =
+  let c = update_context () in
+  Gillian.Symbolic.Type_env.update c.gamma "#other_update_keys" Type.ListType;
+  reject_update c (Expr.BinOp (LVar "#other_update_keys", LstNth, sequence_index)) (Expr.bool true)
+
+let update_nonvalues () =
+  reject_update (update_context ()) selected_key (Expr.Lit Literal.Nono);
+  reject_update (update_context ()) selected_key (Expr.ESet [])
+
+let update_no_logical_production () =
+  let c = update_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try ignore (Memory.produce aCell heap c
+      [loc; selected_key; Expr.bool true]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "logical producer cannot apply indexed runtime update" rejected;
+  check "failed logical update preserves whole ownership" (snapshot heap = before)
+
+let update_literal_identity () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let original = Literal.LList [Literal.Num nan; Literal.Num (-0.); Literal.Null] in
+  List.iter (fun (index, value, expected) ->
+    let term = replacement (Expr.Lit original) (Expr.int index) (Expr.Lit value) in
+    check "native replacement preserves untouched NaN and signed zero"
+      (Literal.same_value (Engine.CExprEval.evaluate_expr store term) (Literal.LList expected));
+    check "reducer retains exact replacement identity"
+      (Gillian.Logic.Reduction.reduce_lexpr
+        (Expr.BinOp (term, ValueEqual, Lit (Literal.LList expected))) = Expr.bool true))
+    [0, Literal.Bool true, [Literal.Bool true; Literal.Num (-0.); Literal.Null];
+     1, Literal.Bool true, [Literal.Num nan; Literal.Bool true; Literal.Null];
+     2, Literal.Bool true, [Literal.Num nan; Literal.Num (-0.); Literal.Bool true]]
+
+let update_slice_domains () =
+  let c = update_context () in
+  let proves condition = Gillian.Logic.FOSolver.check_entailment
+      Gillian.Utils.Containers.SS.empty c.pfs [condition] c.gamma in
+  let evaluate = Gillian.Logic.Reduction.reduce_lexpr ~pfs:c.pfs ~gamma:c.gamma in
+  let term = replacement sequence_values sequence_index (Expr.bool true) in
+  Engine.Totality.check_expression ~proof:true ~proves ~evaluate
+    ~require:(fun _ condition -> if not (proves condition) then Alcotest.fail "replacement slice domain") term
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -988,6 +1079,14 @@ let () =
             ("uniform key representation", insertion_key_representation);
             ("capture-free UTF16 quantifier", insertion_quantifier_names);
             ("actual complete-sequence insertion", sequence_runtime_insert);
+            ("actual indexed whole-field update", sequence_runtime_update);
+            ("indexed update bounds", update_index_bounds);
+            ("indexed update native length bound", update_native_bound);
+            ("indexed update owned list", update_wrong_list);
+            ("indexed update nonvalues", update_nonvalues);
+            ("indexed update no logical production", update_no_logical_production);
+            ("indexed update exact literal identity", update_literal_identity);
+            ("indexed update slice domains", update_slice_domains);
             ("insertion ownership rejection", insertion_reject_guards);
             ("insertion no raw logical production", insertion_no_logical_production);
             ("insertion total domains", insertion_total_domains);
