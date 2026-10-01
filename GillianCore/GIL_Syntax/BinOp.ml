@@ -48,6 +48,7 @@ type t = TypeDef__.binop =
   (* Lists *)
   | LstNth  (** Nth element of a string *)
   | LstContains  (** List membership by value identity *)
+  | KeyInsertIndex  (** Exact OrdinaryOwnPropertyKeys insertion position *)
   | LstRepeat (* [[a; b]] is the list that contains [b] times the element [a] *)
   (* Strings *)
   | StrCat  (** String concatenation *)
@@ -110,6 +111,7 @@ let str (x : t) =
   | M_pow -> "**"
   | LstNth -> "l-nth"
   | LstContains -> "l-contains"
+  | KeyInsertIndex -> "key-insert-index"
   | LstRepeat -> "l-repeat"
   | StrCat -> "++"
   | Utf16Less -> "u16<"

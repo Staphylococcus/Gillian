@@ -1408,6 +1408,8 @@ let rec reduce_lexpr_loop
                formatted spelling is "0". NaN remains NaN. The reverse
                composition is deliberately not cancelled. *)
             f (BinOp (number, FPlus, Lit (Num 0.)))
+        | LstAllUtf16, EList xs ->
+            f (Expr.conjunct (List.map (fun x -> Expr.BinOp (UnOp (TypeOf, x), Equal, Lit (Type Utf16Type))) xs))
         | _, Lit lit -> (
             try Lit (CExprEval.evaluate_unop op lit) with
             | CExprEval.TypeError err_msg ->
@@ -1504,6 +1506,18 @@ let rec reduce_lexpr_loop
               = Cint.canonicalise
                   (BinOp (UnOp (LstLen, LVar y), IMinus, UnOp (LstLen, x)))
            && prefix_catch pfs x y -> LVar y
+    | NOp (LstInsert, args) -> (
+        let args = List.map f args in
+        match args with
+        | [ (EList xs); Lit (Int i); v ] ->
+            let rec insert n = function
+              | xs when Z.equal n Z.zero -> v :: xs
+              | x :: xs when Z.sign n > 0 -> x :: insert (Z.pred n) xs
+              | _ -> raise (ReductionException (NOp (LstInsert, args), "Insertion index out of bounds"))
+            in EList (insert i xs)
+        | [ Lit (LList xs); i; v ] -> f (NOp (LstInsert, [ EList (List.map (fun x -> Expr.Lit x) xs); i; v ]))
+        | [ _; _; _ ] -> NOp (LstInsert, args)
+        | _ -> raise (ReductionException (NOp (LstInsert, args), "List insertion requires exactly three arguments")))
     | NOp (LstCat, les) -> normalise_cat f les
     (* Set union *)
     | NOp (SetUnion, les) -> (
@@ -1903,6 +1917,16 @@ let rec reduce_lexpr_loop
               in
               BinOp (left, Impl, right))
     (* Membership uses the same identity as v==, including nested values. *)
+    | BinOp (list, KeyInsertIndex, key) -> (
+        let list = f list and key = f key in
+        let literal = function Expr.Lit l -> Some l | _ -> None in
+        let items = match list with
+          | EList xs -> Option_utils.all (List.map literal xs)
+          | Lit (LList xs) -> Some xs
+          | _ -> None in
+        match items, key with
+        | Some xs, Lit (Utf16String _) -> Lit (CExprEval.evaluate_expr (CExprEval.CStore.init []) (BinOp (Lit (LList xs), KeyInsertIndex, key)))
+        | _ -> BinOp (list, KeyInsertIndex, key))
     | BinOp (list, LstContains, value) -> (
         let list = f list in
         let value = f value in

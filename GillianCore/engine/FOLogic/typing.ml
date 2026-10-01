@@ -51,6 +51,7 @@ module Infer_types_to_gamma = struct
     | Cdr -> tt = ListType && f le ListType
     | Car -> f le ListType
     | LstLen -> tt = IntType && f le ListType
+    | LstAllUtf16 -> tt = BooleanType && f le ListType
     | LstRev -> tt = ListType && f le ListType
     | IntToNum -> tt = NumberType && f le IntType
     | NumToInt -> tt = IntType && f le NumberType
@@ -87,6 +88,7 @@ module Infer_types_to_gamma = struct
       | SetDiff -> (Some SetType, Some SetType, Some SetType)
       | SetSub -> (Some SetType, Some SetType, Some BooleanType)
       | LstContains -> (Some ListType, None, Some BooleanType)
+      | KeyInsertIndex -> (Some ListType, Some Utf16Type, Some IntType)
       | LstNth -> (Some ListType, Some IntType, None)
       | LstRepeat -> (None, Some IntType, Some ListType)
       | StrNth -> (Some ListType, Some NumberType, None)
@@ -165,6 +167,8 @@ module Infer_types_to_gamma = struct
     (* Members of LstCat must be all lists *)
     | NOp (LstCat, les) ->
         tt = ListType && List.for_all (fun x -> f x ListType) les
+    | NOp (LstInsert, [ xs; i; _ ]) -> tt = ListType && f xs ListType && f i IntType
+    | NOp (LstInsert, _) -> false
     | LstSub (le1, le2, le3) ->
         tt = ListType && f le1 ListType && f le2 IntType && f le3 IntType
     | UnOp (op, le) -> infer_unop flag gamma new_gamma op le tt
@@ -292,6 +296,9 @@ let rec infer_types_expr gamma le : unit =
   | NOp (LstCat, lle) ->
       e le ListType;
       List.iter f lle
+  | NOp (LstInsert, [ xs; i; v ]) ->
+      e xs ListType; e i IntType; List.iter f [ xs; i; v ]
+  | NOp (LstInsert, _) -> ()
   | EList lle | ESet lle -> List.iter f lle
   | BinOp (le1, op, le2) -> (
       match op with
@@ -308,6 +315,7 @@ let rec infer_types_expr gamma le : unit =
       | LstContains ->
           e le1 ListType;
           e le BooleanType
+      | KeyInsertIndex -> e le1 ListType; e le2 Utf16Type; e le IntType
       | LstNth ->
           e le1 ListType;
           e le2 IntType
@@ -332,6 +340,7 @@ let rec infer_types_expr gamma le : unit =
       | Not -> e le BooleanType
       | IsInt | M_isNaN -> e le NumberType
       | IUnaryMinus -> e le IntType
+      | LstAllUtf16 -> e le ListType
       (* FIXME: Specify cases *)
       | _ -> ())
   | _ -> ()
@@ -416,7 +425,7 @@ module Type_lexpr = struct
       let (tt : Type.t) =
         match op with
         | TypeOf -> TypeType
-        | Not | M_isNaN | IsInt -> BooleanType
+        | Not | M_isNaN | IsInt | LstAllUtf16 -> BooleanType
         | ToStringOp -> StringType
         | NumberToUtf16 -> Utf16Type
         | Utf16ToNumber -> NumberType
@@ -461,6 +470,7 @@ module Type_lexpr = struct
         match op with
         | LstNth -> type_lstnth gamma e1 e2
         | LstRepeat -> infer_type le ListType
+        | KeyInsertIndex -> infer_type le IntType
         | StrNth -> type_strnth gamma e1 e2
         | Equal
         | ValueEqual
@@ -634,6 +644,10 @@ module Type_lexpr = struct
       | NOp (LstCat, les) ->
           let all_typable = typable_list ?target_type:(Some ListType) les in
           if all_typable then (Some ListType, true) else def_neg
+      | NOp (LstInsert, [ xs; i; v ]) ->
+          if typable_list ~target_types:[ Some ListType; Some IntType; None ] [xs; i; v]
+          then (Some ListType, true) else def_neg
+      | NOp (LstInsert, _) -> def_neg
       | LstSub (le1, le2, le3) -> type_lstsub gamma le1 le2 le3
       | ConstructorApp (n, les) -> type_constructor_app gamma n les
       | FuncApp (n, les) -> type_func_app gamma n les

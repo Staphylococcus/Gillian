@@ -160,6 +160,7 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
   | LstLen ->
       let ll = as_list lit in
       Int (Z.of_int (List.length ll))
+  | LstAllUtf16 -> Bool (List.for_all (function Literal.Utf16String _ -> true | _ -> false) (as_list lit))
   | LstRev ->
       let ll = as_list lit in
       LList (List.rev ll)
@@ -230,6 +231,9 @@ let rec evaluate_binop
           | LList _, LList _ -> Bool (Literal.same_value lit1 lit2)
           | Nono, Nono -> Bool true
           | _, _ -> Bool false)
+      | KeyInsertIndex ->
+          let names = List.map (function Literal.Utf16String s -> Some (Utf16.to_canonical s) | _ -> None) (as_list lit1) in
+          Int (Property_index.insertion_position (Utf16.to_canonical (as_utf16 lit2)) names)
       | LstContains ->
           Bool (List.exists (fun value -> Literal.same_value value lit2)
                   (as_list ~msg:"LstContains" lit1))
@@ -320,6 +324,16 @@ let rec evaluate_binop
 and evaluate_nop (nop : NOp.t) (ll : Literal.t list) : CVal.M.t =
   match nop with
   | LstCat -> LList (List.concat_map (as_list ~msg:"LstCat") ll)
+  | LstInsert -> (match ll with
+      | [ xs; i; v ] ->
+          let i = as_int i in
+          if Z.sign i < 0 then evalerr "Negative insertion index";
+          let rec insert n = function
+            | xs when Z.equal n Z.zero -> v :: xs
+            | x :: xs -> x :: insert (Z.pred n) xs
+            | [] -> evalerr "Insertion index out of bounds"
+          in LList (insert i (as_list xs))
+      | _ -> evalerr "List insertion requires exactly three arguments")
   | SetInter | SetUnion ->
       raise (Exceptions.Unsupported "Concrete evaluate_nop: set operators")
 

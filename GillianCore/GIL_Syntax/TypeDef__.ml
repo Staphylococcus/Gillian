@@ -100,6 +100,7 @@ and binop =
   | M_pow
   | LstNth
   | LstContains  (** List membership by value identity *)
+  | KeyInsertIndex  (** Exact OrdinaryOwnPropertyKeys insertion position *)
   | LstRepeat
   | StrCat
   | Utf16Less
@@ -142,6 +143,7 @@ and unop =
   | Car
   | Cdr
   | LstLen
+  | LstAllUtf16
   | LstRev
   | SetToList
   | StrLen
@@ -154,7 +156,7 @@ and unop =
   | IntToNum
   | IsInt
 
-and nop = LstCat | SetUnion | SetInter
+and nop = LstCat | LstInsert | SetUnion | SetInter
 
 and expr =
   | Lit of literal

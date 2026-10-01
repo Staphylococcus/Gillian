@@ -245,7 +245,7 @@ let rec learn_expr
       (* Now comes the iteration *)
       learn_expr_list kb le_with_base_exprs
   (* Set n-ary operators are not invertible *)
-  | NOp (SetInter, _) | NOp (SetUnion, _) -> []
+  | NOp (SetInter, _) | NOp (SetUnion, _) | NOp (LstInsert, _) -> []
   (* TODO: LstCat is invertible, but not for now *)
   | NOp (LstCat, []) -> f base_expr (EList [])
   | NOp (LstCat, [ x ]) -> f base_expr x

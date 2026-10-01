@@ -1126,6 +1126,45 @@ let encode_equality (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t =
       let>- p2 = extend_wrap p2 in
       extended_equality p1.expr p2.expr >- BooleanType
 
+(* Exact key-index classification and structural insertion position. The
+   recursive SMT function strips one key per call. No object-size bound, FP
+   conversion, user axiom or inferred creation-order history is used. *)
+(* Keep the quantified index local to a function definition. Inlining a
+   fixed binder around the caller's encoded list could capture a free name. *)
+let def_list_all_utf16 =
+  let xs = atom "keys" and i = atom "index" in
+  let condition = bool_implies
+    (bool_and (num_leq (int_k 0) i) (num_lt i (seq_len xs)))
+    (Lit_operations.Utf16String.recognize (seq_nth xs i)) in
+  make_definition ~depends_on:[ def_gil_literal ]
+    [ define_fun "gil_list_all_utf16" [ ("keys", t_gil_literal_list) ] t_bool
+        (forall [ ("index", t_int) ] condition) ]
+
+let def_key_insert_index =
+  let name = atom "name" in
+  let decimal_case length =
+    let units = List.init length (fun i -> app_ "bv2int" [ seq_nth name (int_k i) ]) in
+    let number = List.fold_left
+      (fun prefix unit -> num_add (num_mul prefix (int_k 10)) (num_sub unit (int_k 48)))
+      (int_k 0) units in
+    let digits = List.map (fun unit -> bool_and (num_leq (int_k 48) unit) (num_leq unit (int_k 57))) units in
+    let canonical = if length = 1 then atom "true" else bool_not (eq (List.hd units) (int_k 48)) in
+    let valid = List.fold_left bool_and (eq (seq_len name) (int_k length))
+      (canonical :: num_leq number (int_zk (Z.of_string "4294967294")) :: digits) in
+    valid, number
+  in
+  let cases = List.init 10 (fun i -> decimal_case (i + 1)) in
+  let index = List.fold_right (fun (valid, number) other -> ite valid number other) cases (int_k (-1)) in
+  make_definition ~depends_on:[ def_gil_literal ]
+    [ define_fun "gil_key_index" [ ("name", Utf16.sort) ] t_int index;
+      Sexplib.Sexp.of_string
+        {smt|(define-fun-rec gil_index_position ((keys (Seq GIL_Literal)) (index Int)) Int
+          (ite (= (seq.len keys) 0) 0
+            (let ((head (seq.nth keys 0)))
+              (let ((other (ite (isUtf16String head) (gil_key_index (u16Value head)) (- 1))))
+                (ite (or (< other 0) (> other index)) 0
+                  (+ 1 (gil_index_position (seq.extract keys 1 (- (seq.len keys) 1)) index)))))))|smt} ]
+
 let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
     =
   let open Encoding in
@@ -1226,6 +1265,13 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- p1 = get_list p1 in
       let>- p2 = get_list p2 in
       seq_nth p1.expr p2.expr |> simply_wrapped
+  | KeyInsertIndex ->
+      require_definition def_key_insert_index;
+      let>- keys = get_list p1 in
+      let>- name = get_utf16 p2 in
+      let index = app_ "gil_key_index" [ name.expr ] in
+      ite (num_lt index (int_k 0)) (seq_len keys.expr)
+        (app_ "gil_index_position" [ keys.expr; index ]) >- IntType
   | LstContains ->
       let>- list = get_list p1 in
       let>- value = simple_wrap p2 in
@@ -1327,6 +1373,10 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
         | _ -> seq_len le.expr
       in
       enc >- IntType
+  | LstAllUtf16 ->
+      require_definition def_list_all_utf16;
+      let>- xs = get_list le in
+      app_ "gil_list_all_utf16" [ xs.expr ] >- BooleanType
   | StrToBytes ->
       require_definition def_gil_literal;
       let>- bytes = get_string le in
@@ -1742,6 +1792,17 @@ let rec encode_logical_expression
       let>-- sets = List.map get_set les in
       let sets = List.map (fun set -> set.expr) sets in
       set_intersection' Z3 sets >- SetType
+  | NOp (LstInsert, [ xs; i; value ]) ->
+      let>- xs = f xs in
+      let>- i = f i in
+      let>- value = f value in
+      let>- xs = get_list xs in
+      let>- i = get_int i in
+      let>- value = simple_wrap value in
+      seq_concat [ seq_extract xs.expr (int_k 0) i.expr;
+        seq_unit value.expr;
+        seq_extract xs.expr i.expr (num_sub (seq_len xs.expr) i.expr) ] >- ListType
+  | NOp (LstInsert, _) -> exceptf "List insertion requires exactly three arguments"
   | NOp (LstCat, les) ->
       let>-- les = List.map f les in
       let>-- lists = List.map get_list les in

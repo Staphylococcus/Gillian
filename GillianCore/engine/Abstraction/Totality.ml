@@ -142,7 +142,7 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
         | IUnaryMinus | IntToNum -> need (typ e IntType)
         | StrLen | StrToBytes | ToNumberOp -> need (typ e StringType)
         | Utf16Len | Utf16ToNumber -> need (typ e Utf16Type)
-        | LstLen | LstRev -> need (typ e ListType)
+        | LstLen | LstRev | LstAllUtf16 -> need (typ e ListType)
         | NumToInt ->
             List.iter need
               [
@@ -229,6 +229,7 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
         | UnsignedRightShiftF
         | M_atan2
         | M_pow -> both NumberType
+        | KeyInsertIndex -> List.iter need [ typ left ListType; typ right Utf16Type ]
         | LstContains ->
             need (typ left ListType);
             need (Expr.UnOp (Not, typ right SetType))
@@ -238,6 +239,13 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
             unsupported_on_guard guard "set expressions in executable code."
         | And | Or | Impl | LstNth | LstRepeat | StrNth | IDiv | IMod ->
             assert false)
+    | NOp (LstInsert, [ xs; i; v ]) ->
+        children [ xs; i; v ];
+        List.iter need [ typ xs ListType; typ i IntType;
+          Expr.BinOp (Lit (Int Z.zero), ILessThanEqual, i);
+          Expr.BinOp (i, ILessThanEqual, UnOp (LstLen, xs));
+          Expr.UnOp (Not, typ v SetType) ]
+    | NOp (LstInsert, _) -> unsupported_on_guard guard "list insertion requires exactly three arguments."
     | NOp (LstCat, xs) ->
         children xs;
         List.iter (fun x -> need (typ x ListType)) xs

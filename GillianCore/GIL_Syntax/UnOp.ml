@@ -44,6 +44,7 @@ type t = TypeDef__.unop =
   | Car  (** Head of a list *)
   | Cdr  (** Tail of a list *)
   | LstLen  (** List length *)
+  | LstAllUtf16
   | LstRev  (** List reverse *)
   | SetToList  (** From set to list *)
   (* Strings *)
@@ -89,6 +90,7 @@ let str = function
   | Car -> "car"
   | Cdr -> "cdr"
   | LstLen -> "l-len"
+  | LstAllUtf16 -> "l-all-u16"
   | LstRev -> "l-rev"
   | StrLen -> "s-len"
   | NumberToUtf16 -> "num_to_utf16"

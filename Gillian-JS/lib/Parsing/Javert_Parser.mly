@@ -435,7 +435,7 @@ expr_target:
           match (nop : NOp.t) with
           | SetInter
           | SetUnion -> Expr.Set.elements (Expr.Set.of_list les)
-          | LstCat -> les
+          | LstCat | LstInsert -> les
         in
         Expr.NOp (nop, les)
      }
@@ -985,7 +985,7 @@ js_lexpr_target:
       let les = match (nop : NOp.t) with
         | SetInter
         | SetUnion -> JSExpr.SJSExpr.elements (JSExpr.SJSExpr.of_list les)
-        | LstCat -> les
+        | LstCat | LstInsert -> les
       in
       JSExpr.NOp (nop, les)
     }

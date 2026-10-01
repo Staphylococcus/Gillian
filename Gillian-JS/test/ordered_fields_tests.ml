@@ -758,6 +758,152 @@ let absence_no_cell_split () =
   check "absence read does not duplicate a separately consumable cell" rejected;
   check "failed split leaves whole resource" (snapshot heap = before)
 
+let ukey s = Expr.Lit (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical s))
+let ukeys xs = Expr.EList (List.map ukey xs)
+
+let insertion_position_literals () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let gamma = Gillian.Symbolic.Type_env.as_hashtbl (Gillian.Symbolic.Type_env.init ()) in
+  List.iter (fun (names, name, expected) ->
+    let term = Expr.BinOp (ukeys names, KeyInsertIndex, ukey name) in
+    check "concrete exact insertion index" (Engine.CExprEval.evaluate_expr store term = Literal.Int (Z.of_int expected));
+    check "reducer agrees with concrete insertion" (Gillian.Logic.Reduction.reduce_lexpr term = Expr.int expected);
+    check "SMT agrees with exact numeric/name classification"
+      (not (Smt.is_sat (Expr.Set.singleton (Expr.UnOp (Not, BinOp (term, Equal, Expr.int expected)))) gamma)))
+    [ [], "0", 0; [], "z", 0;
+      ["2"; "10"; "z"; "a"], "1", 0;
+      ["2"; "10"; "z"; "a"], "3", 1;
+      ["2"; "10"; "z"; "a"], "11", 2;
+      ["2"; "10"; "z"; "a"], "b", 4;
+      ["0"; "2"; "4294967294"; "z"], "4294967293", 2;
+      ["0"; "2"; "z"], "4294967294", 2;
+      ["0"; "2"; "z"], "4294967295", 3;
+      ["0"; "2"; "z"], "01", 3;
+      ["0"; "2"; "z"], "-0", 3;
+      ["z"], "__proto__", 1;
+      ["z"], "", 1;
+      ["z"], Gillian.Utils.Utf16.of_code_units [0xd800], 1 ]
+
+let insertion_literal_values () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let xs = Literal.LList [ Literal.Num nan; Literal.Num (-0.) ] in
+  let v = Literal.LList [ Literal.Null ] in
+  List.iter (fun (i, expected) ->
+    let term = Expr.NOp (LstInsert, [ Lit xs; Expr.int i; Lit v ]) in
+    check "concrete insertion retains exact value identity"
+      (Literal.same_value (Engine.CExprEval.evaluate_expr store term) (Literal.LList expected));
+    let wrong = Expr.UnOp (Not, BinOp (term, ValueEqual, Lit (Literal.LList expected))) in
+    check "SMT insertion preserves NaN signed-zero nested values"
+      (not (Smt.is_sat (Expr.Set.singleton wrong)
+        (Gillian.Symbolic.Type_env.as_hashtbl (Gillian.Symbolic.Type_env.init ())))))
+    [ 0, [v; Literal.Num nan; Literal.Num (-0.)];
+      1, [Literal.Num nan; v; Literal.Num (-0.)];
+      2, [Literal.Num nan; Literal.Num (-0.); v] ];
+  List.iter (fun i ->
+    let rejected = try ignore (Engine.CExprEval.evaluate_expr store
+      (NOp (LstInsert, [Lit xs; Expr.int i; Lit v]))); false
+      with Engine.CExprEval.EvaluationError _ -> true in
+    check "concrete invalid position rejects" rejected) [-1; 3]
+
+let insertion_symbolic_lengths () =
+  let c = sequence_context () in
+  let i = Expr.LVar "#insert_at" and v = Expr.LVar "#insert_value" in
+  Gillian.Symbolic.Type_env.update c.gamma "#insert_at" Type.IntType;
+  Gillian.Symbolic.Type_env.update c.gamma "#insert_value" Type.Utf16Type;
+  let term = Expr.NOp (LstInsert, [sequence_keys; i; v]) in
+  let fs = [ Expr.BinOp (Expr.zero_i, ILessThanEqual, i);
+    Expr.BinOp (i, ILessThanEqual, UnOp (LstLen, sequence_keys));
+    Expr.UnOp (Not, BinOp (UnOp (LstLen, term), Equal,
+      BinOp (UnOp (LstLen, sequence_keys), IPlus, Expr.one_i))) ] in
+  check "exact structural insertion adds one at any finite list length"
+    (not (Smt.is_sat (Expr.Set.of_list fs) (Gillian.Symbolic.Type_env.as_hashtbl c.gamma)))
+
+let insertion_key_representation () =
+  let store = Engine.CExprEval.CStore.init [] in
+  List.iter (fun (xs, result) ->
+    let term = Expr.UnOp (LstAllUtf16, xs) in
+    check "concrete uniform representation" (Engine.CExprEval.evaluate_expr store term = Literal.Bool result);
+    check "SMT uniform representation"
+      (not (Smt.is_sat (Expr.Set.singleton (Expr.BinOp (term, ValueEqual, Expr.bool (not result))))
+        (Gillian.Symbolic.Type_env.as_hashtbl (Gillian.Symbolic.Type_env.init ())))))
+    [Expr.EList [], true; ukeys ["0"; "z"], true;
+      Expr.EList [ukey "z"; key "a"], false; Expr.EList [Expr.Lit Literal.Null], false]
+
+let insertion_quantifier_names () =
+  let gamma = Gillian.Symbolic.Type_env.init () in
+  let xs = Expr.LVar "all_u16_index" in
+  Gillian.Symbolic.Type_env.update gamma "all_u16_index" Type.ListType;
+  let fs = [ Expr.BinOp (xs, Equal, ukeys ["z"]);
+    Expr.UnOp (Not, UnOp (LstAllUtf16, xs)) ] in
+  check "UTF16 universal binder cannot capture a caller list name"
+    (not (Smt.is_sat (Expr.Set.of_list fs) (Gillian.Symbolic.Type_env.as_hashtbl gamma)))
+
+let insertion_context () =
+  let c = absence_context () in
+  Gillian.Symbolic.Pure_context.extend c.pfs (Expr.UnOp (LstAllUtf16, sequence_keys));
+  c
+
+let sequence_runtime_insert () =
+  let c = insertion_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let args = [loc; absent_key; Expr.Lit Literal.Null] in
+  check "total setter accepts proved complete insertion"
+    (Legacy.prepare_total_action setCell heap c.pfs c.gamma args = args);
+  match Legacy.execute_action setCell heap c.pfs c.gamma args with
+  | Ok [ (after, [], facts, []) ] ->
+      let position = Expr.BinOp (sequence_keys, KeyInsertIndex, absent_key) in
+      check "real setter derives paired key/value witnesses"
+        (Heap.get_ordered after loc_name = Some
+           (Expr.NOp (LstInsert, [sequence_keys; position; absent_key]),
+            Expr.NOp (LstInsert, [sequence_values; position; Expr.Lit Literal.Null])));
+      check "input branch and metadata preserved"
+        (snapshot heap = before && Heap.get_met after loc_name = Some metadata);
+      check "transfer derives exactly four justified facts" (List.length facts = 4)
+  | _ -> Alcotest.fail "complete insertion failed"
+
+let insertion_reject_guards () =
+  let reject c prop v =
+    let heap = sequence_make c in
+    let before = snapshot heap in
+    let rejected = try ignore (Legacy.execute_action setCell heap c.pfs c.gamma [loc;prop;v]); false
+      with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+    check "invalid insertion rejected" rejected;
+    check "failed insertion preserves input" (snapshot heap = before)
+  in
+  reject (absence_context ()) absent_key (Expr.Lit Literal.Null);
+  reject (sequence_context ()) absent_key (Expr.Lit Literal.Null);
+  reject (insertion_context ()) absent_key (Expr.Lit Literal.Nono);
+  reject (insertion_context ()) (key "legacy") (Expr.Lit Literal.Null);
+  reject (insertion_context ()) absent_key (Expr.ESet []);
+  let c = sequence_context () in
+  Gillian.Symbolic.Type_env.update c.gamma "#absent_key" Type.Utf16Type;
+  Gillian.Symbolic.Pure_context.extend c.pfs (Expr.UnOp (LstAllUtf16, sequence_keys));
+  Gillian.Symbolic.Pure_context.extend c.pfs (Expr.BinOp (sequence_keys, LstContains, absent_key));
+  reject c absent_key (Expr.Lit Literal.Null)
+
+let insertion_no_logical_production () =
+  let c = insertion_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try Memory.produce aCell heap c [ loc; absent_key; Expr.Lit Literal.Null ] = []
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "raw Cell production cannot mutate packed ownership" rejected;
+  check "raw producer leaves packed resource" (snapshot heap = before)
+
+let insertion_total_domains () =
+  let c = insertion_context () in
+  let evaluate = Gillian.Logic.Reduction.reduce_lexpr ~pfs:c.pfs ~gamma:c.gamma in
+  let proves f = Gillian.Logic.FOSolver.check_entailment Gillian.Utils.Containers.SS.empty c.pfs [f] c.gamma in
+  let accepts term = try Engine.Totality.check_expression ~proof:true ~proves ~evaluate
+    ~require:(fun _ f -> if not (proves f) then failwith "domain") term; true
+    with Failure message when message = "domain" -> false in
+  check "exact primitive accepts UTF16/list domain" (accepts (Expr.BinOp (sequence_keys, KeyInsertIndex, absent_key)));
+  check "key position rejects Number key" (not (accepts (Expr.BinOp (sequence_keys, KeyInsertIndex, Expr.num 1.))));
+  check "insertion rejects negative bound" (not (accepts (Expr.NOp (LstInsert, [ukeys []; Expr.int (-1); Expr.Lit Literal.Null]))));
+  check "insertion rejects greater-than-length bound" (not (accepts (Expr.NOp (LstInsert, [ukeys []; Expr.int 1; Expr.Lit Literal.Null]))));
+  check "insertion accepts exact integer endpoint" (accepts (Expr.NOp (LstInsert, [ukeys []; Expr.int 0; Expr.Lit Literal.Null])))
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -789,6 +935,15 @@ let () =
             ("whole sequence index bounds and identity", sequence_indexed_bounds);
             ("whole sequence no separate cell consumption", sequence_indexed_cell_consumption);
             ("whole sequence selected concrete value", sequence_indexed_known_values);
+            ("exact key insertion positions", insertion_position_literals);
+            ("insertion exact values", insertion_literal_values);
+            ("insertion arbitrary list length", insertion_symbolic_lengths);
+            ("uniform key representation", insertion_key_representation);
+            ("capture-free UTF16 quantifier", insertion_quantifier_names);
+            ("actual complete-sequence insertion", sequence_runtime_insert);
+            ("insertion ownership rejection", insertion_reject_guards);
+            ("insertion no raw logical production", insertion_no_logical_production);
+            ("insertion total domains", insertion_total_domains);
             ("membership literal identity", membership_literals);
             ("membership exact symbolic sequence", membership_symbolic);
             ("membership total domains", membership_domains);

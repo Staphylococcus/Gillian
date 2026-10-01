@@ -115,6 +115,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token UNSIGNEDRIGHTSHIFTL
 %token M_ATAN2
 %token M_POW
+%token LSTINSERT
 %token LSTCAT
 %token LSTREV
 %token STRCAT
@@ -147,6 +148,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token CAR
 %token CDR
 %token SETTOLIST
+%token LSTALLUTF16
 %token LSTLEN
 %token STRLEN
 %token NUMTOUTF16 UTF16TONUM UTF16NTH UTF16LESS UTF16CODE
@@ -167,6 +169,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token PRODUCE
 %token ASSUME_TYPE
 %token LSTNTH
+%token KEYINSERTINDEX
 %token LSTCONTAINS
 %token LSTREPEAT
 %token LSTSUB
@@ -406,6 +409,8 @@ atomic_expr_target:
      { Expr.BinOp (e1, LstNth, e2) }
   | LSTCONTAINS; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
      { Expr.BinOp (e1, LstContains, e2) }
+  | KEYINSERTINDEX; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
+     { Expr.BinOp (e1, KeyInsertIndex, e2) }
   | LSTREPEAT; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
      { Expr.BinOp (e1, LstRepeat, e2) }
   | LSTSUB; LBRACE; e1=expr_target; COMMA; e2=expr_target; COMMA; e3 = expr_target; RBRACE
@@ -1233,6 +1238,7 @@ nop_target:
   | SETUNION { NOp.SetUnion }
   | SETINTER { NOp.SetInter }
   | LSTCAT   { NOp.LstCat   }
+  | LSTINSERT { NOp.LstInsert }
 ;
 
 unop_target:
@@ -1265,6 +1271,7 @@ unop_target:
   | CAR         { UnOp.Car }
   | CDR         { UnOp.Cdr }
   | LSTLEN      { UnOp.LstLen }
+  | LSTALLUTF16 { UnOp.LstAllUtf16 }
   | LSTREV      { UnOp.LstRev }
   | STRLEN      { UnOp.StrLen }
   | NUMTOUTF16  { UnOp.NumberToUtf16 }

@@ -156,7 +156,7 @@ module M = struct
     SHeap.init_object heap loc_name ~is_empty:ie mv;
     Ok [ (heap, [ loc ], [], []) ]
 
-  let set_cell
+  let set_exposed_cell
       ?(abstract = false)
       (heap : t)
       (pfs : PFS.t)
@@ -620,6 +620,43 @@ module M = struct
               BinOp (UnOp (TypeOf, prop), Equal, Lit (Type Utf16Type)));
            Expr.UnOp (Not, BinOp (keys, LstContains, prop)) ] gamma
 
+  (* Runtime insertion into complete UTF-16 field ownership. Uniform key
+     representation plus proved identity nonmembership excludes canonical
+     aliases. Logical Cell production continues to require exposed ownership. *)
+  let ordered_insertable pfs gamma keys values prop value =
+    ordered_sequence_valid pfs gamma keys values
+    && FOSolver.check_entailment Containers.SS.empty pfs
+      [ Expr.UnOp (LstAllUtf16, keys);
+        Expr.BinOp (UnOp (TypeOf, prop), Equal, Lit (Type Utf16Type));
+        Expr.UnOp (Not, BinOp (keys, LstContains, prop));
+        Expr.UnOp (Not, BinOp (value, Equal, Lit Nono));
+        Expr.UnOp (Not, BinOp (UnOp (TypeOf, value), Equal, Lit (Type SetType))) ] gamma
+
+  let set_cell ?(abstract = false) heap pfs gamma loc prop value : action_ret =
+    let packed = Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) in
+    match packed with
+    | None -> set_exposed_cell ~abstract heap pfs gamma loc prop value
+    | Some (keys, values) when not abstract && ordered_insertable pfs gamma keys values prop value ->
+        let position = Expr.BinOp (keys, KeyInsertIndex, prop) in
+        let next_keys = Expr.NOp (LstInsert, [ keys; position; prop ]) in
+        let next_values = Expr.NOp (LstInsert, [ values; position; value ]) in
+        let result = SHeap.copy heap in
+        let name = Option.get (get_loc_name pfs gamma loc) in
+        SHeap.clear_ordered result name;
+        SHeap.set_ordered result name next_keys next_values;
+        (* These follow from structural insertion into a valid complete
+           sequence. They are transfer consequences, never resource-admission
+           axioms or assumptions that an unknown list is well formed. *)
+        let facts =
+          [ Expr.BinOp (Lit (Int Z.zero), ILessThanEqual, position);
+            Expr.BinOp (position, ILessThanEqual, UnOp (LstLen, keys));
+            Expr.BinOp (UnOp (LstLen, next_keys), Equal, UnOp (LstLen, next_values));
+            Expr.UnOp (LstAllUtf16, next_keys) ] in
+        Ok [ (result, [], facts, []) ]
+    | Some _ ->
+        SHeap.require_exposed heap (Option.get (get_loc_name pfs gamma loc));
+        assert false
+
   let get_cell heap pfs gamma loc prop : action_ret =
     match Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) with
     | None -> get_exposed_cell heap pfs gamma loc prop
@@ -838,7 +875,13 @@ module M = struct
        to the legacy syntactic setter/deleter. Argument reduction can turn an
        equal symbolic key into a literal between GetCell and SetCell. A relaxed
        guard alone would permit inserting a second, aliased heap entry. *)
-    if action = JSILNames.setCell || action = JSILNames.delCell then
+    let packed_insertion = action = JSILNames.setCell && (match args with
+      | [ loc; prop; value ] -> (match Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) with
+          | Some (keys, values) -> ordered_insertable pfs gamma keys values prop value
+          | None -> false)
+      | _ -> false) in
+    if packed_insertion then args
+    else if action = JSILNames.setCell || action = JSILNames.delCell then
       match args with
       | loc :: prop :: rest -> (
           string_key prop;

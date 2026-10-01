@@ -235,6 +235,7 @@ rule read = parse
   | ">>l"                { GIL_Parser.SIGNEDRIGHTSHIFTL }
   | ">>>l"               { GIL_Parser.UNSIGNEDRIGHTSHIFTL }
   | "**"                 { GIL_Parser.M_POW         }
+  | "l-insert" { GIL_Parser.LSTINSERT }
   | "l+"                 { GIL_Parser.LSTCAT        }
   | "++"                 { GIL_Parser.STRCAT        }
   | "u16++"              { GIL_Parser.UTF16CAT      }
@@ -250,6 +251,7 @@ rule read = parse
 (* Unary operators *)
   (* Unary minus uses the same symbol as binary minus, token MINUS *)
   | "~"                  { GIL_Parser.BITWISENOT    }
+  | "l-all-u16" { GIL_Parser.LSTALLUTF16 }
   | "l-len"              { GIL_Parser.LSTLEN }
   | "l-rev"              { GIL_Parser.LSTREV }
   | "l-sub"              { GIL_Parser.LSTSUB }
@@ -263,6 +265,7 @@ rule read = parse
   | "s-bytes"            { GIL_Parser.STRBYTES }
 (* Expression keywords *)
   | "l-nth"              { GIL_Parser.LSTNTH }
+  | "key-insert-index" { GIL_Parser.KEYINSERTINDEX }
   | "l-contains"         { GIL_Parser.LSTCONTAINS }
   | "l-repeat"           { GIL_Parser.LSTREPEAT }
   | "s-nth"              { GIL_Parser.STRNTH }

@@ -156,6 +156,7 @@ module UnOp : sig
     | Car  (** Head of a list *)
     | Cdr  (** Tail of a list *)
     | LstLen  (** List length *)
+    | LstAllUtf16
     | LstRev  (** List reverse *)
     | SetToList  (** From set to list *)
     | StrLen  (** String length *)
@@ -221,6 +222,7 @@ module BinOp : sig
     | M_pow  (** Power *)
     | LstNth  (** Nth element of a string *)
     | LstContains (** List membership by value identity *)
+    | KeyInsertIndex
     | LstRepeat
     (* [[a; b]] is the list that contains [b] times the element [a] *)
     | StrCat  (** String concatenation *)
@@ -245,6 +247,7 @@ module NOp : sig
 
   type t =
     | LstCat  (** List concatenation *)
+    | LstInsert
     | SetUnion  (** Set union *)
     | SetInter  (** Set intersection *)
   [@@deriving yojson]
@@ -1427,9 +1430,12 @@ module Visitors : sig
          ; visit_LocalTime : 'c -> Constant.t -> Constant.t
          ; visit_Logic : 'c -> 'f Cmd.t -> LCmd.t -> 'f Cmd.t
          ; visit_LstCat : 'c -> NOp.t -> NOp.t
+         ; visit_LstInsert : 'c -> NOp.t -> NOp.t
          ; visit_LstLen : 'c -> UnOp.t -> UnOp.t
+         ; visit_LstAllUtf16 : 'c -> UnOp.t -> UnOp.t
          ; visit_LstNth : 'c -> BinOp.t -> BinOp.t
          ; visit_LstContains : 'c -> BinOp.t -> BinOp.t
+         ; visit_KeyInsertIndex : 'c -> BinOp.t -> BinOp.t
          ; visit_LstRepeat : 'c -> BinOp.t -> BinOp.t
          ; visit_LstRev : 'c -> UnOp.t -> UnOp.t
          ; visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> Expr.t -> Expr.t
@@ -1709,9 +1715,12 @@ module Visitors : sig
     method visit_LocalTime : 'c -> Constant.t -> Constant.t
     method visit_Logic : 'c -> 'f Cmd.t -> LCmd.t -> 'f Cmd.t
     method visit_LstCat : 'c -> NOp.t -> NOp.t
+    method visit_LstInsert : 'c -> NOp.t -> NOp.t
     method visit_LstLen : 'c -> UnOp.t -> UnOp.t
+    method visit_LstAllUtf16 : 'c -> UnOp.t -> UnOp.t
     method visit_LstNth : 'c -> BinOp.t -> BinOp.t
     method visit_LstContains : 'c -> BinOp.t -> BinOp.t
+    method visit_KeyInsertIndex : 'c -> BinOp.t -> BinOp.t
     method visit_LstRepeat : 'c -> BinOp.t -> BinOp.t
     method visit_LstRev : 'c -> UnOp.t -> UnOp.t
     method visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> Expr.t -> Expr.t
@@ -1979,9 +1988,12 @@ module Visitors : sig
          ; visit_LocalTime : 'c -> 'f
          ; visit_Logic : 'c -> LCmd.t -> 'f
          ; visit_LstCat : 'c -> 'f
+         ; visit_LstInsert : 'c -> 'f
          ; visit_LstLen : 'c -> 'f
+         ; visit_LstAllUtf16 : 'c -> 'f
          ; visit_LstNth : 'c -> 'f
          ; visit_LstContains : 'c -> 'f
+         ; visit_KeyInsertIndex : 'c -> 'f
          ; visit_LstRepeat : 'c -> 'f
          ; visit_LstRev : 'c -> 'f
          ; visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> 'f
@@ -2219,9 +2231,12 @@ module Visitors : sig
     method visit_LocalTime : 'c -> 'f
     method visit_Logic : 'c -> LCmd.t -> 'f
     method visit_LstCat : 'c -> 'f
+    method visit_LstInsert : 'c -> 'f
     method visit_LstLen : 'c -> 'f
+    method visit_LstAllUtf16 : 'c -> 'f
     method visit_LstNth : 'c -> 'f
     method visit_LstContains : 'c -> 'f
+    method visit_KeyInsertIndex : 'c -> 'f
     method visit_LstRepeat : 'c -> 'f
     method visit_LstRev : 'c -> 'f
     method visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> 'f
@@ -2467,9 +2482,12 @@ module Visitors : sig
          ; visit_LocalTime : 'c -> unit
          ; visit_Logic : 'c -> LCmd.t -> unit
          ; visit_LstCat : 'c -> unit
+         ; visit_LstInsert : 'c -> unit
          ; visit_LstLen : 'c -> unit
+         ; visit_LstAllUtf16 : 'c -> unit
          ; visit_LstNth : 'c -> unit
          ; visit_LstContains : 'c -> unit
+         ; visit_KeyInsertIndex : 'c -> unit
          ; visit_LstRepeat : 'c -> unit
          ; visit_LstRev : 'c -> unit
          ; visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> unit
@@ -2711,9 +2729,12 @@ module Visitors : sig
     method visit_LocalTime : 'c -> unit
     method visit_Logic : 'c -> LCmd.t -> unit
     method visit_LstCat : 'c -> unit
+    method visit_LstInsert : 'c -> unit
     method visit_LstLen : 'c -> unit
+    method visit_LstAllUtf16 : 'c -> unit
     method visit_LstNth : 'c -> unit
     method visit_LstContains : 'c -> unit
+    method visit_KeyInsertIndex : 'c -> unit
     method visit_LstRepeat : 'c -> unit
     method visit_LstRev : 'c -> unit
     method visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> unit
