@@ -756,6 +756,27 @@ module Make (State : SState.S) :
       List.fold_left
         (fun intermediate_states asrt ->
           let** intermediate_state = intermediate_states in
+          (* Only a known type conflict on an atomic value classifies an empty
+             Types production as infeasible. Reverse typing can also fail for
+             unsupported expressions; those must retain the state-loss guard. *)
+          let type_conflict =
+            match asrt with
+            | Asrt.Types bindings when track_infeasible ->
+                List.find_map
+                  (fun (expression, required) ->
+                    let value = subst_in_expr subst expression in
+                    match value with
+                    | Expr.LVar _ | Expr.ALoc _ | Expr.Lit _ -> (
+                        match State.get_type intermediate_state.state value with
+                        | Some known when not (Type.equal known required) ->
+                            Some
+                              (Fmt.str "explicit unfold type conflict: %a is %a, requested %a"
+                                 Expr.pp value Type.pp known Type.pp required)
+                        | _ -> None)
+                    | _ -> None)
+                  bindings
+            | _ -> None
+          in
           let outcomes =
             try produce_assertion intermediate_state subst asrt with
             | err when track_infeasible -> raise err
@@ -772,8 +793,12 @@ module Make (State : SState.S) :
                   other_state_err "Production Exception")
                 else raise e
           in
-          guard_unclassified_loss track_infeasible
-            "explicit unfold assertion production" outcomes)
+          match (outcomes, type_conflict) with
+          | [], Some reason ->
+              Res_list.error_with (StateErr.EInfeasibleUnfold reason)
+          | _ ->
+              guard_unclassified_loss track_infeasible
+                "explicit unfold assertion production" outcomes)
         (Res_list.return astate) sas
     in
     let state, preds, wands =

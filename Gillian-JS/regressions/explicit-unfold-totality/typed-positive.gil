@@ -1,0 +1,15 @@
+pure nounfold pred TypedChoice(n) :
+  types(n : Int) * (n == 0i), types(n : Bool);
+lemma CheckChoice(n)
+[[ types(#n : Int) * TypedChoice(#n) ]]
+[[ (#n == 0i) ]]
+[* unfold TypedChoice(#n) *]
+
+spec answer(n)
+[[ (n == #n) * types(#n : Int) * TypedChoice(#n) ]]
+[[ (ret == 0i) ]] normal
+proc answer(n) {
+  apply CheckChoice(n);
+  ret := n;
+  return
+};
