@@ -86,6 +86,7 @@ module Infer_types_to_gamma = struct
       | SetMem -> (None, Some SetType, Some BooleanType)
       | SetDiff -> (Some SetType, Some SetType, Some SetType)
       | SetSub -> (Some SetType, Some SetType, Some BooleanType)
+      | LstContains -> (Some ListType, None, Some BooleanType)
       | LstNth -> (Some ListType, Some IntType, None)
       | LstRepeat -> (None, Some IntType, Some ListType)
       | StrNth -> (Some ListType, Some NumberType, None)
@@ -304,6 +305,9 @@ let rec infer_types_expr gamma le : unit =
       | IPlus | IMinus | ITimes | IDiv | IMod | ILessThan | ILessThanEqual ->
           e le1 IntType;
           e le2 IntType
+      | LstContains ->
+          e le1 ListType;
+          e le BooleanType
       | LstNth ->
           e le1 ListType;
           e le2 IntType
@@ -468,6 +472,7 @@ module Type_lexpr = struct
         | And
         | Or
         | Impl
+        | LstContains
         | SetMem
         | SetSub -> infer_type le BooleanType
         | SetDiff -> infer_type le SetType

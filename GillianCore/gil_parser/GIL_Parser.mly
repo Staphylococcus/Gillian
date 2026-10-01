@@ -167,6 +167,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token PRODUCE
 %token ASSUME_TYPE
 %token LSTNTH
+%token LSTCONTAINS
 %token LSTREPEAT
 %token LSTSUB
 %token STRNTH
@@ -403,6 +404,8 @@ atomic_expr_target:
 (* l-nth (list, n) *)
   | LSTNTH; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
      { Expr.BinOp (e1, LstNth, e2) }
+  | LSTCONTAINS; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
+     { Expr.BinOp (e1, LstContains, e2) }
   | LSTREPEAT; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
      { Expr.BinOp (e1, LstRepeat, e2) }
   | LSTSUB; LBRACE; e1=expr_target; COMMA; e2=expr_target; COMMA; e3 = expr_target; RBRACE

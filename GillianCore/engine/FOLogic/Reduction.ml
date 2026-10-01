@@ -1902,6 +1902,16 @@ let rec reduce_lexpr_loop
                   right
               in
               BinOp (left, Impl, right))
+    (* Membership uses the same identity as v==, including nested values. *)
+    | BinOp (list, LstContains, value) -> (
+        let list = f list in
+        let value = f value in
+        match list with
+        | EList xs ->
+            f (Expr.disjunct (List.map (fun x -> Expr.BinOp (x, ValueEqual, value)) xs))
+        | Lit (LList xs) ->
+            f (Expr.disjunct (List.map (fun x -> Expr.BinOp (Lit x, ValueEqual, value)) xs))
+        | _ -> BinOp (list, LstContains, value))
     (* BinOps: List indexing *)
     | BinOp (le, LstNth, idx) -> (
         let fle = f le in
@@ -2796,6 +2806,7 @@ let clean_double_equalities (a : Asrt.t) : Asrt.t =
     | And
     | Or
     | Impl
+    | LstContains
     | SetMem
     | SetSub -> true
     | _ -> false

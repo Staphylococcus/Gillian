@@ -610,6 +610,16 @@ module M = struct
         else None
     | _ -> None
 
+  (* Nonmembership is checked against the complete owned sequence; a missing
+     positive witness or an unrelated list cannot establish absence. *)
+  let ordered_cell_absent pfs gamma keys values prop =
+    ordered_sequence_valid pfs gamma keys values
+    && FOSolver.check_entailment Containers.SS.empty pfs
+         [ Expr.BinOp
+             (BinOp (UnOp (TypeOf, prop), Equal, Lit (Type StringType)), Or,
+              BinOp (UnOp (TypeOf, prop), Equal, Lit (Type Utf16Type)));
+           Expr.UnOp (Not, BinOp (keys, LstContains, prop)) ] gamma
+
   let get_cell heap pfs gamma loc prop : action_ret =
     match Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) with
     | None -> get_exposed_cell heap pfs gamma loc prop
@@ -621,6 +631,8 @@ module M = struct
                arbitrary list types or an assumed successful lookup. *)
             Ok [ (heap, [ loc; prop; value ],
                   [ Expr.UnOp (Not, BinOp (value, Equal, Lit Nono)) ], []) ]
+        | None when ordered_cell_absent pfs gamma keys values prop ->
+            Ok [ (heap, [ loc; prop; Expr.Lit Nono ], [], []) ]
         | None ->
             SHeap.require_exposed heap
               (Option.get (get_loc_name pfs gamma loc));

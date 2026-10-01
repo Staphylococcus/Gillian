@@ -1074,7 +1074,7 @@ let rec encode_lit (lit : Literal.t) : Encoding.t =
         require_definition def_gil_literal;
         let>-- args = List.map (fun lit -> simple_wrap (encode_lit lit)) lits in
         let args = List.map (fun arg -> arg.expr) args in
-        list args >- ListType
+        seq_of ~typ:t_gil_literal_list args >- ListType
     | Constant c -> (
         match Literal.static_constant c with
         | Some value -> encode_lit value
@@ -1226,6 +1226,11 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       let>- p1 = get_list p1 in
       let>- p2 = get_list p2 in
       seq_nth p1.expr p2.expr |> simply_wrapped
+  | LstContains ->
+      let>- list = get_list p1 in
+      let>- value = simple_wrap p2 in
+      (* Sequence membership is native datatype equality, exactly as v==. *)
+      app (atom "seq.contains") [ list.expr; seq_unit value.expr ] >- BooleanType
   | LstRepeat ->
       let>- x = simple_wrap p1 in
       let>- n = get_int p2 in

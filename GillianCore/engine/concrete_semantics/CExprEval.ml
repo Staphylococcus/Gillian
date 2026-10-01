@@ -230,6 +230,9 @@ let rec evaluate_binop
           | LList _, LList _ -> Bool (Literal.same_value lit1 lit2)
           | Nono, Nono -> Bool true
           | _, _ -> Bool false)
+      | LstContains ->
+          Bool (List.exists (fun value -> Literal.same_value value lit2)
+                  (as_list ~msg:"LstContains" lit1))
       | LstNth -> (
           let list = as_list ~msg:"LstNth" lit1 in
           match lit2 with

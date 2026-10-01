@@ -99,6 +99,7 @@ and binop =
   | M_atan2
   | M_pow
   | LstNth
+  | LstContains  (** List membership by value identity *)
   | LstRepeat
   | StrCat
   | Utf16Less

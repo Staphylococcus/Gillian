@@ -627,6 +627,137 @@ let sequence_indexed_known_values () =
        check "nonempty concrete value witness selects second, not first" (value = Expr.num 2.)
    | _ -> Alcotest.fail "concrete values indexed lookup failed")
 
+let membership_literals () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let utf16 units = Literal.Utf16String
+      (Gillian.Utils.Utf16.of_canonical (Gillian.Utils.Utf16.of_code_units units)) in
+  let check_case xs value expected =
+    let term = Expr.BinOp (Lit (Literal.LList xs), LstContains, Lit value) in
+    check "concrete membership uses value identity"
+      (Engine.CExprEval.evaluate_expr store term = Literal.Bool expected);
+    check "reduction agrees with concrete membership"
+      (Gillian.Logic.Reduction.reduce_lexpr term = Expr.bool expected);
+    check "direct SMT agrees with concrete membership"
+      (not (Smt.is_sat (Expr.Set.singleton
+              (Expr.BinOp (term, ValueEqual, Expr.bool (not expected))))
+              (Gillian.Symbolic.Type_env.as_hashtbl
+                 (Gillian.Symbolic.Type_env.init ()))))
+  in
+  List.iter (fun (xs, value, expected) -> check_case xs value expected)
+    [ [], Literal.Null, false;
+      [ utf16 [ 0; 0xd800 ] ], utf16 [ 0; 0xd800 ], true;
+      [ utf16 [ 0xd800 ] ], utf16 [ 0xdc00 ], false;
+      [ Literal.String "z" ], utf16 [ 122 ], false;
+      [ Literal.Num nan ], Literal.Num nan, true;
+      [ Literal.Num 0. ], Literal.Num (-0.), false;
+      [ Literal.LList [ Literal.Num nan; Literal.Num (-0.) ] ],
+        Literal.LList [ Literal.Num nan; Literal.Num (-0.) ], true;
+      [ Literal.LList [] ], Literal.LList [ Literal.Null ], false ]
+
+let membership_domains () =
+  let context = sequence_context () in
+  let member = Expr.LVar "#domain_member" in
+  Gillian.Symbolic.Type_env.update context.gamma "#domain_member" Type.Utf16Type;
+  let evaluate = Gillian.Logic.Reduction.reduce_lexpr
+      ~pfs:context.pfs ~gamma:context.gamma in
+  let proves condition = Gillian.Logic.FOSolver.check_entailment
+      Gillian.Utils.Containers.SS.empty context.pfs [ condition ] context.gamma in
+  let accepts term = try
+      Engine.Totality.check_expression ~proof:true ~proves ~evaluate
+        ~require:(fun _ condition -> if not (proves condition) then failwith "domain") term;
+      true
+    with Failure message when message = "domain" -> false in
+  check "membership accepts typed symbolic lists and keys"
+    (accepts (Expr.BinOp (sequence_keys, LstContains, member)));
+  check "membership rejects a non-list operand"
+    (not (accepts (Expr.BinOp (Expr.num 0., LstContains, member))));
+  check "logical sets are not values stored in GIL lists"
+    (not (accepts (Expr.BinOp (sequence_keys, LstContains, Expr.ESet []))))
+
+let membership_symbolic () =
+  let context = sequence_context () in
+  let value = Expr.LVar "#member" in
+  Gillian.Symbolic.Type_env.update context.gamma "#member" Type.Utf16Type;
+  let contains list = Expr.BinOp (list, LstContains, value) in
+  let appended = Expr.NOp (LstCat, [ sequence_keys; Expr.EList [ value ] ]) in
+  let sat fs = Smt.is_sat (Expr.Set.of_list fs)
+      (Gillian.Symbolic.Type_env.as_hashtbl context.gamma) in
+  check "appended member occurs for arbitrary preceding length"
+    (not (sat [ Expr.UnOp (Not, contains appended) ]));
+  check "absence is satisfiable for an empty sequence"
+    (sat [ Expr.BinOp (sequence_keys, Equal, Expr.EList []);
+           Expr.UnOp (Not, contains sequence_keys) ]);
+  check "presence is satisfiable for a nonempty sequence"
+    (sat [ contains sequence_keys ]);
+  check "membership and absence are contradictory"
+    (not (sat [ contains sequence_keys; Expr.UnOp (Not, contains sequence_keys) ]))
+
+let absent_key = Expr.LVar "#absent_key"
+let absence_context ?(typed = true) ?(keys = sequence_keys) () =
+  let context = sequence_context () in
+  if typed then Gillian.Symbolic.Type_env.update context.gamma
+      "#absent_key" Type.Utf16Type;
+  Gillian.Symbolic.Pure_context.extend context.pfs
+    (Expr.UnOp (Not, BinOp (keys, LstContains, absent_key)));
+  context
+
+let sequence_absent_read () =
+  let context = absence_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  check "total lookup requires only proved typed absence"
+    (Legacy.prepare_total_action getCell heap context.pfs context.gamma
+       [ loc; absent_key ] = [ loc; absent_key ]);
+  (match Legacy.execute_action getCell heap context.pfs context.gamma [ loc; absent_key ] with
+   | Ok [ (after, out, facts, _) ] ->
+       check "complete sequence absence returns internal none"
+         (out = [ loc; absent_key; Expr.Lit Literal.Nono ] && facts = []);
+       check "lookup preserves exact sequence and metadata"
+         (snapshot after = before && Heap.get_met after loc_name = Some metadata)
+   | _ -> Alcotest.fail "absent lookup failed");
+  check "lookup leaves both witnesses consumable"
+    (snd (consume ~context heap) = [ sequence_keys; sequence_values ])
+
+let reject_absent context prop =
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  let rejected = try ignore (action ~context heap getCell [ loc; prop ]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "absence requires proved nonmembership in owned keys" rejected;
+  check "rejection retains complete ownership" (snapshot heap = before)
+
+let absence_no_fact () =
+  let context = sequence_context () in
+  Gillian.Symbolic.Type_env.update context.gamma "#absent_key" Type.Utf16Type;
+  reject_absent context absent_key
+
+let absence_wrong_list () =
+  let context = absence_context ~keys:(Expr.LVar "#other_keys") () in
+  Gillian.Symbolic.Type_env.update context.gamma "#other_keys" Type.ListType;
+  reject_absent context absent_key
+
+let absence_present () =
+  let context = sequence_context () in
+  Gillian.Symbolic.Type_env.update context.gamma "#absent_key" Type.Utf16Type;
+  Gillian.Symbolic.Pure_context.extend context.pfs
+    (Expr.BinOp (sequence_keys, LstContains, absent_key));
+  reject_absent context absent_key
+
+let absence_nonkey () =
+  reject_absent (absence_context ~typed:false ()) absent_key;
+  let context = absence_context ~typed:false () in
+  Gillian.Symbolic.Type_env.update context.gamma "#absent_key" Type.NumberType;
+  reject_absent context absent_key
+
+let absence_no_cell_split () =
+  let context = absence_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  let rejected = try ignore (Memory.consume aCell heap context [ loc; absent_key ]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "absence read does not duplicate a separately consumable cell" rejected;
+  check "failed split leaves whole resource" (snapshot heap = before)
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -658,5 +789,14 @@ let () =
             ("whole sequence index bounds and identity", sequence_indexed_bounds);
             ("whole sequence no separate cell consumption", sequence_indexed_cell_consumption);
             ("whole sequence selected concrete value", sequence_indexed_known_values);
+            ("membership literal identity", membership_literals);
+            ("membership exact symbolic sequence", membership_symbolic);
+            ("membership total domains", membership_domains);
+            ("whole sequence absent read", sequence_absent_read);
+            ("absence requires nonmembership", absence_no_fact);
+            ("absence requires owned list", absence_wrong_list);
+            ("presence cannot authorize absence", absence_present);
+            ("absence requires string key", absence_nonkey);
+            ("absence cannot split ownership", absence_no_cell_split);
           ] );
     ]

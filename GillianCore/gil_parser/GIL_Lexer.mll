@@ -263,6 +263,7 @@ rule read = parse
   | "s-bytes"            { GIL_Parser.STRBYTES }
 (* Expression keywords *)
   | "l-nth"              { GIL_Parser.LSTNTH }
+  | "l-contains"         { GIL_Parser.LSTCONTAINS }
   | "l-repeat"           { GIL_Parser.LSTREPEAT }
   | "s-nth"              { GIL_Parser.STRNTH }
 (* Command keywords *)

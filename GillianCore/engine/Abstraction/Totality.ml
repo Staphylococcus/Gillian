@@ -229,6 +229,9 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
         | UnsignedRightShiftF
         | M_atan2
         | M_pow -> both NumberType
+        | LstContains ->
+            need (typ left ListType);
+            need (Expr.UnOp (Not, typ right SetType))
         | SetMem when proof -> need (typ right SetType)
         | (SetSub | SetDiff) when proof -> both SetType
         | SetMem | SetSub | SetDiff ->
