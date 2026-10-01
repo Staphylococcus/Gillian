@@ -551,6 +551,82 @@ let sequence_shape_rejections () =
       Expr.num 1., sequence_values;
       sequence_keys, Expr.EList [ Expr.Lit Literal.Nono ] ]
 
+let sequence_index = Expr.LVar "#sequence_index"
+
+let indexed_context ?(lower = true) ?(upper = true) () =
+  let context = sequence_context () in
+  Gillian.Symbolic.Type_env.update context.gamma "#sequence_index" Type.IntType;
+  let add = Gillian.Symbolic.Pure_context.extend context.pfs in
+  if lower then add (Expr.BinOp (Expr.zero_i, ILessThanEqual, sequence_index));
+  if upper then add (Expr.BinOp (sequence_index, ILessThan, UnOp (LstLen, sequence_keys)));
+  context
+
+let selected_key = Expr.BinOp (sequence_keys, LstNth, sequence_index)
+let selected_value = Expr.BinOp (sequence_values, LstNth, sequence_index)
+
+let sequence_indexed_read () =
+  let context = indexed_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  check "total action accepts resource-backed selected key without extra key facts"
+    (Legacy.prepare_total_action getCell heap context.pfs context.gamma
+       [ loc; selected_key ] = [ loc; selected_key ]);
+  (match Legacy.execute_action getCell heap context.pfs context.gamma [ loc; selected_key ] with
+   | Ok [ (after, outputs, learned, _) ] ->
+       check "actual lookup returns paired value at the same arbitrary index"
+         (outputs = [ loc; selected_key; selected_value ]);
+       check "only resource-entailed presence is learned"
+         (learned = [ Expr.UnOp (Not, BinOp (selected_value, Equal, Lit Literal.Nono)) ]);
+       check "read is persistent and metadata is framed"
+         (snapshot after = before && Heap.get_met after loc_name = Some metadata)
+   | _ -> Alcotest.fail "indexed lookup failed");
+  let _, witnesses = consume ~context heap in
+  check "read leaves complete resource available to checked summary"
+    (witnesses = [ sequence_keys; sequence_values ])
+
+let sequence_indexed_bounds () =
+  let reject context prop =
+    let heap = sequence_make context in
+    let before = snapshot heap in
+    let rejected = try ignore (action ~context heap getCell [ loc; prop ]); false
+      with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError text) ->
+        text = "Unsupported ordered fields: operation requires exposed cells." in
+    check "unproved index or unrelated list cannot select an owned value" rejected;
+    check "rejected read leaves ownership intact" (snapshot heap = before)
+  in
+  reject (indexed_context ~lower:false ()) selected_key;
+  reject (indexed_context ~upper:false ()) selected_key;
+  let context = indexed_context () in
+  Gillian.Symbolic.Type_env.update context.gamma "#other_keys" Type.ListType;
+  reject context (Expr.BinOp (LVar "#other_keys", LstNth, sequence_index));
+  reject context (key "z")
+
+let sequence_indexed_cell_consumption () =
+  let context = indexed_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  let rejected = try
+      ignore (Memory.consume aCell heap context [ loc; selected_key ]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "read access does not authorize separate cell consumption" rejected;
+  check "failed split retains whole ownership" (snapshot heap = before)
+
+let sequence_indexed_known_values () =
+  let context = indexed_context () in
+  let heap = sequence_make context in
+  let subst = Gillian.Symbolic.Subst.init
+      [ sequence_values, values; sequence_index, Expr.one_i ] in
+  Heap.substitution_in_place subst heap;
+  let context = sequence_context () in
+  Gillian.Symbolic.Pure_context.extend context.pfs
+    (Expr.BinOp (UnOp (LstLen, sequence_keys), Equal, Expr.int 2));
+  let prop = Expr.BinOp (sequence_keys, LstNth, Expr.one_i) in
+  (match Legacy.execute_action getCell heap context.pfs context.gamma [ loc; prop ] with
+   | Ok [ (_, [ _; _; value ], _, _) ] ->
+       let value = Gillian.Logic.Reduction.reduce_lexpr ~pfs:context.pfs ~gamma:context.gamma value in
+       check "nonempty concrete value witness selects second, not first" (value = Expr.num 2.)
+   | _ -> Alcotest.fail "concrete values indexed lookup failed")
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -578,5 +654,9 @@ let () =
             ("whole sequence location aliases", sequence_aliases);
             ("whole sequence exclusive action guards", sequence_exclusivity);
             ("whole sequence known-shape rejection", sequence_shape_rejections);
+            ("whole sequence arbitrary indexed read", sequence_indexed_read);
+            ("whole sequence index bounds and identity", sequence_indexed_bounds);
+            ("whole sequence no separate cell consumption", sequence_indexed_cell_consumption);
+            ("whole sequence selected concrete value", sequence_indexed_known_values);
           ] );
     ]

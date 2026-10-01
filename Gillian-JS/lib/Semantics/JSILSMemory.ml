@@ -168,7 +168,7 @@ module M = struct
     SHeap.set_fv_pair ~abstract heap loc_name prop v;
     Ok [ (heap, [], new_pfs, []) ]
 
-  let get_cell
+  let get_exposed_cell
       (heap : t)
       (pfs : PFS.t)
       (gamma : Type_env.t)
@@ -590,6 +590,42 @@ module M = struct
     && FOSolver.check_entailment Containers.SS.empty pfs
          [ ordered_length_equality keys values ] gamma
 
+  (* A complete ordered resource denotes distinct present keys paired with
+     values. A proved in-range key selection therefore identifies exactly one
+     owned value. No raw cell is exposed or consumed by this read. *)
+  let ordered_cell_index pfs gamma keys values prop =
+    let reduce = Reduction.reduce_lexpr ~pfs ~gamma in
+    match reduce prop with
+    | Expr.BinOp (selected_keys, LstNth, index)
+      when reduce selected_keys = reduce keys
+           && ordered_sequence_valid pfs gamma keys values ->
+        let bounds =
+          [ Expr.BinOp (UnOp (TypeOf, index), Equal, Lit (Type IntType));
+            Expr.BinOp (Expr.zero_i, ILessThanEqual, index);
+            Expr.BinOp (index, ILessThan, UnOp (LstLen, keys));
+            Expr.BinOp (index, ILessThan, UnOp (LstLen, values)) ]
+        in
+        if FOSolver.check_entailment Containers.SS.empty pfs bounds gamma then
+          Some index
+        else None
+    | _ -> None
+
+  let get_cell heap pfs gamma loc prop : action_ret =
+    match Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) with
+    | None -> get_exposed_cell heap pfs gamma loc prop
+    | Some (keys, values) -> (
+        match ordered_cell_index pfs gamma keys values prop with
+        | Some index ->
+            let value = Expr.BinOp (values, LstNth, index) in
+            (* Presence follows from the resource and proved bounds, not from
+               arbitrary list types or an assumed successful lookup. *)
+            Ok [ (heap, [ loc; prop; value ],
+                  [ Expr.UnOp (Not, BinOp (value, Equal, Lit Nono)) ], []) ]
+        | None ->
+            SHeap.require_exposed heap
+              (Option.get (get_loc_name pfs gamma loc));
+            assert false)
+
   let get_full_domain (heap : t) (pfs : PFS.t) (gamma : Type_env.t) (loc : vt) :
       action_ret =
     let loc_name = get_loc_name pfs gamma loc in
@@ -832,7 +868,11 @@ module M = struct
          | _ -> unsupported "requires fresh allocation in the current fragment."
        else if action = JSILNames.getCell then
          match args with
-         | [ _; prop ] -> string_key prop
+         | [ loc; prop ] -> (
+             match Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) with
+             | Some (keys, values)
+               when Option.is_some (ordered_cell_index pfs gamma keys values prop) -> ()
+             | _ -> string_key prop)
          | _ -> unsupported "has invalid arguments."
        else if action = JSILNames.delObj then
          match args with
