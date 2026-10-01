@@ -677,8 +677,8 @@ let numeric_producers () =
       (match Reduction.reduce_lexpr term with
       | Expr.Lit actual -> Literal.same_value expected actual
       | _ -> false);
-    (* As for bytes, symbolic formatting of finite nonzero numbers is an
-       over-approximation; its literal output is fixed by concrete reduction. *)
+    (* Formatting outside the exact integral Uint32 interval remains an
+       over-approximation; concrete reduction still fixes literal results. *)
     if exact_smt then
       check "typed numeric conversion SMT agrees" false
         [ not_ (bin ValueEqual term (Expr.Lit expected)) ]
@@ -694,7 +694,8 @@ let numeric_producers () =
         | _ -> assert false
       in
       check_term
-        ~exact_smt:(number = 0. || not (Float.is_finite number))
+        ~exact_smt:(not (Float.is_finite number)
+          || (number >= 0. && number <= 4294967295. && Float.is_integer number))
         (Expr.UnOp (NumberToUtf16, Expr.num number))
         (Literal.Utf16String (Codec.of_canonical bytes)))
     [
@@ -752,6 +753,65 @@ let numeric_producers () =
     [ eq formatted (value [ 112; 117; 115; 104 ]) ];
   check ~types "native set keys retain the parser fact" false
     [ bin SetMem formatted (Expr.ESet [ value [ 112; 117; 115; 104 ] ]) ]
+
+let uint32_formatter_literals () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let cases = [ -0.; 0.; 4294967294.; 4294967295. ]
+      @ List.concat_map (fun power ->
+          let n = 10. ** float_of_int power in [ n -. 1.; n; n +. 1. ])
+          (List.init 9 (fun i -> i + 1)) in
+  List.iter (fun number ->
+      let term = Expr.UnOp (NumberToUtf16, Expr.num number) in
+      let expected = Expr.Lit (Literal.Utf16String
+          (Codec.of_canonical (Printf.sprintf "%.0f" (number +. 0.)))) in
+      Alcotest.(check bool) "concrete formatter agrees with decimal integer"
+        true (Literal.equal (Engine.CExprEval.evaluate_expr store term)
+          (match expected with Expr.Lit l -> l | _ -> assert false));
+      check "direct decimal encoding agrees with concrete formatter" false
+        [ not_ (eq term expected) ]) cases
+
+let uint32_formatter_indices_checks () =
+  let number = Expr.LVar "#decimal_number" in
+  let types () =
+    let g = Gamma.init () in Gamma.update g "#decimal_number" NumberType; g in
+  let formatted = Expr.UnOp (NumberToUtf16, number) in
+  let position keys = bin KeyInsertIndex (Expr.EList keys) formatted in
+  let text s = Expr.Lit (Literal.Utf16String (Codec.of_canonical s)) in
+  let interval = [ Expr.UnOp (IsInt, number);
+      bin FLessThanEqual (Expr.num 0.) number;
+      bin FLessThan number (Expr.num 4294967295.) ] in
+  check ~types "every Uint32 array index precedes ordinary names" false
+    (interval @ [ not_ (eq (position [ text "length" ]) (Expr.int 0)) ]);
+  check ~types "the excluded Uint32 boundary is an ordinary name" false
+    [ eq number (Expr.num 4294967295.);
+      not_ (eq (position [ text "length" ]) (Expr.int 1)) ];
+  check ~types "a decimal key cannot acquire a leading zero" false
+    [ eq number (Expr.num 1.); eq formatted (text "01") ];
+  check ~types "a false position claim has a real counterexample" true
+    [ eq number (Expr.num 1.);
+      not_ (eq (position [ text "length" ]) (Expr.int 1)) ];
+  check ~types "both signed zeros give the index zero" false
+    [ bin ValueEqual number (Expr.num (-0.));
+      not_ (eq formatted (text "0")) ]
+
+let uint32_formatter_indices () =
+  let saved = !Gillian.Utils.Config.dump_smt in
+  Gillian.Utils.Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Gillian.Utils.Config.dump_smt := saved)
+    uint32_formatter_indices_checks
+
+let uint32_formatter_fallback () =
+  let term number = Expr.UnOp (NumberToUtf16, Expr.num number) in
+  let text s = Expr.Lit (Literal.Utf16String (Codec.of_canonical s)) in
+  (* These noncanonical spellings deliberately remain admitted by the opaque
+     fallback. They would be ruled out by extending the exact branch past its
+     proved integral range, or by truncating an arbitrary Number to Uint32. *)
+  List.iter (fun (number, spelling) ->
+      Alcotest.(check bool)
+        "outside Uint32 the direct SMT formatter remains an over-approximation"
+        true (Smt.is_sat (Expr.Set.singleton (eq (term number) (text spelling)))
+          (Gamma.as_hashtbl (Gamma.init ()))))
+    [ (1.5, "01.5"); (-1., "-01"); (4294967296., "04294967296") ]
 
 let concrete_legacy_operations () =
   let store = Engine.CExprEval.CStore.init [] in
@@ -1267,4 +1327,7 @@ let tests =
     ("typed numeric producers", `Quick, numeric_producers);
     ("concrete legacy operations", `Quick, concrete_legacy_operations);
     ("expression transport", `Quick, expression_transport);
+    ("exact Uint32 decimal literals", `Quick, uint32_formatter_literals);
+    ("symbolic Uint32 index spelling", `Quick, uint32_formatter_indices);
+    ("Uint32 formatter fallback guards", `Quick, uint32_formatter_fallback);
   ]
