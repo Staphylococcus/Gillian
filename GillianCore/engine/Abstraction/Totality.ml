@@ -14,6 +14,29 @@ let unsupported message =
     (Gillian_result.Exc.Gillian_error
        (OperationError ("Unsupported totality proof: " ^ message)))
 
+(* Is this an empty resource footprint? Pure recursive predicates are allowed
+   only when every definition and guard is resource-free. Abstract predicates,
+   missing definitions, core resources and wands remain non-empty. A visited
+   recursive edge is safe only because all its other edges are still checked. *)
+let heap_free_assertion preds assertion =
+  let rec check seen atoms = List.for_all (atom seen) atoms
+  and atom seen = function
+    | Asrt.Emp | Asrt.Pure _ | Asrt.Types _ -> true
+    | asrt when Option.is_some (Asrt.as_definedness asrt) -> true
+    | Asrt.CorePred (name, _, _) -> (match Asrt.as_user_pred_name name with
+        | None -> false
+        | Some name when SS.mem name seen -> true
+        | Some name -> (match Hashtbl.find_opt preds name with
+            | None -> false
+            | Some (pred : Pred.t) ->
+                let seen = SS.add name seen in
+                not pred.pred_abstract && pred.pred_definitions <> []
+                && List.for_all (fun (_, a) -> check seen a) pred.pred_definitions
+                && Option.fold ~none:true ~some:(check seen) pred.pred_guard))
+    | Asrt.Wand _ -> false
+  in
+  check SS.empty assertion
+
 (* A finite integral binary64 value denotes an exact mathematical integer.
    Strict IEEE comparison on these values agrees with natural-number order.
    Arithmetic remains binary64: stalled/rounded updates must still prove descent. *)
@@ -748,7 +771,9 @@ let order_procs
                 (callee
                ^ " requires exact call arity in the current totality fragment."
                 ))
-          else if not (inline_body target) then
+          else if not (!Config.Verification.closed_entry
+                       || SS.mem name !Config.Verification.closed_initializers
+                       || inline_body target) then
             unsupported
               (callee
              ^ " must be selected and proved total along with its caller."))

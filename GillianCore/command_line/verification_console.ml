@@ -35,6 +35,14 @@ module Make
     in
     Arg.(value & flag & info [ "closed-entry" ] ~doc)
 
+  let closed_initializer =
+    let doc =
+      "Prove NAME from emp under closed-entry rules before its callers. Requires \
+       --total without --closed-entry. Its result is usable only from an empty \
+       owned heap, including predicate and loop frames; it is not frameable."
+    in
+    Arg.(value & opt_all string [] & info [ "closed-initializer" ] ~doc ~docv:"NAME")
+
   let proc_arg =
     let doc =
       "Specifies a procedure or list of procedures that should be verified. By \
@@ -122,6 +130,13 @@ module Make
           "Proof dependencies require --total without --closed-entry."
       else Ok ()
     in
+    let* () =
+      if not (Containers.SS.is_empty !Config.Verification.closed_initializers)
+         && ((not !Config.Verification.total) || !Config.Verification.closed_entry)
+      then Gillian_result.operation_error
+        "Closed initializers require --total without --closed-entry."
+      else Ok ()
+    in
     Verification.start_time := Unix.gettimeofday ();
     Fmt.pr "Parsing and compiling...\n@?";
     let* e_prog, init_data, source_files_opt =
@@ -172,6 +187,7 @@ module Make
       procs_only
       total
       closed_entry
+      closed_initializers
       proof_dependencies
       () =
     (* Attention: if you plan to add UX verification, you must be careful about predicates.
@@ -179,6 +195,7 @@ module Make
     let () = Fmt_tty.setup_std_outputs () in
     let () = Config.Verification.total := total in
     let () = Config.Verification.closed_entry := closed_entry in
+    let () = Config.Verification.closed_initializers := Containers.SS.of_list closed_initializers in
     let () = Config.Verification.proof_dependencies := proof_dependencies in
     let () = Config.stats := stats in
     let () = Config.lemma_proof := not no_lemma_proof in
@@ -203,7 +220,7 @@ module Make
     Term.(
       const verify_once $ files $ already_compiled $ output_gil $ no_unfold
       $ stats $ no_lemma_proof $ manual $ incremental $ proc_arg $ lemma_arg
-      $ procs_only $ total $ closed_entry $ proof_dependency)
+      $ procs_only $ total $ closed_entry $ closed_initializer $ proof_dependency)
 
   let verify_info =
     let doc = "Verifies a file of the target language" in

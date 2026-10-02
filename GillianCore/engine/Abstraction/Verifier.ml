@@ -984,21 +984,7 @@ struct
           prog'.preds;
         (prog', tests', tests)
 
-  let verify_procs_in_scope
-      ~(init_data : SPState.init_data)
-      ?(prev_results : VerificationResults.t option)
-      (prog : prog_t)
-      (pnames_to_verify : SS.t)
-      (lnames_to_verify : SS.t) : unit Gillian_result.t =
-    if !Config.Verification.closed_entry then (
-      if
-        (not !Config.Verification.total)
-        || SS.cardinal pnames_to_verify <> 1
-        || not (SS.is_empty lnames_to_verify)
-      then
-        Totality.unsupported
-          "closed entry requires --total and exactly one procedure, no lemmas.";
-      let proc = Prog.get_proc_exn prog (SS.choose pnames_to_verify) in
+  let check_closed_entry_shape (prog : prog_t) proc =
       let spec = Totality.spec proc in
       (* Concrete fresh names are an implementation detail, represented by
          abstract fresh identities in this execution. Neither the program nor
@@ -1026,7 +1012,24 @@ struct
       | _ ->
           Totality.unsupported
             "closed entry requires no parameters and one normal emp \
-             specification.");
+             specification."
+
+  let verify_procs_in_scope
+      ~(init_data : SPState.init_data)
+      ?(prev_results : VerificationResults.t option)
+      (prog : prog_t)
+      (pnames_to_verify : SS.t)
+      (lnames_to_verify : SS.t) : unit Gillian_result.t =
+    if !Config.Verification.closed_entry then (
+      if (not !Config.Verification.total) || SS.cardinal pnames_to_verify <> 1
+         || not (SS.is_empty lnames_to_verify) then
+        Totality.unsupported "closed entry requires --total and exactly one procedure, no lemmas.";
+      check_closed_entry_shape prog (Prog.get_proc_exn prog (SS.choose pnames_to_verify)));
+    SS.iter (fun name ->
+      if not (SS.mem name pnames_to_verify) then
+        Totality.unsupported (name ^ " closed initializer must be selected and proved in this run.");
+      check_closed_entry_shape prog (Prog.get_proc_exn prog name))
+      !Config.Verification.closed_initializers;
     let total_order =
       if !Config.Verification.total then
         Some
@@ -1071,7 +1074,12 @@ struct
               List.fold_left
                 (fun acc test ->
                   if Gillian_result.should_continue acc then
-                    Gillian_result.merge acc (verify prog test)
+                    Gillian_result.merge acc
+                      (if SS.mem test.name !Config.Verification.closed_initializers then
+                         Config.Verification.with_closed_initializer (fun () ->
+                           Config.Verification.with_fresh_closed_entry_heap_phase
+                             (fun () -> verify { prog with MP.proved_total_procs = SS.empty; proved_lemmas = SS.empty } test))
+                       else verify prog test)
                   else acc)
                 (Ok ()) group
             in

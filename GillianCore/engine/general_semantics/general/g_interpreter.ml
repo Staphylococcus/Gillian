@@ -992,6 +992,18 @@ struct
           let () = Call_graph.add_proc_call call_graph caller pid in
           let args = build_args v_args params in
           let inline = ref false in
+          (if !Config.Verification.total
+              && SS.mem pid !Config.Verification.closed_initializers then (
+             if !Config.Verification.closed_entry then
+               Totality.unsupported "closed entry cannot use an initializer summary.";
+             if not (SS.mem pid prog.proved_total_procs) then
+               Totality.unsupported (pid ^ " closed initializer has not passed its proof in this run.");
+             (* Hidden loop frames own resources too. Looking only at the
+                currently exposed state would admit a fixed-name overwrite. *)
+             let empty state = Totality.heap_free_assertion prog.prog.preds
+                 (State.to_assertions state) in
+             if not (empty state && List.for_all (fun (_, frame) -> empty frame) (frame_states eval_state.iframes)) then
+               Totality.unsupported (pid ^ " initializer requires an empty owned heap, including frames.")));
           (if !Config.Verification.closed_entry then
              (* No entry result is a frameable procedure summary. All callees
                must execute, including calls back into the selected entry. *)
@@ -1028,10 +1040,10 @@ struct
                          natural integer: %a < %a"
                         pid Expr.pp rank Expr.pp entry))
           | Some _ ->
-              if not (SS.mem pid prog.proved_total_procs) then (
+              if !Config.Verification.closed_entry || not (SS.mem pid prog.proved_total_procs) then (
                 let helper =
                   match Prog.get_proc prog.prog pid with
-                  | Some p when Totality.inline_body p -> p
+                  | Some p when !Config.Verification.closed_entry || Totality.inline_body p -> p
                   | _ ->
                       Totality.unsupported
                         (pid
