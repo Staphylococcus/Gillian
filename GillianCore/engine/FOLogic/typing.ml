@@ -421,6 +421,15 @@ module Type_lexpr = struct
     let f = f gamma in
     let _, ite = f e in
     if not ite then def_neg
+    else if op = Car then
+      let _, list_typable = infer_type gamma e ListType in
+      if not list_typable then def_neg
+      else
+        (* A list's head has the element's type, not the container's type. *)
+        match e with
+        | Expr.EList (head :: _) -> f head
+        | Lit (LList (head :: _)) -> def_pos (Some (Literal.type_of head))
+        | _ -> def_pos None
     else
       let (tt : Type.t) =
         match op with
@@ -429,7 +438,8 @@ module Type_lexpr = struct
         | ToStringOp -> StringType
         | NumberToUtf16 -> Utf16Type
         | Utf16ToNumber -> NumberType
-        | Car | Cdr -> ListType
+        | Car -> assert false (* Handled above. *)
+        | Cdr -> ListType
         | LstRev | SetToList | StrToBytes -> ListType
         | IUnaryMinus | LstLen | Utf16Len | NumToInt | BoolToInt -> IntType
         | BitwiseNot
