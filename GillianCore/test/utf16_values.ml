@@ -2118,6 +2118,90 @@ let checked_cons_insertion () =
     Printf.printf "CHECKED_CONS_INSERTION_CONTROLS_COMPLETE\n%!"
   )
 
+let utf16_list_insertion () =
+  with_total (fun () ->
+    let xs=Expr.LVar "#insert_keys" and key=Expr.LVar "#insert_key" in
+    let pos=Expr.LVar "#insert_position" in
+    let gamma ()=let g=Gamma.init () in
+      Gamma.update g "#insert_keys" ListType;
+      Gamma.update g "#insert_key" Utf16Type;
+      Gamma.update g "#insert_position" IntType;g in
+    let all e=Expr.UnOp(LstAllUtf16,e) and len e=Expr.UnOp(LstLen,e) in
+    let insert xs p k=Expr.NOp(LstInsert,[xs;p;k]) in
+    let lower=bin ILessThanEqual Expr.zero_i pos in
+    let upper=bin ILessThanEqual pos (len xs) in
+    let facts=[lower;upper] in
+    let context fs=let p=Gillian.Symbolic.Pure_context.init () in
+      List.iter(Gillian.Symbolic.Pure_context.extend p) fs;p in
+    let reduce ?(g=gamma ()) ?(facts=facts) e=
+      Reduction.reduce_lexpr ~gamma:(Gamma.copy g) ~pfs:(context facts) e in
+    let term=all(insert xs pos key) in
+    Alcotest.(check bool) "in-range UTF16 insertion preserves exactly the old predicate"
+      true (Expr.equal(reduce term)(all xs));
+    Alcotest.(check bool) "the abstract insertion typing obligation is UNSAT"
+      false (Solver.check_satisfiability (all xs::not_ term::facts) (gamma ()));
+    List.iter(fun p ->
+      Alcotest.(check bool) "zero and exact list length need no invented bounds"
+        true (Expr.equal(reduce ~facts:[] (all(insert xs p key)))(all xs)))
+      [Expr.zero_i;len xs];
+    let scan=bin KeyInsertIndex xs key in
+    Alcotest.(check bool) "typed key insertion uses its checked total domain"
+      true (Expr.equal(reduce ~facts:[all xs] (all(insert xs scan key)))(all xs));
+    Alcotest.(check bool) "the actual key-scan insertion typing obligation is UNSAT"
+      false (Solver.check_satisfiability [all xs;not_(all(insert xs scan key))]
+        (gamma ()));
+    let retains e=let seen=ref false in
+      let visitor=object inherit [_] Visitors.iter as super
+        method! visit_expr () e=
+          (match e with Expr.UnOp(LstAllUtf16,Expr.NOp(LstInsert,_)) -> seen:=true
+           | _ -> ());super#visit_expr () e end in
+      visitor#visit_expr () e;!seen in
+    List.iteri(fun omitted _ ->
+      Alcotest.(check bool) "each explicit insertion bound is required"
+        true (retains(reduce ~facts:(List.filteri(fun i _ -> i<>omitted) facts) term))) facts;
+    List.iter(fun name ->let g=gamma () in Gamma.remove g name;
+      Alcotest.(check bool) "all original operand types are required"
+        true (try retains(reduce ~g term)
+          with Reduction.ReductionException _ -> true))
+      ["#insert_keys";"#insert_key";"#insert_position"];
+    Alcotest.(check bool) "key scan cannot borrow missing UTF16 list contents"
+      true (retains(reduce ~facts:[] (all(insert xs scan key))));
+    Alcotest.(check bool) "wrong inserted type is retained for ordinary evaluation"
+      true (retains(reduce (all(insert xs pos (Expr.num 1.)))));
+    List.iter(fun p ->
+      Alcotest.(check bool) "negative and oversized literal positions retain rejection"
+        true (retains(reduce ~facts:[] (all(insert xs p key)))))
+      [Expr.int (-1);Expr.int 999];
+    let partial=bin LstNth (Expr.EList []) Expr.zero_i in
+    List.iter(fun e ->
+      Alcotest.(check bool) "partial operands cannot be erased by list typing"
+        true (try ignore(reduce ~facts:[] e);false
+          with Reduction.ReductionException _ -> true))
+      [all(insert partial Expr.zero_i key);all(insert xs partial key);
+       all(insert xs Expr.zero_i partial)];
+    let scoped ty=Expr.ForAll(["#insert_keys",ty],
+      List.fold_right(fun fact body ->bin Impl fact body) facts (eq term (all xs))) in
+    Alcotest.(check bool) "an untyped list shadow cannot borrow the outer type"
+      false (try Expr.equal(reduce(scoped None)) Expr.true_
+        with Reduction.ReductionException _ -> false);
+    let visitor=object inherit [_] Visitors.endo
+      method! visit_LVar () _ name=Expr.PVar name end in
+    let cases=[[];[literal []];[literal [0xd800];literal [65]];
+      [Literal.Num(-0.);literal [0xdfff]];[Literal.Null;Literal.Bool true]] in
+    let checks=ref 0 in
+    List.iter(fun items ->List.iter(fun units ->
+      for position=0 to List.length items do
+        let store=Engine.CExprEval.CStore.init [
+          "#insert_keys",Literal.LList items;"#insert_key",literal units;
+          "#insert_position",Literal.Int(Z.of_int position)] in
+        let eval e=Engine.CExprEval.evaluate_expr store(visitor#visit_expr () e) in
+        Alcotest.(check bool) "native boundary insertion preserves true and false typing"
+          true (Literal.equal(eval term)(eval(reduce term)));incr checks
+      done) values) cases;
+    Alcotest.(check int) "all concrete insertion comparisons executed" 84 !checks;
+    Printf.printf "UTF16_INSERTION_DOMAIN_CONTROLS_COMPLETE\n%!"
+  )
+
 let tests =
   [
     ("numeric code unit models", `Quick, code_unit_models);
@@ -2157,4 +2241,5 @@ let tests =
     ("checked prefix insertion splice", `Quick, checked_prefix_splice);
     ("checked prefix boundary lookup", `Quick, checked_prefix_lookup);
     ("checked cons insertion", `Quick, checked_cons_insertion);
+    ("guarded UTF16 list insertion", `Quick, utf16_list_insertion);
   ]

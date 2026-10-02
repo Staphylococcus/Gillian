@@ -1008,6 +1008,39 @@ let reduce_utf16_list_cat gamma parts =
       (List.map (fun e -> Expr.UnOp (LstAllUtf16, e)) parts))
   else None
 
+(* Inserting a UTF16 value at a defined, in-range integer position preserves
+   exactly the original list's element-type predicate. Do not erase a partial
+   operand, an untyped input, or an insertion with unproved bounds. *)
+let reduce_utf16_list_insert pfs gamma xs position value =
+  let typed e t = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some t
+    | Lit (Constant _) -> false
+    | Lit l -> Literal.type_of l = t
+    | _ -> false in
+  let key e = typed e Type.Utf16Type in
+  let rec keys e = match e with
+    | Expr.EList es -> List.for_all key es
+    | NOp (LstCat,es) -> List.for_all keys es
+    | _ -> typed e Type.ListType && PFS.mem pfs (Expr.UnOp (LstAllUtf16,e)) in
+  let key_position = match position with
+    | Expr.BinOp (ks,KeyInsertIndex,k) -> keys ks && key k
+    | _ -> false in
+  let rec integer e = typed e Type.IntType || match e with
+    | Expr.UnOp (LstLen,lst) -> total_list_operands gamma [lst]
+    | BinOp (a,(IPlus | IMinus | ITimes),b) -> integer a && integer b
+    | _ -> false in
+  let len = Expr.UnOp (LstLen,xs) in
+  let lower = PFS.mem pfs (Expr.BinOp (Expr.zero_i,ILessThanEqual,position)) ||
+    PFS.mem pfs (Expr.BinOp (Expr.zero_i,ILessThan,position)) in
+  let upper = PFS.mem pfs (Expr.BinOp (position,ILessThanEqual,len)) in
+  let intrinsic_bound = Expr.equal position Expr.zero_i ||
+    Expr.equal position len || (key_position && match position with
+      | Expr.BinOp (ks,KeyInsertIndex,_) -> Expr.equal ks xs
+      | _ -> false) in
+  if !Config.Verification.total && total_list_operands gamma [xs] && key value &&
+     (integer position || key_position) && (intrinsic_bound || lower && upper)
+  then Some (Expr.UnOp (LstAllUtf16,xs)) else None
+
 (* Inserting at a checked prefix length places the value before its explicit
    tail. Equal length witnesses may come from the separate key/descriptor
    sequences; they do not identify those sequences or create heap ownership.
@@ -1163,6 +1196,9 @@ let rec reduce_lexpr_loop
           (reduce_integer_count_alias pfs input_gamma operand)
     | UnOp (LstAllUtf16, NOp (LstCat, parts)) ->
         Option.value ~default:le (reduce_utf16_list_cat input_gamma parts)
+    | UnOp (LstAllUtf16, NOp (LstInsert,[xs;position;value])) ->
+        Option.value ~default:le
+          (reduce_utf16_list_insert pfs input_gamma xs position value)
     | NOp (LstInsert,[xs;position;value]) ->
         let reduced = match reduce_insert_before_tail pfs input_gamma xs position value with
           | Some _ as result -> result
