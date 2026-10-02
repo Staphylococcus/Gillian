@@ -504,6 +504,9 @@ module Asrt : sig
 
   val as_definedness : atom -> (bool * Expr.t) option
 
+  (** Structural identity ordering, including signed Number zeros. *)
+  val compare_atom : atom -> atom -> int
+
   (** Comparison of assertions *)
   val compare : atom -> atom -> int
 

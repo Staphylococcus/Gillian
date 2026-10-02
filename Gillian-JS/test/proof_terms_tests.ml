@@ -761,6 +761,63 @@ let metadata_post_conflict () =
   Alcotest.(check bool) "rejection preserves the caller snapshot" true
     (before = Yojson.Safe.to_string (PState.to_yojson initial))
 
+let signed_zero_assertions () =
+  let x = Expr.LVar "#signed_zero_value" in
+  let zero sign = Expr.num (if sign then -0. else 0.) in
+  let guard sign = Asrt.Pure (Expr.UnOp (Not, bin ValueEqual x (zero sign))) in
+  let cases =
+    [
+      (guard false, guard true);
+      (Asrt.Pure (bin ValueEqual x (Expr.EList [ zero false ])),
+       Asrt.Pure (bin ValueEqual x (Expr.EList [ zero true ])));
+      (Asrt.definedness ~fact:true (bin ValueEqual x (zero false)),
+       Asrt.definedness ~fact:true (bin ValueEqual x (zero true)));
+    ]
+  in
+  List.iter (fun (positive, negative) ->
+      let atoms = Engine.MP.simplify_asrts
+          [positive; negative; positive; negative] in
+      Alcotest.(check int) "retain both signs while removing exact duplicates" 2
+        (List.length atoms);
+      Alcotest.(check bool) "both signed assertions remain" true
+        (List.exists (Asrt.equal_atom positive) atoms
+         && List.exists (Asrt.equal_atom negative) atoms)) cases
+
+let signed_zero_post_filter () =
+  let x = Expr.LVar "#signed_zero_input" in
+  let same n = bin ValueEqual x (Expr.num n) in
+  let saved = !Config.delay_entailment in
+  Fun.protect ~finally:(fun () -> Config.delay_entailment := saved) (fun () ->
+      List.iter (fun delayed ->
+          Config.delay_entailment := delayed;
+          List.iter (fun input ->
+              let state = Option.get (PState.assume_t (PState.init ()) x Type.NumberType) in
+              let state = Option.get (PState.assume_a state [same input]) in
+              let original = Format.asprintf "%a" PState.pp state in
+              let produce facts = PState.SMatcher.produce_posts
+                  (PState.copy state) (Gillian.Symbolic.Subst.init [x,x])
+                  [Totality.preserve_assertion_domains (List.map (fun f -> Asrt.Pure f) facts)] in
+              let rejects label facts =
+                if delayed then
+                  Alcotest.(check int) label 0 (List.length (produce facts))
+                else
+                  let rejected = try ignore (produce facts); false with
+                    | Gillian.Utils.Gillian_result.Exc.Gillian_error
+                        (AnalysisFailures [failure]) ->
+                        String.starts_with ~prefix:"Postcondition production failed:" failure.msg
+                        && String.contains failure.msg '#'
+                  in
+                  Alcotest.(check bool) label true rejected
+              in
+              rejects "a known zero cannot produce a nonzero post"
+                [Expr.UnOp (Not, same 0.); Expr.UnOp (Not, same (-0.))];
+              Alcotest.(check int) "the identical zero post remains feasible" 1
+                (List.length (produce [same input]));
+              rejects "the opposite zero post is infeasible"
+                [same (if Int64.bits_of_float input = 0L then -0. else 0.)];
+              Alcotest.(check string) "filtering leaves the caller snapshot intact" original
+                (Format.asprintf "%a" PState.pp state)) [0.; -0.]) [false; true])
+
 let () =
   Alcotest.run "Proof terms"
     [
@@ -823,5 +880,9 @@ let () =
             (with_total (metadata_post_alias true));
           Alcotest.test_case "conflicting metadata post" `Quick
             (with_total metadata_post_conflict);
+          Alcotest.test_case "signed zero assertions" `Quick
+            (with_total signed_zero_assertions);
+          Alcotest.test_case "signed zero post filtering" `Quick
+            (with_total signed_zero_post_filter);
         ] );
     ]

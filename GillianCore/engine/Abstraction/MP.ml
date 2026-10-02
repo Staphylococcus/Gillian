@@ -641,7 +641,9 @@ let simplify_asrts ?(sorted = true) a =
   else if not sorted then atoms
   else
     let overlapping, separating = List.partition Asrt.is_pure_asrt atoms in
-    let overlapping = List.sort_uniq Stdlib.compare overlapping in
+    (* Literal/Expr identity distinguishes signed zeros. Generic comparison
+       would merge the two guards of a nonzero Number postcondition. *)
+    let overlapping = List.sort_uniq Asrt.compare_atom overlapping in
     List.sort Asrt.prioritise (separating @ overlapping)
 
 let s_init_atoms ~preds kb atoms =
