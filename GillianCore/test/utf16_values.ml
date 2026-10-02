@@ -1511,6 +1511,46 @@ let code_unit_models () =
           | None -> ()
           | Some path -> Yojson.Safe.to_file path (`List models)))
 
+let uint32_integer_successor_checks () =
+  with_total (fun () ->
+    let number = Expr.LVar "#uint32_successor" in
+    let types () =
+      let g = Gamma.init () in
+      Gamma.update g "#uint32_successor" Type.NumberType;
+      g in
+    let integer e = Expr.UnOp (NumToInt, e) in
+    let successor = bin FPlus number (Expr.num 1.) in
+    let identity = eq (integer successor)
+      (bin IPlus (integer number) (Expr.int 1)) in
+    check ~types "full Uint32 natural successor preserves exact integer count"
+      false [ Expr.UnOp (IsInt, number);
+        bin FLessThanEqual (Expr.num 0.) number;
+        bin FLessThan number (Expr.num 4294967295.);
+        not_ identity ];
+    check ~types "without integrality rounding has a real counterexample" true
+      [ eq number (Expr.num (Float.pred 1.)); not_ identity ];
+    check ~types "without the bound a large integer cannot advance" true
+      [ eq number (Expr.num 9007199254740992.); not_ identity ];
+    let store = Engine.CExprEval.CStore.init [] in
+    List.iter (fun n ->
+      let term = integer (Expr.num n) in
+      let expected = Expr.Lit (Literal.Int (Z.of_float n)) in
+      Alcotest.(check bool) "concrete truncation agrees at all branch boundaries"
+        true (Literal.equal
+          (Engine.CExprEval.evaluate_expr store term)
+          (match expected with Expr.Lit l -> l | _ -> assert false));
+      check "guarded native truncation keeps fallback and fractional values"
+        false [ not_ (eq term expected) ])
+      [ -65536.5; -0.; 0.; 65535.5; 65536.; 65536.5;
+        4294967294.; 4294967295.; 4294967295.5;
+        4294967296.; 4294967296.5; 9007199254740992. ])
+
+let uint32_integer_successor () =
+  let saved = !Gillian.Utils.Config.dump_smt in
+  Gillian.Utils.Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Gillian.Utils.Config.dump_smt := saved)
+    uint32_integer_successor_checks
+
 let tests =
   [
     ("numeric code unit models", `Quick, code_unit_models);
@@ -1542,4 +1582,5 @@ let tests =
     ("insertion terminal bound", `Quick, insertion_terminal_bound);
     ("insertion complete array width", `Quick, insertion_array_width);
     ("guarded insertion terminal reduction", `Quick, insertion_terminal_reduction);
+    ("exact Uint32 integer successor", `Quick, uint32_integer_successor);
   ]

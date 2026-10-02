@@ -1529,7 +1529,25 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       | _ when !Config.Verification.total -> ()
       | _ -> exceptf "SMT encoding: NumToInt requires a finite concrete operand");
       let>- le = get_num le in
-      number_to_integer le.expr >- IntType
+      let ordinary = number_to_integer le.expr in
+      let integer = match e, le.expr with
+        | Expr.BinOp (_, FPlus, Lit (Num 1.)),
+          List [ Atom "fp.add"; Atom "RNE"; counter; _ ] ->
+            (* Every integral counter in [0, 2^32-1) and its successor are
+               exactly representable binary64 integers. RTZ(counter + 1)
+               therefore equals RTZ(counter) + 1. Keep an actual SMT guard:
+               fractions, negative counters, nonfinite values and larger
+               integers retain the original FP addition/conversion. Operand
+               typing and encoding facts have already been retained above. *)
+            let integral = fp_bin "fp.eq" counter
+              (app_ "fp.roundToIntegral" [ atom "RTZ"; counter ]) in
+            let range = bool_and
+              (fp_bin "fp.leq" (number_literal 0.) counter)
+              (fp_bin "fp.lt" counter (number_literal 4294967295.)) in
+            ite (bool_and integral range)
+              (num_add (number_to_integer counter) (int_k 1)) ordinary
+        | _ -> ordinary in
+      integer >- IntType
   | IntToNum ->
       let>- le = get_int le in
       let general = to_number [ rne; int_to_real le.expr ] in
