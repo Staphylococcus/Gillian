@@ -73,16 +73,16 @@ let rec normalise_list_expressions ?(reduce = Fun.id) (le : Expr.t) : Expr.t =
     | BinOp (le, LstNth, n) -> (
         match (f le, f n) with
         | EList lst, Lit (Int n) -> (
+            if Z.sign n < 0 || Z.geq n (Z.of_int (List.length lst)) then
+              raise (exn "Invalid List Expression");
             match List.nth_opt lst (Z.to_int n) with
             | Some k -> k
             | None -> raise (exn "Invalid List Expression"))
         | NOp (LstCat, EList lst :: tl), Lit (Int n) -> (
-            let n = Z.to_int n in
-            match List_utils.nth_or_size lst n with
-            | Left k -> (* The element is in the first list *) k
-            | Right sz ->
-                (* The element isn't in the first list, so we cut that part, and we got the size *)
-                BinOp (NOp (LstCat, tl), LstNth, Expr.int (n - sz)))
+            if Z.sign n < 0 then raise (exn "Invalid List Expression");
+            let size = Z.of_int (List.length lst) in
+            if Z.lt n size then List.nth lst (Z.to_int n)
+            else BinOp (NOp (LstCat, tl), LstNth, Lit (Int (Z.sub n size))))
         | NOp (LstCat, LstSub (_lst, _start, len) :: tl), idx
           when Expr.equal len idx -> Expr.list_nth (NOp (LstCat, tl)) 0
         | _, Lit (Num _) -> raise (exn "LstNth with float")
@@ -280,25 +280,25 @@ let rec get_length_of_list (lst : Expr.t) : int option =
   match lst with
   | Lit (LList l) -> Some (List.length l)
   | EList l -> Some (List.length l)
-  | LstSub (_, _, Lit (Int len)) -> Some (Z.to_int len)
+  | LstSub (_, _, Lit (Int len)) when Z.fits_int len -> Some (Z.to_int len)
   | NOp (LstCat, les) -> (
       match List_utils.flaky_map f les with
       | None -> None
       | Some lens ->
-          let lens = List.fold_left Int.add 0 lens in
-          Some lens)
+          let length = List.fold_left (fun n size -> Z.add n (Z.of_int size)) Z.zero lens in
+          if Z.fits_int length then Some (Z.to_int length) else None)
   | _ -> None
 
 (* Finding the nth element of a list *)
-let rec get_nth_of_list (pfs : PFS.t) (lst : Expr.t) (idx : int) : Expr.t option
+let rec get_nth_of_list (pfs : PFS.t) (lst : Expr.t) (idx : Z.t) : Expr.t option
     =
   let f = get_nth_of_list pfs in
 
   (* If we can compute the length of the list, then the index needs to be compatible *)
   (get_length_of_list lst
   |> Option.iter @@ fun len ->
-     if len <= idx then
-       let err_msg = Fmt.str "get_nth_of_list: index %d out of bounds." idx in
+     if Z.sign idx < 0 || Z.leq (Z.of_int len) idx then
+       let err_msg = Fmt.str "get_nth_of_list: index %s out of bounds." (Z.to_string idx) in
        raise (ReductionException (lst, err_msg)));
 
   match lst with
@@ -308,30 +308,22 @@ let rec get_nth_of_list (pfs : PFS.t) (lst : Expr.t) (idx : int) : Expr.t option
       if Expr.equal lst lst' then None else f lst' idx
   (* Base lists of literals and logical expressions *)
   | Lit (LList l) ->
-      assert (idx < List.length l);
-      Some (Lit (List.nth l idx))
+      Some (Lit (List.nth l (Z.to_int idx)))
   | EList l ->
-      assert (idx < List.length l);
-      Some (List.nth l idx)
+      Some (List.nth l (Z.to_int idx))
   | LstSub (lst, Lit (Int start), Lit (Int _)) -> (
       match lst with
-      | EList l -> (
-          match List.nth_opt l (Z.to_int start + idx) with
-          | Some _ as e -> e
-          | None -> raise (ReductionException (lst, "non-existent list-nth")))
-      | Lit (LList l) -> (
-          match List.nth_opt l (Z.to_int start + idx) with
-          | Some e -> Some (Lit e)
-          | None -> raise (ReductionException (lst, "non-existent list-nth")))
+      | EList _ | Lit (LList _) -> f lst (Z.add start idx)
       | LVar x ->
           let eqs = find_equalities pfs (LVar x) in
-          List.find_map (fun e -> f e (Z.to_int start + idx)) eqs
+          List.find_map (fun e -> f e (Z.add start idx)) eqs
       | _ -> None)
   | LstSub _ -> None
   | NOp (LstCat, lel :: ler) ->
       Option.bind (get_length_of_list lel) @@ fun llen ->
       let lst, idx =
-        if idx < llen then (lel, idx) else (NOp (LstCat, ler), idx - llen)
+        if Z.lt idx (Z.of_int llen) then (lel, idx)
+        else (NOp (LstCat, ler), Z.sub idx (Z.of_int llen))
       in
       f lst idx
   | Expr.BinOp (x, LstRepeat, _) -> Some x
@@ -2348,7 +2340,7 @@ let rec reduce_lexpr_loop
             if lexpr_is_list gamma fle then
               Option.value
                 ~default:(Expr.BinOp (fle, LstNth, fidx))
-                (get_nth_of_list pfs fle (Z.to_int n))
+                (get_nth_of_list pfs fle n)
             else
               let err_msg =
                 Fmt.str "LstNth(%a, %a): list is not a GIL list." Expr.pp fle

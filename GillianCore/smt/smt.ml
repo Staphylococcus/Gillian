@@ -1281,7 +1281,7 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       set_subset Z3 p1.expr p2.expr >- BooleanType
   | LstNth ->
       let>- p1 = get_list p1 in
-      let>- p2 = get_list p2 in
+      let>- p2 = get_int p2 in
       seq_nth p1.expr p2.expr |> simply_wrapped
   | KeyInsertIndex ->
       require_definition def_key_insert_index;

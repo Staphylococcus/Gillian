@@ -98,7 +98,6 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
             typ list ListType;
             typ index IntType;
             nonnegative index;
-            bounded index;
             Expr.BinOp (index, ILessThan, length list);
           ]
     | BinOp (value, LstRepeat, count) ->

@@ -76,7 +76,10 @@ let normalization_parents () =
             try
               ignore (Engine.CExprEval.evaluate_expr store term);
               false
-            with Failure message -> (
+            with
+            | Engine.CExprEval.EvaluationError message ->
+                String.starts_with ~prefix:"Evaluation Error: List index out of bounds" message
+            | Failure message -> (
               try
                 ignore
                   (Str.search_forward (Str.regexp_string "\nnth\n") message 0);

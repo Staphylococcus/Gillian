@@ -4,6 +4,7 @@ let test_suites : unit Alcotest.test list =
     ("Binary64", Numeric.tests);
     ("Literal equality", Literal_equality.tests);
     ("List heads", List_heads.tests);
+    ("List indices", List_indices.tests);
     ("Boolean integer", Boolean_integer.tests);
     ("Closed entry", Closed_entry.tests);
     ("Strings", Strings.tests);

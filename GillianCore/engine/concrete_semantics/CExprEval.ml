@@ -239,10 +239,15 @@ let rec evaluate_binop
                   (as_list ~msg:"LstContains" lit1))
       | LstNth -> (
           let list = as_list ~msg:"LstNth" lit1 in
+          let nth n =
+            if Z.sign n < 0 || Z.geq n (Z.of_int (List.length list)) then
+              evalerr "List index out of bounds"
+            else List.nth list (Z.to_int n)
+          in
           match lit2 with
-          | Int n -> List.nth list (Z.to_int n)
-          | Num n when is_int n -> List.nth list (int_of_float n)
-          | Num -0. -> List.nth list 0
+          | Int n -> nth n
+          | Num n when is_int n -> nth (Z.of_float n)
+          | Num -0. -> nth Z.zero
           | _ -> typeerr ~msg:"LstNth" "integer or number" lit2)
       | LstRepeat ->
           let n = as_int ~msg:"LstRepeat" lit2 in
