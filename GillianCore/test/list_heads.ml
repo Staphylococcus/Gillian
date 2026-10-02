@@ -104,10 +104,46 @@ let partial_domains () =
       domain (Expr.UnOp (op, Expr.EList [ key ])))
     [ Car; Cdr ]
 
+let domain_counterquery () =
+  let saved = !Gillian.Utils.Config.Verification.total in
+  Gillian.Utils.Config.Verification.total := true;
+  Fun.protect
+    ~finally:(fun () -> Gillian.Utils.Config.Verification.total := saved)
+    (fun () ->
+  let gamma = Gamma.init () in
+  List.iter (fun x -> Gamma.update gamma x ListType) [ "#xs"; "#tail" ];
+  let xs = Expr.LVar "#xs" and tail = Expr.LVar "#tail" in
+  let len x = Expr.UnOp (LstLen, x) in
+  let nonempty = Expr.BinOp (Expr.int 0, ILessThan, len xs) in
+  let facts =
+    [ eq (len xs) (Expr.BinOp (Expr.int 1, IPlus, len tail));
+      Expr.BinOp (xs, LstContains, key); eq (head xs) key ]
+  in
+  let entails goal =
+    Solver.check_entailment Utils.Containers.SS.empty (Engine.PFS.of_list facts)
+      [ goal ] gamma
+  in
+  let original_query = Expr.Set.of_list (not_ nonempty :: facts) in
+  check "original domain counterquery is natively UNSAT" false
+    (Smt.is_sat original_query (Gamma.as_hashtbl gamma));
+  check "partial head in refuted alternative does not crash" true
+    (entails nonempty);
+  check "false length is not proved" false (entails (eq (len xs) (Expr.int 0)));
+  check "false head is not proved" false (entails (eq (head xs) (Expr.Lit Null)));
+  check "caller list type remains unchanged" true (Gamma.get gamma "#xs" = Some ListType);
+  let require _ condition =
+    if not (Solver.check_entailment Utils.Containers.SS.empty
+      (Engine.PFS.of_list facts) [ condition ] gamma) then
+      failwith "unproved list-head domain"
+  in
+  Engine.Totality.check_expression ~proof:true ~require ~proves:entails
+    ~evaluate:(Reduction.reduce_lexpr ~gamma) (Expr.UnOp (Cdr, xs)))
+
 let tests =
   [ "abstract head and tail types", `Quick, abstract_head;
     "concrete element types and evaluation", `Quick, concrete_heads;
     "non-list operand rejection", `Quick, reject_nonlists;
     "symbolic key branches", `Quick, symbolic_branches;
     "untyped explicit element", `Quick, unknown_list_element;
-    "empty-list totality domains", `Quick, partial_domains ]
+    "empty-list totality domains", `Quick, partial_domains;
+    "complete domain counterquery", `Quick, domain_counterquery ]

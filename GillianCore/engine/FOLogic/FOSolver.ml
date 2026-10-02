@@ -184,7 +184,7 @@ let integer_order_core formulae gamma goal =
     if Expr.Set.equal core formulae then None else Some core
   else None
 
-let check_entailment
+let check_entailment_simplified
     ?(matching = false)
     (existentials : SS.t)
     (left_fs : PFS.t)
@@ -559,6 +559,24 @@ let check_entailment
       (* Utils.Statistics.update_statistics "FOS: CheckEntailment"
          (Unix.gettimeofday () -. t); *)
       ret
+
+let check_entailment ?(matching = false) existentials left_fs right_fs gamma =
+  try check_entailment_simplified ~matching existentials left_fs right_fs gamma
+  with
+  | Reduction.ReductionException (_, "Invalid List Expression")
+    when !Config.Verification.total
+         && not !Config.under_approximation
+         && SS.is_empty existentials ->
+      (* Refuting a list domain can temporarily substitute an empty list into
+         an already-defined head/tail fact. Eager reduction cannot evaluate that
+         inconsistent alternative. Submit the original complete counterquery;
+         do not discard the fact, assume a domain, or interpret the exception
+         as UNSAT. Required SMT unknown still propagates from check_sat. *)
+      let counterquery =
+        Expr.Set.of_list
+          (Expr.negate (Expr.conjunct right_fs) :: PFS.to_list left_fs)
+      in
+      Option.is_none (Smt.check_sat counterquery (Type_env.as_hashtbl gamma))
 
 let is_equal ?matching ~pfs ~gamma e1 e2 =
   (* let t = Unix.gettimeofday () in *)
