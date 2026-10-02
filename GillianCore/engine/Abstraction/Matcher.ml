@@ -858,7 +858,28 @@ module Make (State : SState.S) :
         ~assume:(fun st es -> State.assume_a st es)
         (State.copy astate.state) original);
     let sas = MP.simplify_asrts a in
-    produce_asrt_list ~track_infeasible astate subst sas
+    (* Metadata is persistent in the JS memory model. Re-producing fields at
+       an existential metadata location first would allocate a distinct ALoc
+       before the known object's metadata can identify that witness. Establish
+       those existing identity links before field production; the assertion
+       set, substitutions and final admissibility check are unchanged. *)
+    let known_metadata = function
+      | Asrt.CorePred ("Metadata", [ loc ], [ _ ]) -> (
+          match State.simplify_val astate.state (subst_in_expr subst loc) with
+          | Expr.ALoc _ | Expr.Lit (Loc _) -> true
+          | _ -> false)
+      | _ -> false
+    in
+    let rec preserve_types = function
+      | (Asrt.Types _ as a) :: rest ->
+          let prefix, remaining = preserve_types rest in
+          (a :: prefix, remaining)
+      | remaining -> ([], remaining)
+    in
+    let types, remaining = preserve_types sas in
+    let metadata, remaining = List.partition known_metadata remaining in
+    produce_asrt_list ~track_infeasible astate subst
+      (types @ metadata @ remaining)
 
   let produce_posts (state : t) (subst : SVal.SESubst.t) (asrts : Asrt.t list) :
       t list =
