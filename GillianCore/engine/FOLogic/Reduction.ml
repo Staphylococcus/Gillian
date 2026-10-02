@@ -2883,6 +2883,14 @@ and substitute_for_list_length (pfs : PFS.t) (le : Expr.t) : Expr.t =
 
 let resolve_expr_to_location (pfs : PFS.t) (gamma : Type_env.t) (e : Expr.t) :
     string option =
+  (* Structural list equality can leave location aliases inside a conjunction.
+     Each conjunct is already assumed; expose only And, never alternatives or
+     negated/conditional facts. Keep the caller's formula store unchanged. *)
+  let rec conjuncts = function
+    | Expr.BinOp (left, And, right) -> conjuncts left @ conjuncts right
+    | fact -> [ fact ]
+  in
+  let pfs = PFS.of_list (List.concat_map conjuncts (PFS.to_list pfs)) in
   let max_fuel = 10 in
 
   let loc_name = function

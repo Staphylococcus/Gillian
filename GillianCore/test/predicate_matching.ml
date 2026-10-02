@@ -357,6 +357,32 @@ let refuted_recovery_goal () =
   expect "refuted goal preserves owned predicates" before
     (Preds.to_list initial.preds)
 
+let conjunctive_location_identity () =
+  let module Reduction = Gillian.Logic.Reduction in
+  let module Gamma = Gillian.Symbolic.Type_env in
+  let x = Expr.LVar "#location_x" and y = Expr.LVar "#location_y" in
+  let location = Expr.ALoc "#loc_closure_environment" in
+  let gamma = Gamma.init () in
+  List.iter (fun name -> Gamma.update gamma name Type.ObjectType)
+    ["#location_x"; "#location_y"];
+  let eq a b = Expr.BinOp (a, Equal, b) in
+  let conjunction = Expr.BinOp (eq y x, And, eq x location) in
+  let pfs = Engine.PFS.of_list [conjunction] in
+  let before = Engine.PFS.to_list pfs in
+  expect "nested aliases resolve to the actual environment"
+    (Some "#loc_closure_environment")
+    (Reduction.resolve_expr_to_location pfs gamma y);
+  expect "location lookup preserves the original facts" before
+    (Engine.PFS.to_list pfs);
+  List.iter (fun (label, fact) ->
+    expect label None
+      (Reduction.resolve_expr_to_location (Engine.PFS.of_list [fact]) gamma x))
+    [ ("disjunction does not establish an identity",
+        Expr.BinOp (eq x location, Or, eq x (Expr.ALoc "#loc_other")));
+      ("negation does not establish an identity", Expr.UnOp (Not, eq x location));
+      ("implication does not establish an identity",
+        Expr.BinOp (Expr.LVar "#condition", Impl, eq x location)) ]
+
 let tests =
   List.map (fun (name, test) -> Alcotest.test_case name `Quick test)
     [
@@ -377,4 +403,5 @@ let tests =
       ("sequential recovery preserves frame", with_total_return sequential_recovery);
       ("false sequential recovery rejects", with_total_return false_recovery_goal);
       ("refuted goal needs no recovery", with_total_return refuted_recovery_goal);
+      ("conjunctive closure location identity", with_total_return conjunctive_location_identity);
     ]
