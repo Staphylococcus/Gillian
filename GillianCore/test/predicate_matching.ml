@@ -259,6 +259,81 @@ let alternative_return_posts () =
   expect "alternative bindings do not escape to the caller" None
     (ReturnSubst.get subst return_var)
 
+(* Two automatic unfolds must accumulate their recovered facts. The second
+   retry cannot return to a snapshot that has consumed the first predicate
+   without retaining its produced resource. Exercise the real matcher. *)
+module RecoveryState = Engine.SState.Make (struct
+  include Engine.SMemory.Dummy
+  (* This fixture has no heap cells. Pure substitutions preserve its empty heap. *)
+  let substitution_in_place ~pfs:_ ~gamma:_ _ heap =
+    [(heap, Expr.Set.empty, [])]
+end)
+module RecoveryMatcher = Engine.Matcher.Make (RecoveryState)
+
+let recovery_state () =
+  let x = Expr.LVar "#recovery_x" and y = Expr.LVar "#recovery_y" in
+  let initial : RecoveryMatcher.t = {
+    state = RecoveryState.add_spec_vars (RecoveryState.init ())
+      (Utils.Containers.SS.of_list ["#recovery_x"; "#recovery_y"]);
+    preds = Preds.init []; wands = Engine.Wands.init [];
+    pred_defs = (return_state ()).pred_defs;
+  } in
+  let definition name value =
+    let pred : Pred.t = {
+      pred_name = name; pred_source_path = None; pred_loc = None;
+      pred_internal = false; pred_num_params = 1; pred_params = ["value", None];
+      ins_number = 1;
+      pred_definitions = [None, [Asrt.Pure
+        (Expr.BinOp (Expr.PVar "value", Equal, Expr.int value))]];
+      pred_facts = []; pred_guard = None; pred_pure = false;
+      pred_abstract = false; pred_nounfold = false; pred_normalised = true;
+    } in
+    Hashtbl.add initial.pred_defs name Engine.MP.{
+      pred; def_mp = Finished None; guard_mp = None }
+  in
+  definition "FirstRecovery" 1;
+  definition "SecondRecovery" 2;
+  ignore (RecoveryState.assume_t initial.state x Type.IntType);
+  ignore (RecoveryState.assume_t initial.state y Type.IntType);
+  Preds.extend ~pure:false initial.preds ("FirstRecovery", [x]);
+  Preds.extend ~pure:false initial.preds ("SecondRecovery", [y]);
+  Preds.extend ~pure:true initial.preds ("ReturnValue", [Expr.LVar "#recovery_frame"]);
+  (initial, x, y)
+
+let recovery_match initial x y second =
+  let steps = List.map (fun (variable, value) ->
+    (Asrt.Pure (Expr.BinOp (variable, Equal, Expr.int value)), []))
+    [x, 1; y, second] in
+  RecoveryMatcher.match_ initial (ReturnSubst.init [x, x; y, y])
+    (Engine.MP.of_step_list steps) Engine.Matcher.LogicCommand
+
+let sequential_recovery () =
+  let initial, x, y = recovery_state () in
+  let before = Preds.to_list initial.preds in
+  match recovery_match initial x y 2 with
+  | [Ok (state, _, _)] ->
+      Alcotest.(check bool) "first recovered fact survives the second retry" true
+        (RecoveryState.equals state.state x (Expr.int 1));
+      Alcotest.(check bool) "second recovered fact is established" true
+        (RecoveryState.equals state.state y (Expr.int 2));
+      expect "unrelated frame remains owned" [("ReturnValue", [Expr.LVar "#recovery_frame"])]
+        (Preds.to_list state.preds);
+      expect "recovery does not consume the caller snapshot" before
+        (Preds.to_list initial.preds)
+  | results ->
+      let errors = List.filter_map (function Error err -> Some err | Ok _ -> None) results in
+      Alcotest.fail (Fmt.str "expected a complete match after two recovery steps: %a"
+        Fmt.(Dump.list RecoveryState.pp_err_t) errors)
+
+let false_recovery_goal () =
+  let initial, x, y = recovery_state () in
+  let before = Preds.to_list initial.preds in
+  let results = recovery_match initial x y 3 in
+  Alcotest.(check bool) "recovery cannot invent a false second fact" false
+    (List.exists Result.is_ok results);
+  expect "rejected recovery preserves the caller snapshot" before
+    (Preds.to_list initial.preds)
+
 let tests =
   List.map (fun (name, test) -> Alcotest.test_case name `Quick test)
     [
@@ -276,4 +351,6 @@ let tests =
       ("infeasible NaN summary return", with_total_return nan_return_posts);
       ("existing summary return", with_total_return existing_return_posts);
       ("alternative summary returns", with_total_return alternative_return_posts);
+      ("sequential recovery preserves frame", with_total_return sequential_recovery);
+      ("false sequential recovery rejects", with_total_return false_recovery_goal);
     ]

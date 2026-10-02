@@ -1798,7 +1798,7 @@ module Make (State : SState.S) :
     let subst_i = SVal.SESubst.copy subst in
     let can_fix errs = List.exists State.can_fix errs in
 
-    let rec handle_ret ?prev_id ~fuel ret =
+    let rec handle_ret ?prev_id ~fuel ~recovery_state ret =
       L.set_previous ~force_none:true prev_id;
       match ret with
       | Ok successes ->
@@ -1811,7 +1811,7 @@ module Make (State : SState.S) :
           L.verbose (fun fmt -> fmt "Matcher.match_: Failure");
           if !Config.under_approximation then
             L.fail "MATCHING ABORTED IN UX MODE???";
-          let { state; _ } = astate_i in
+          let { state; _ } = recovery_state in
           let tactics = State.get_recovery_tactic state errs in
           L.verbose (fun m ->
               m
@@ -1820,7 +1820,7 @@ module Make (State : SState.S) :
                  %a"
                 (Recovery_tactic.pp Expr.pp)
                 tactics);
-          match try_recovering astate_i tactics with
+          match try_recovering (copy_astate recovery_state) tactics with
           | Error msg ->
               L.normal (fun m -> m "Match. Recovery tactic failed: %s" msg);
               Res_list.just_errors errs
@@ -1849,13 +1849,15 @@ module Make (State : SState.S) :
                   in
                   Res_list.error_with error
               | Some (_, astate) ->
-                  (* let subst'' = compose_substs (Subst.to_list subst_i) subst (Subst.init []) in *)
+                  (* Matching consumes resources. Keep the fully recovered frame
+                     for the next retry, rather than the original snapshot. *)
+                  let recovery_state = copy_astate astate in
                   let subst'' = SVal.SESubst.copy subst_i in
                   let prev_id = recovery_report_id () in
                   let new_ret =
                     match_mp ?prev_id ([ (astate, subst'', mp) ], [])
                   in
-                  handle_ret ?prev_id ~fuel:(fuel - 1) new_ret))
+                  handle_ret ?prev_id ~fuel:(fuel - 1) ~recovery_state new_ret))
       | Error errors ->
           L.verbose (fun fmt -> fmt "Matcher.match: Failure");
           Res_list.just_errors errors
@@ -1864,7 +1866,7 @@ module Make (State : SState.S) :
       { astate = AstateRec.from astate; subst; mp; match_kind }
       (fun _ ->
         let ret = match_mp ([ (astate, subst, mp) ], []) in
-        handle_ret ~fuel:10 ret)
+        handle_ret ~fuel:10 ~recovery_state:astate_i ret)
 
   and fold
       ?(in_matching = false)
