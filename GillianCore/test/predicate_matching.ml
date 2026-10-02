@@ -262,12 +262,19 @@ let alternative_return_posts () =
 (* Two automatic unfolds must accumulate their recovered facts. The second
    retry cannot return to a snapshot that has consumed the first predicate
    without retaining its produced resource. Exercise the real matcher. *)
-module RecoveryState = Engine.SState.Make (struct
+module RecoveryStateBase = Engine.SState.Make (struct
   include Engine.SMemory.Dummy
   (* This fixture has no heap cells. Pure substitutions preserve its empty heap. *)
   let substitution_in_place ~pfs:_ ~gamma:_ _ heap =
     [(heap, Expr.Set.empty, [])]
 end)
+let recovery_attempts = ref 0
+module RecoveryState = struct
+  include RecoveryStateBase
+  let get_recovery_tactic state errors =
+    incr recovery_attempts;
+    RecoveryStateBase.get_recovery_tactic state errors
+end
 module RecoveryMatcher = Engine.Matcher.Make (RecoveryState)
 
 let recovery_state () =
@@ -334,6 +341,22 @@ let false_recovery_goal () =
   expect "rejected recovery preserves the caller snapshot" before
     (Preds.to_list initial.preds)
 
+let refuted_recovery_goal () =
+  let initial, x, y = recovery_state () in
+  let facts = [Expr.BinOp (x, Equal, Expr.int 1);
+               Expr.BinOp (y, Equal, Expr.int 2)] in
+  let state = Option.get (RecoveryState.assume_a initial.state facts) in
+  let initial = {initial with state} in
+  let before = Preds.to_list initial.preds in
+  recovery_attempts := 0;
+  let results = recovery_match initial x y 3 in
+  Alcotest.(check bool) "state-proved false goal is rejected" false
+    (List.exists Result.is_ok results);
+  Alcotest.(check int) "known false goal performs no predicate recovery" 0
+    !recovery_attempts;
+  expect "refuted goal preserves owned predicates" before
+    (Preds.to_list initial.preds)
+
 let tests =
   List.map (fun (name, test) -> Alcotest.test_case name `Quick test)
     [
@@ -353,4 +376,5 @@ let tests =
       ("alternative summary returns", with_total_return alternative_return_posts);
       ("sequential recovery preserves frame", with_total_return sequential_recovery);
       ("false sequential recovery rejects", with_total_return false_recovery_goal);
+      ("refuted goal needs no recovery", with_total_return refuted_recovery_goal);
     ]

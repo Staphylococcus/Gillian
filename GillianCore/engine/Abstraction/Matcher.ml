@@ -1796,7 +1796,17 @@ module Make (State : SState.S) :
       (t * SVal.SESubst.t * post_res, err_t) Res_list.t =
     let astate_i = copy_astate astate in
     let subst_i = SVal.SESubst.copy subst in
-    let can_fix errs = List.exists State.can_fix errs in
+    let can_fix recovery_state errs =
+      List.exists
+        (fun err ->
+          State.can_fix err
+          && (match err with
+             | StateErr.EAsrt (_, pf) ->
+                 (* Unfolding cannot make a state-proved false claim true. *)
+                 not (State.assert_a recovery_state.state [ Expr.UnOp (Not, pf) ])
+             | _ -> true))
+        errs
+    in
 
     let rec handle_ret ?prev_id ~fuel ~recovery_state ret =
       L.set_previous ~force_none:true prev_id;
@@ -1807,7 +1817,7 @@ module Make (State : SState.S) :
       | Error errs
         when fuel > 0 && !Config.unfolding
              && Exec_mode.is_verification_exec !Config.current_exec_mode
-             && (not in_matching) && can_fix errs -> (
+             && (not in_matching) && can_fix recovery_state errs -> (
           L.verbose (fun fmt -> fmt "Matcher.match_: Failure");
           if !Config.under_approximation then
             L.fail "MATCHING ABORTED IN UX MODE???";
