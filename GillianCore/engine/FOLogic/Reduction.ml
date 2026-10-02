@@ -899,6 +899,60 @@ let reduce_key_insert_bound pfs gamma left op right =
         then Some Expr.true_ else None)
   | _ -> None
 
+(* Unroll one known canonical index at the front of the structural insertion
+   scan. This is the defining recurrence of insertion_position: an existing
+   index <= the inserted index advances by one; an ordinary key stops it.
+   Inspect original input types before recursive reduction can infer them.
+   Only typed atoms, literals and total numeric formatting/addition qualify,
+   so no failing slice/index or
+   other partial computation can be erased by the ordinary-key stop case. *)
+let reduce_dense_key_step pfs gamma keys key =
+  let typed e t = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some t
+    | Lit l -> Literal.type_of l = t
+    | _ -> false in
+  let known e = PFS.mem pfs e in
+  let rec number e = typed e Type.NumberType || match e with
+    | Expr.BinOp (left, FPlus, right) -> number left && number right
+    | _ -> false in
+  let aliases n = n :: get_equal_expressions pfs n in
+  let nonnegative n = List.exists (fun a -> number a &&
+      known (Expr.BinOp (Expr.num 0., FLessThanEqual, a))) (aliases n) in
+  let integer n = known (Expr.UnOp (IsInt, n)) in
+  let ordered a b = Expr.equal a b ||
+    known (Expr.BinOp (a, FLessThan, b)) ||
+    known (Expr.BinOp (a, FLessThanEqual, b)) in
+  let upper n = known (Expr.BinOp (n, FLessThan, Expr.num 4294967295.)) in
+  let rec safe_list = function
+    | Expr.EList xs -> List.for_all (function
+        | Expr.Lit _ -> true
+        | Expr.UnOp (NumberToUtf16, n) -> number n
+        | _ -> false) xs
+    | NOp (LstCat, xs) -> List.for_all safe_list xs
+    | e -> typed e Type.ListType in
+  let parts = match keys with
+    | Expr.EList (head :: rest) -> Some (head, [Expr.EList rest])
+    | NOp (LstCat, Expr.EList (head :: rest) :: suffix) ->
+        Some (head, (if rest = [] then suffix else Expr.EList rest :: suffix))
+    | _ -> None in
+  match key, parts with
+  | Expr.UnOp (NumberToUtf16, target), Some (head, suffix)
+    when typed target Type.NumberType && integer target && upper target &&
+         List.for_all safe_list suffix ->
+      let rest = match suffix with
+        | [] -> Expr.EList [] | [x] -> x | xs -> Expr.NOp (LstCat, xs) in
+      (match head with
+      | Expr.UnOp (NumberToUtf16, n)
+        when number n && integer n && nonnegative n &&
+             ordered n target ->
+          Some (Expr.BinOp (Expr.one_i, IPlus,
+            BinOp (rest, KeyInsertIndex, key)))
+      | Lit (Utf16String s)
+        when Utf16.equal s (Utf16.of_canonical "length") && nonnegative target ->
+          Some Expr.zero_i
+      | _ -> None)
+  | _ -> None
+
 (* TODO: can this whole mess be removed since we did sth similar with formulae? *)
 
 (** Reduction of logical expressions
@@ -909,9 +963,15 @@ let rec reduce_lexpr_loop
     ?(reduce_lvars = false)
     ?(resolve_constants = true)
     ?(fuel = 20)
+    ?input_gamma
     (pfs : PFS.t)
     (gamma : Type_env.t)
     (le : Expr.t) =
+  (* Only the new scan shortcut consults this frozen input view. Ordinary
+     reduction keeps its existing mutable gamma and inference behavior. *)
+  let input_gamma = match input_gamma with
+    | Some original -> original
+    | None -> Type_env.copy gamma in
   (* Resolve fixed runtime constants before any syntactic identity can erase
      them. Share their values with concrete evaluation; never sample dynamic
      constants while simplifying a proof. Recursive descent reuses this pass
@@ -936,7 +996,7 @@ let rec reduce_lexpr_loop
     if fuel <= 0 then Fun.id
     else
       reduce_lexpr_loop ~matching ~reduce_lvars ~resolve_constants:false
-        ~fuel:(fuel - 1) pfs gamma
+        ~fuel:(fuel - 1) ~input_gamma pfs gamma
   in
 
   (* Total proofs must preserve Boolean evaluation order. Reduce the left
@@ -1089,9 +1149,22 @@ let rec reduce_lexpr_loop
             | None -> Type_env.remove new_gamma x)
           bt;
         PFS.substitution subst new_pfs;
+        (* Preserve declared binder types in the shortcut's input view without
+           borrowing any type inferred while reducing the quantified body. *)
+        let new_input_gamma = Type_env.copy input_gamma in
+        List.iter
+          (fun (x, t) ->
+            (match Type_env.get input_gamma x with
+            | Some old_type ->
+                Type_env.update new_input_gamma (List.assoc x subst_bindings) old_type
+            | None -> ());
+            match t with
+            | Some t -> Type_env.update new_input_gamma x t
+            | None -> Type_env.remove new_input_gamma x)
+          bt;
         (* We reduce using our new pfs and gamma *)
         let re =
-          reduce_lexpr_loop ~matching ~reduce_lvars new_pfs new_gamma e
+          reduce_lexpr_loop ~matching ~reduce_lvars ~input_gamma:new_input_gamma new_pfs new_gamma e
         in
         let vars = Expr.lvars re in
         let bt = List.filter (fun (b, _) -> Containers.SS.mem b vars) bt in
@@ -2005,12 +2078,13 @@ let rec reduce_lexpr_loop
               let pfs_with_left = PFS.copy pfs in
               PFS.extend pfs_with_left left;
               let right =
-                reduce_lexpr_loop ~matching ~reduce_lvars pfs_with_left gamma
+                reduce_lexpr_loop ~matching ~reduce_lvars ~input_gamma pfs_with_left gamma
                   right
               in
               BinOp (left, Impl, right))
     (* Membership uses the same identity as v==, including nested values. *)
     | BinOp (list, KeyInsertIndex, key) -> (
+        let step = reduce_dense_key_step pfs input_gamma list key in
         let list = f list and key = f key in
         let literal = function Expr.Lit l -> Some l | _ -> None in
         let items = match list with
@@ -2019,7 +2093,8 @@ let rec reduce_lexpr_loop
           | _ -> None in
         match items, key with
         | Some xs, Lit (Utf16String _) -> Lit (CExprEval.evaluate_expr (CExprEval.CStore.init []) (BinOp (Lit (LList xs), KeyInsertIndex, key)))
-        | _ -> BinOp (list, KeyInsertIndex, key))
+        | _ -> (match step with Some e -> f e
+                | None -> BinOp (list, KeyInsertIndex, key)))
     | BinOp (list, LstContains, value) -> (
         let list = f list in
         let value = f value in

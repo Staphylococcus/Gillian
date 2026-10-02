@@ -1551,6 +1551,147 @@ let uint32_integer_successor () =
   Fun.protect ~finally:(fun () -> Gillian.Utils.Config.dump_smt := saved)
     uint32_integer_successor_checks
 
+let dense_index_step () =
+  with_total (fun () ->
+    let head = Expr.LVar "#dense_head" and target = Expr.LVar "#dense_target" in
+    let tail = Expr.LVar "#dense_tail" in
+    let types () =
+      let g = Gamma.init () in
+      Gamma.update g "#dense_head" NumberType;
+      Gamma.update g "#dense_target" NumberType;
+      Gamma.update g "#dense_tail" ListType; g in
+    let text s = Expr.Lit (Literal.Utf16String (Codec.of_canonical s)) in
+    let format n = Expr.UnOp (NumberToUtf16, n) in
+    let suffix = Expr.NOp (LstCat, [ tail; Expr.EList [text "length"] ]) in
+    let keys = Expr.NOp (LstCat,
+      [Expr.EList [format head]; tail; Expr.EList [text "length"]]) in
+    let position = bin KeyInsertIndex keys (format target) in
+    let expected = bin IPlus (Expr.int 1)
+      (bin KeyInsertIndex suffix (format target)) in
+    let premises = [ Expr.UnOp (IsInt, head); Expr.UnOp (IsInt, target);
+      bin FLessThanEqual (Expr.num 0.) head;
+      bin FLessThan head target;
+      bin FLessThan target (Expr.num 4294967295.) ] in
+    let context facts =
+      let pfs = Gillian.Symbolic.Pure_context.init () in
+      List.iter (Gillian.Symbolic.Pure_context.extend pfs) facts; pfs in
+    let reduce ?(gamma = types ()) facts e =
+      Reduction.reduce_lexpr ~gamma ~pfs:(context facts) e in
+    let authorizes ?(gamma = types ()) facts =
+      try
+        let actual = reduce ~gamma:(Gamma.copy gamma) facts position in
+        let wanted = reduce ~gamma:(Gamma.copy gamma) facts expected in
+        Expr.equal actual wanted
+      with Reduction.ReductionException _ -> false in
+    Alcotest.(check bool) "canonical smaller head advances exactly one scan step"
+      true (authorizes premises);
+    Alcotest.(check bool) "an equal canonical head also advances one step" true
+      (authorizes [ Expr.UnOp (IsInt, head); Expr.UnOp (IsInt, target);
+        bin FLessThanEqual (Expr.num 0.) head;
+        bin FLessThanEqual head target;
+        bin FLessThan target (Expr.num 4294967295.) ]);
+    let next = bin FPlus head (Expr.num 1.) in
+    let two_heads = bin KeyInsertIndex (Expr.NOp (LstCat,
+      [Expr.EList [format head; format next]; tail; Expr.EList [text "length"]]))
+      (format target) in
+    let next_facts = [Expr.UnOp (IsInt, next);
+      bin FLessThanEqual (Expr.num 0.) next; bin FLessThan next target] in
+    let two_expected = bin IPlus (Expr.int 2)
+      (bin KeyInsertIndex suffix (format target)) in
+    let two_actual = reduce (premises @ next_facts) two_heads in
+    Alcotest.(check bool) "checked numeric successor heads advance two scan steps"
+      true (Expr.equal two_actual (reduce (premises @ next_facts) two_expected));
+    let unknown = Expr.LVar "#unknown_suffix_number" in
+    let unsafe_suffix = bin KeyInsertIndex (Expr.NOp (LstCat,
+      [Expr.EList [format head; format unknown]; tail])) (format target) in
+    Alcotest.(check bool) "a formatted suffix needs its original Number type"
+      true (try
+        let result = reduce premises unsafe_suffix in
+        let visitor = object
+          inherit [_] Visitors.iter as super
+          val mutable found = false
+          method found = found
+          method! visit_expr () e =
+            (match e with Expr.BinOp (_, KeyInsertIndex, _) -> found <- true
+             | _ -> ()); super#visit_expr () e
+        end in
+        visitor#visit_expr () result; visitor#found
+        with Reduction.ReductionException _ -> true);
+    List.iteri (fun omitted _ ->
+      Alcotest.(check bool) "each range/integrality/order premise is required"
+        false (authorizes (List.filteri (fun i _ -> i <> omitted) premises))) premises;
+    List.iter (fun name ->
+      let g = types () in Gamma.remove g name;
+      Alcotest.(check bool) ("missing input type cannot authorize a scan step: " ^ name)
+        false (authorizes ~gamma:g premises))
+      [ "#dense_head"; "#dense_target"; "#dense_tail" ];
+    let stop = bin KeyInsertIndex (Expr.EList [text "length"])
+      (format target) in
+    let range = [ Expr.UnOp (IsInt, target);
+      bin FLessThanEqual (Expr.num 0.) target;
+      bin FLessThan target (Expr.num 4294967295.) ] in
+    Alcotest.(check bool) "ordinary length stops every allowed array index"
+      true (Expr.equal (reduce range stop) (Expr.int 0));
+    Alcotest.(check bool) "nonnegativity follows a typed equal range witness"
+      true (Expr.equal (reduce
+        [ Expr.UnOp (IsInt, target); eq head target;
+          bin FLessThanEqual (Expr.num 0.) head;
+          bin FLessThan target (Expr.num 4294967295.) ] stop) (Expr.int 0));
+    List.iteri (fun omitted _ ->
+      Alcotest.(check bool) "ordinary-key stop requires each range premise"
+        false (try Expr.equal (reduce
+          (List.filteri (fun i _ -> i <> omitted) range) stop) (Expr.int 0)
+          with Reduction.ReductionException _ -> false)) range;
+    let shadowed binder_type =
+      Expr.ForAll (["#dense_target", binder_type],
+        List.fold_right (fun fact body -> bin Impl fact body) range
+          (eq stop (Expr.int 0))) in
+    Alcotest.(check bool) "shadowed input cannot borrow the outer Number type"
+        true (try
+          let result = reduce [] (shadowed None) in
+          let retained = ref false in
+          let visitor = object
+            inherit [_] Visitors.iter as super
+            method! visit_expr () e =
+              (match e with Expr.BinOp (_, KeyInsertIndex, _) -> retained := true
+               | _ -> ());
+              super#visit_expr () e
+          end in
+          visitor#visit_expr () result;
+          !retained
+          with Reduction.ReductionException _ -> true);
+    Alcotest.(check bool) "declared binder Number type authorizes the guarded step"
+      true (Expr.equal (reduce [] (shadowed (Some NumberType))) Expr.true_);
+    let failing_tail = Expr.LstSub (tail, Expr.int (-1), Expr.int 1) in
+    let failing = bin KeyInsertIndex
+      (Expr.NOp (LstCat, [Expr.EList [text "length"]; failing_tail]))
+      (format target) in
+    Alcotest.(check bool) "an ordinary-key stop cannot erase a failing slice"
+      true (try
+        let result = reduce range failing in
+        let retained = ref false in
+        let visitor = object
+          inherit [_] Visitors.iter as super
+          method! visit_expr () e =
+            if Expr.equal e failing_tail then retained := true;
+            super#visit_expr () e
+        end in
+        visitor#visit_expr () result;
+        !retained && not (Expr.equal result (Expr.int 0))
+        with Reduction.ReductionException _ -> true);
+    let store = Engine.CExprEval.CStore.init [] in
+    List.iter (fun (n, m, expected) ->
+      let term = bin KeyInsertIndex
+        (Expr.EList [ format (Expr.num n); text "length" ])
+        (format (Expr.num m)) in
+      Alcotest.(check bool) "boundary/fallback positions agree with concrete semantics"
+        true (Literal.equal (Engine.CExprEval.evaluate_expr store term)
+          (Literal.Int (Z.of_int expected))))
+      [ -0., 0., 1; 0., -0., 1; 1., 2., 1; 9., 10., 1;
+        65535., 65536., 1; 4294967293., 4294967294., 1;
+        4294967294., 4294967294., 1; 2., 1., 0;
+        0., 4294967295., 2; 1.5, 2., 0; -1., 0., 0 ])
+
 let tests =
   [
     ("numeric code unit models", `Quick, code_unit_models);
@@ -1583,4 +1724,5 @@ let tests =
     ("insertion complete array width", `Quick, insertion_array_width);
     ("guarded insertion terminal reduction", `Quick, insertion_terminal_reduction);
     ("exact Uint32 integer successor", `Quick, uint32_integer_successor);
+    ("dense canonical index scan step", `Quick, dense_index_step);
   ]
