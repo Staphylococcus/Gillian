@@ -862,12 +862,15 @@ module Make (State : SState.S) :
        an existential metadata location first would allocate a distinct ALoc
        before the known object's metadata can identify that witness. Establish
        those existing identity links before field production; the assertion
-       set, substitutions and final admissibility check are unchanged. *)
+       set, substitutions and final admissibility check are unchanged. Resolve
+       already-assumed logical aliases using the same location lookup as the
+       memory model; a reducible expression alone can miss those aliases. *)
     let known_metadata = function
       | Asrt.CorePred ("Metadata", [ loc ], [ _ ]) -> (
-          match State.simplify_val astate.state (subst_in_expr subst loc) with
-          | Expr.ALoc _ | Expr.Lit (Loc _) -> true
-          | _ -> false)
+          Option.is_some
+            (FOSolver.resolve_loc_name ~pfs:(State.get_pfs astate.state)
+               ~gamma:(State.get_typ_env astate.state)
+               (subst_in_expr subst loc)))
       | _ -> false
     in
     let rec preserve_types = function

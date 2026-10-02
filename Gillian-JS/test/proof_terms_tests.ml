@@ -695,6 +695,72 @@ let nounfold_deferred_resources_and_outputs () =
             [0;1])
         [(false,false);(true,true);(false,true)])
 
+(* Persistent metadata identifies an output witness before the postcondition
+   restores its fields. Use the real JS heap and matcher, including an object
+   identity kept as a logical alias rather than an ALoc expression. *)
+let metadata_post_alias nested () =
+  let object_loc = Expr.ALoc "#loc_post_object" in
+  let original_md = Expr.ALoc "#loc_post_metadata" in
+  let object_alias = Expr.LVar "#post_object_alias" in
+  let md = Expr.LVar "#post_metadata_witness" in
+  let frame = Expr.ALoc "#loc_post_frame" in
+  let key = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical
+      (Utils.Utf16.of_code_units [0x78]))) in
+  let heap = Semantics.SHeap.init () in
+  Semantics.SHeap.init_object heap "#loc_post_object" ~is_empty:true (Some original_md);
+  Semantics.SHeap.init_object heap "#loc_post_metadata" ~is_empty:true (Some (Expr.Lit Literal.Null));
+  Semantics.SHeap.init_object heap "#loc_post_frame" ~is_empty:true (Some (Expr.Lit Literal.Null));
+  Semantics.SHeap.set_fv_pair heap "#loc_post_frame" key (Expr.int 17);
+  let alias = bin Equal object_alias object_loc in
+  let fact = if nested then bin And truth alias else alias in
+  let initial = PState.make_p_from_heap ~pred_defs:(Engine.MP.init_pred_defs ())
+      ~heap ~store:(Engine.SStore.init []) ~preds:(Engine.Preds.init [])
+      ~wands:(Engine.Wands.init []) ~spec_vars:Utils.Containers.SS.empty
+      ~pfs:(Engine.PFS.of_list [fact]) ~gamma:(Gillian.Symbolic.Type_env.init ()) in
+  let before = Yojson.Safe.to_string (PState.to_yojson initial) in
+  let post = [
+    Asrt.CorePred ("Cell", [md; key], [Expr.int 7]);
+    Asrt.CorePred ("Metadata", [object_alias], [md]);
+    Asrt.CorePred ("Metadata", [md], [Expr.Lit Literal.Null]);
+  ] in
+  match PState.SMatcher.produce_posts initial
+      (Gillian.Symbolic.Subst.init [md,md; object_alias,object_alias]) [post] with
+  | [state] ->
+      Alcotest.(check bool) "post uses the retained metadata identity" true
+        (PState.assert_a state [bin Equal md original_md]);
+      let read action args = match PState.execute_action action state args with
+        | [Ok (_, values)] -> values
+        | _ -> Alcotest.fail "expected one real heap read" in
+      Alcotest.(check bool) "restored cell is on the existing metadata" true
+        (read Javert_utils.JSILNames.getCell [original_md;key] = [original_md;key;Expr.int 7]);
+      Alcotest.(check bool) "unrelated caller cell is framed" true
+        (read Javert_utils.JSILNames.getCell [frame;key] = [frame;key;Expr.int 17]);
+      Alcotest.(check bool) "post production preserves the caller snapshot" true
+        (before = Yojson.Safe.to_string (PState.to_yojson initial))
+  | _ -> Alcotest.fail "existing logical metadata alias lost the feasible post"
+
+let metadata_post_conflict () =
+  let loc = Expr.ALoc "#loc_conflict_object" in
+  let metadata = Expr.ALoc "#loc_conflict_metadata" in
+  let alias = Expr.LVar "#conflict_object_alias" in
+  let heap = Semantics.SHeap.init () in
+  Semantics.SHeap.init_object heap "#loc_conflict_object" ~is_empty:true (Some metadata);
+  let initial = PState.make_p_from_heap ~pred_defs:(Engine.MP.init_pred_defs ())
+      ~heap ~store:(Engine.SStore.init []) ~preds:(Engine.Preds.init [])
+      ~wands:(Engine.Wands.init []) ~spec_vars:Utils.Containers.SS.empty
+      ~pfs:(Engine.PFS.of_list [bin Equal alias loc])
+      ~gamma:(Gillian.Symbolic.Type_env.init ()) in
+  let before = Yojson.Safe.to_string (PState.to_yojson initial) in
+  (* A fresh ALoc is an existential witness and may legitimately unify with
+     the retained metadata. Null is the genuinely false claim here. *)
+  let posts = [ [Asrt.CorePred ("Metadata", [alias],
+      [Expr.Lit Literal.Null])] ] in
+  Alcotest.(check int) "a conflicting metadata post cannot produce a proof" 0
+    (List.length (PState.SMatcher.produce_posts initial
+       (Gillian.Symbolic.Subst.init [alias,alias]) posts));
+  Alcotest.(check bool) "rejection preserves the caller snapshot" true
+    (before = Yojson.Safe.to_string (PState.to_yojson initial))
+
 let () =
   Alcotest.run "Proof terms"
     [
@@ -751,5 +817,11 @@ let () =
             (with_total nounfold_demand_selection);
           Alcotest.test_case "nounfold resource and output selection" `Quick
             (with_total nounfold_deferred_resources_and_outputs);
+          Alcotest.test_case "logical object metadata post" `Quick
+            (with_total (metadata_post_alias false));
+          Alcotest.test_case "conjunctive object metadata post" `Quick
+            (with_total (metadata_post_alias true));
+          Alcotest.test_case "conflicting metadata post" `Quick
+            (with_total metadata_post_conflict);
         ] );
     ]
