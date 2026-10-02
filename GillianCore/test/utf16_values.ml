@@ -2034,6 +2034,90 @@ let checked_prefix_lookup () =
         true (Literal.equal(evaluate term)(evaluate(reduce term))))
       [[],[],0.; [],[],nan; [[48]],[nan],-0.; [[48];[49]],[-0.;0.],2.])
 
+let checked_cons_insertion () =
+  with_total (fun () ->
+    let xs=Expr.LVar "#cons_xs" and head=Expr.LVar "#cons_head" in
+    let tail=Expr.LVar "#cons_tail" and i=Expr.LVar "#cons_index" in
+    let value=Expr.LVar "#cons_value" in
+    let gamma ()=let g=Gamma.init () in
+      List.iter(fun x -> Gamma.update g x ListType)
+        ["#cons_xs";"#cons_head";"#cons_tail";"#cons_value"];
+      Gamma.update g "#cons_index" IntType;g in
+    let cons=Expr.NOp(LstCat,[Expr.EList [head];tail]) in
+    let len e=Expr.UnOp(LstLen,e) in
+    let lower=bin ILessThanEqual (Expr.int 0) i in
+    let nonzero=not_(eq i (Expr.int 0)) in
+    let upper=bin ILessThanEqual i (bin IPlus (Expr.int 1) (len tail)) in
+    let link=eq xs cons in
+    let facts=[link;lower;nonzero;upper] in
+    let context facts=let p=Gillian.Symbolic.Pure_context.init () in
+      List.iter(Gillian.Symbolic.Pure_context.extend p) facts;p in
+    let term=Expr.NOp(LstInsert,[xs;i;value]) in
+    let wanted=Expr.NOp(LstCat,[Expr.EList [head];
+      Expr.NOp(LstInsert,[tail;bin IMinus i (Expr.int 1);value])]) in
+    let reduce ?(g=gamma ()) ?(facts=facts) e=
+      Reduction.reduce_lexpr ~gamma:(Gamma.copy g) ~pfs:(context facts) e in
+    Alcotest.(check bool) "positive integer insertion follows the owned cons witness"
+      true (Expr.equal(reduce term)(reduce wanted));
+    List.iter(fun positivity ->
+      let fs=[link;positivity;upper] in
+      Alcotest.(check bool) "either explicit strict-positive integer form is sufficient"
+        true (Expr.equal(reduce ~facts:fs term)(reduce ~facts:fs wanted)))
+      [bin ILessThan (Expr.int 0) i;bin ILessThanEqual (Expr.int 1) i];
+    let original_upper=bin ILessThanEqual i (len xs) in
+    let fs=[link;lower;nonzero;original_upper] in
+    Alcotest.(check bool) "the original list bound is sufficient without a length alias"
+      true (Expr.equal(reduce ~facts:fs term)(reduce ~facts:fs wanted));
+    List.iteri(fun omitted _ ->
+      Alcotest.(check bool) "every cons/positivity/bound premise is required"
+        true (match reduce ~facts:(List.filteri(fun n _ -> n<>omitted) facts) term with
+          Expr.NOp(LstInsert,_) -> true | _ -> false)) facts;
+    List.iter(fun name ->let g=gamma () in Gamma.remove g name;
+      Alcotest.(check bool) "each original list and integer type is required"
+        true (try not(Expr.equal(reduce ~g term)(reduce ~g wanted))
+          with Reduction.ReductionException _ -> true))
+      ["#cons_xs";"#cons_head";"#cons_tail";"#cons_value";"#cons_index"];
+    let partial=bin LstNth (Expr.EList []) (Expr.int 0) in
+    List.iter(fun unsafe ->
+      Alcotest.(check bool) "partial insertion operands still fail before equality erasure"
+        true (try ignore(reduce unsafe);false
+          with Reduction.ReductionException _ -> true))
+      [Expr.NOp(LstInsert,[xs;partial;value]);
+       Expr.NOp(LstInsert,[xs;i;partial]);
+       Expr.NOp(LstInsert,[Expr.NOp(LstCat,[Expr.EList [head];partial]);i;value])];
+    let scoped ty=Expr.ForAll(["#cons_tail",ty],
+      List.fold_right(fun f body ->bin Impl f body) facts (eq term wanted)) in
+    Alcotest.(check bool) "a shadowed untyped list cannot borrow outer typing"
+      false (Expr.equal(reduce(scoped None)) Expr.true_);
+    let visitor=object inherit [_] Visitors.endo
+      method! visit_LVar () _ name=Expr.PVar name end in
+    let atom x=Literal.LList [x] in
+    let atoms=[Literal.Num(-0.);Literal.Num 0.;Literal.Num nan;
+      Literal.Null;literal [0xd800];Literal.Bool true;Literal.LList []] in
+    let checks=ref 0 in
+    List.iter(fun v ->List.iter(fun size ->
+      let values=List.init size(fun n ->atom(List.nth atoms (n mod List.length atoms))) in
+      for index=1 to size+1 do
+        let store=Engine.CExprEval.CStore.init [
+          "#cons_head",atom(Literal.Num(-0.));"#cons_tail",Literal.LList values;
+          "#cons_xs",Literal.LList(atom(Literal.Num(-0.))::values);
+          "#cons_index",Literal.Int(Z.of_int index);"#cons_value",atom v] in
+        let eval e=Engine.CExprEval.evaluate_expr store(visitor#visit_expr () e) in
+        Alcotest.(check bool) "native insertion preserves exact nested values and order"
+          true (Literal.equal(eval term)(eval(reduce term)));incr checks
+      done) [0;1;2;4]) atoms;
+    Alcotest.(check int) "all boundary/value concrete comparisons executed" 77 !checks;
+    let small=List.map(fun fs -> Expr.Set.of_list fs)
+      [[eq i (Expr.int 0)];[eq i (Expr.int (-1))];
+       [eq i (bin IPlus (len tail) (Expr.int 2))]] in
+    List.iter(fun fs ->
+      let cases=Expr.Set.elements fs @ [eq tail (Expr.EList []);link] in
+      Alcotest.(check bool) "omitted positivity or upper bound admits a native countermodel"
+        true (Option.is_some(Smt.check_sat(Expr.Set.of_list cases)(Gamma.as_hashtbl(gamma ()))))
+    ) small;
+    Printf.printf "CHECKED_CONS_INSERTION_CONTROLS_COMPLETE\n%!"
+  )
+
 let tests =
   [
     ("numeric code unit models", `Quick, code_unit_models);
@@ -2072,4 +2156,5 @@ let tests =
     ("guarded UTF16 list concatenation", `Quick, utf16_list_concatenation);
     ("checked prefix insertion splice", `Quick, checked_prefix_splice);
     ("checked prefix boundary lookup", `Quick, checked_prefix_lookup);
+    ("checked cons insertion", `Quick, checked_cons_insertion);
   ]

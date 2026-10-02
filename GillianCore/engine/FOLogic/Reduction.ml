@@ -1044,6 +1044,37 @@ let reduce_insert_before_tail pfs gamma xs position value =
       else None
   | _ -> None
 
+(* Moving an in-range insertion past a known singleton prefix is exact for
+   unbounded mathematical lists. Consult only original operand types and facts:
+   the new tail index must be nonnegative and no greater than its length.
+   Keep invalid/untyped operands and missing bounds in the ordinary path. *)
+let reduce_insert_after_head pfs gamma xs position value =
+  let typed e t = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some t
+    | Lit (Constant _) -> false
+    | Lit l -> Literal.type_of l = t
+    | _ -> false in
+  let fact e = PFS.mem pfs e in
+  let zero = Expr.zero_i in
+  let positive = fact (Expr.BinOp (zero,ILessThan,position)) ||
+    fact (Expr.BinOp (Expr.one_i,ILessThanEqual,position)) ||
+    (fact (Expr.BinOp (zero,ILessThanEqual,position)) &&
+     fact (Expr.UnOp (Not,Expr.BinOp (position,Equal,zero)))) in
+  if not !Config.Verification.total || not (typed position Type.IntType) ||
+     not (total_list_operands gamma [xs;value]) then None
+  else
+    List.find_map (function
+      | Expr.NOp (LstCat,[EList [head];tail]) as cons
+        when typed tail Type.ListType && total_list_operands gamma [cons] &&
+          positive &&
+          (fact (Expr.BinOp (position,ILessThanEqual,Expr.UnOp (LstLen,xs))) ||
+           fact (Expr.BinOp (position,ILessThanEqual,
+             Expr.BinOp (Expr.one_i,IPlus,Expr.UnOp (LstLen,tail))))) ->
+          Some (Expr.NOp (LstCat,[Expr.EList [head];
+            Expr.NOp (LstInsert,[tail;
+              Expr.BinOp (position,IMinus,Expr.one_i);value])]))
+      | _ -> None) (xs :: get_equal_expressions pfs xs)
+
 (* A known prefix length locates a literal tail element exactly. The count may
    name a separate originally typed list whose length is explicitly equal;
    this is a boundary lookup, never an equality between their contents. *)
@@ -1133,8 +1164,10 @@ let rec reduce_lexpr_loop
     | UnOp (LstAllUtf16, NOp (LstCat, parts)) ->
         Option.value ~default:le (reduce_utf16_list_cat input_gamma parts)
     | NOp (LstInsert,[xs;position;value]) ->
-        Option.value ~default:le
-          (reduce_insert_before_tail pfs input_gamma xs position value)
+        let reduced = match reduce_insert_before_tail pfs input_gamma xs position value with
+          | Some _ as result -> result
+          | None -> reduce_insert_after_head pfs input_gamma xs position value in
+        Option.value ~default:le reduced
     | BinOp (xs,LstNth,index) ->
         Option.value ~default:le
           (reduce_prefix_boundary_nth pfs input_gamma xs index)
