@@ -901,6 +901,56 @@ module M = struct
             Ok [ (heap, [], ordered_length_equality keys values :: new_pfs, []) ]
     | _ -> ordered_fields_error loc
 
+  (* SelectedFields is a view of the whole OrderedFields resource. Its outputs
+     bind the selected index and descriptor during matching; neither is guessed
+     from an unowned list. Consumption still removes the entire footprint. *)
+  let selected_fields_valid pfs gamma prop index keys values descriptor =
+    ordered_sequence_valid pfs gamma keys values
+    && FOSolver.check_entailment Containers.SS.empty pfs
+         [ Expr.BinOp (UnOp (TypeOf, prop), Equal, Lit (Type Utf16Type));
+           Expr.BinOp (UnOp (TypeOf, index), Equal, Lit (Type IntType));
+           Expr.BinOp (UnOp (TypeOf, descriptor), Equal, Lit (Type ListType)) ]
+         gamma
+    && FOSolver.check_entailment Containers.SS.empty pfs
+         [ Expr.BinOp (Expr.zero_i, ILessThanEqual, index);
+           Expr.BinOp (index, ILessThan, UnOp (LstLen, keys));
+           Expr.BinOp (index, ILessThan, UnOp (LstLen, values)) ]
+         gamma
+    (* Prove definedness before reducing the partial nth expressions. *)
+    && FOSolver.check_entailment Containers.SS.empty pfs
+         [ Expr.BinOp (prop, Equal, BinOp (keys, LstNth, index));
+           Expr.BinOp (descriptor, ValueEqual, BinOp (values, LstNth, index)) ]
+         gamma
+
+  let get_selected_fields heap pfs gamma loc prop : action_ret =
+    match ordered_fields_snapshot heap pfs gamma loc with
+    | Error errors -> Error errors
+    | Ok (name, _, keys, values) ->
+        let index = match ordered_cell_index pfs gamma keys values prop with
+          | Some _ as index -> index
+          | None -> Option.bind (ordered_list pfs gamma keys) (fun names ->
+              List.find_map (fun (index, key) ->
+                  if FOSolver.is_equal ~pfs ~gamma prop key then
+                    Some (Expr.int index)
+                  else None)
+                (List.mapi (fun index key -> index, key) names))
+        in
+        (match index with
+        | None -> ordered_fields_error loc
+        | Some index ->
+            let descriptor = Reduction.reduce_lexpr ~pfs ~gamma
+                (Expr.BinOp (values, LstNth, index)) in
+            if selected_fields_valid pfs gamma prop index keys values descriptor
+            then Ok [ (heap,
+                [ Expr.loc_from_loc_name name; prop; index; keys; values; descriptor ],
+                [], []) ]
+            else ordered_fields_error loc)
+
+  let set_selected_fields heap pfs gamma loc prop index keys values descriptor =
+    if selected_fields_valid pfs gamma prop index keys values descriptor then
+      set_ordered_fields heap pfs gamma loc keys values
+    else ordered_fields_error loc
+
   (* Program actions and logical producers share this legacy implementation.
      Total execution must not borrow the producer's ability to invent a missing
      location/cell, or remove an object whose remaining fields could be framed.
@@ -1027,6 +1077,19 @@ module M = struct
       match args with
       | [ loc ] -> remove_ordered_fields heap pfs gamma loc
       | _ -> Error [ ([], [], Expr.false_) ]
+    else if action = JSILNames.getSelectedFields then
+      match args with
+      | [ loc; prop ] -> get_selected_fields heap pfs gamma loc prop
+      | _ -> Error [ ([], [], Expr.false_) ]
+    else if action = JSILNames.setSelectedFields then
+      match args with
+      | [ loc; prop; index; keys; values; descriptor ] ->
+          set_selected_fields heap pfs gamma loc prop index keys values descriptor
+      | _ -> Error [ ([], [], Expr.false_) ]
+    else if action = JSILNames.delSelectedFields then
+      match args with
+      | [ loc; _ ] -> remove_ordered_fields heap pfs gamma loc
+      | _ -> Error [ ([], [], Expr.false_) ]
     else if action = JSILNames.getCell then
       match args with
       | [ loc; prop ] -> get_cell heap pfs gamma loc prop
@@ -1084,6 +1147,7 @@ module M = struct
 
   let ga_to_setter (a_id : string) : string =
     if a_id = JSILNames.aOrderedFields then JSILNames.setOrderedFields
+    else if a_id = JSILNames.aSelectedFields then JSILNames.setSelectedFields
     else if a_id = JSILNames.aCell then produce_cell_action
     else if a_id = JSILNames.aMetadata then JSILNames.setMetadata
     else if a_id = JSILNames.aProps then JSILNames.setProps
@@ -1091,6 +1155,7 @@ module M = struct
 
   let ga_to_getter (a_id : string) : string =
     if a_id = JSILNames.aOrderedFields then JSILNames.getOrderedFields
+    else if a_id = JSILNames.aSelectedFields then JSILNames.getSelectedFields
     else if a_id = JSILNames.aCell then JSILNames.getCell
     else if a_id = JSILNames.aMetadata then JSILNames.getMetadata
     else if a_id = JSILNames.aProps then JSILNames.getProps
@@ -1098,6 +1163,7 @@ module M = struct
 
   let ga_to_deleter (a_id : string) : string =
     if a_id = JSILNames.aOrderedFields then JSILNames.delOrderedFields
+    else if a_id = JSILNames.aSelectedFields then JSILNames.delSelectedFields
     else if a_id = JSILNames.aCell then JSILNames.delCell
     else if a_id = JSILNames.aMetadata then JSILNames.delMetadata
     else if a_id = JSILNames.aProps then JSILNames.delProps

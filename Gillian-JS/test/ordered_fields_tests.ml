@@ -1127,6 +1127,133 @@ let named_sequence_no_ownership () =
   check "pure key equality supplies no cell ownership" rejected;
   check "unowned named write preserves metadata-only input" (snapshot heap = before)
 
+let selected_context ?(lower = true) ?(upper = true) ?(typed = true) () =
+  let c = named_context ~lower ~upper () in
+  if typed then Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (UnOp (TypeOf, selected_value), Equal, Lit (Type ListType)));
+  c
+
+let consume_selected c heap prop =
+  match Memory.consume aSelectedFields heap c [loc; prop] with
+  | [{Branch.value = Ok (heap, outputs); _}] -> heap, outputs
+  | _ -> Alcotest.fail "selected whole-resource consumption failed"
+
+let produce_selected c heap prop outputs =
+  match Memory.produce aSelectedFields heap c (loc :: prop :: outputs) with
+  | [{Branch.value = heap; _}] -> heap
+  | _ -> Alcotest.fail "selected whole-resource production failed"
+
+let reject_selected_consume c heap prop =
+  let before = snapshot heap in
+  check "unproved selection cannot consume ownership"
+    (match Memory.consume aSelectedFields heap c [loc; prop] with
+     | [{Branch.value = Error _; _}] -> true | _ -> false);
+  check "failed selected consumption preserves input" (snapshot heap = before)
+
+let reject_selected_produce c heap prop outputs =
+  let before = snapshot heap in
+  check "false/overlapping selection cannot produce ownership"
+    (Memory.produce aSelectedFields heap c (loc :: prop :: outputs) = []);
+  check "failed selected production preserves input" (snapshot heap = before)
+
+let selected_roundtrip () =
+  let c = selected_context () in
+  let original = sequence_make c in
+  let before = snapshot original in
+  let remainder, outputs = consume_selected c original length_key in
+  check "index, complete witnesses and descriptor are actual getter outputs"
+    (outputs = [sequence_index; sequence_keys; sequence_values; selected_value]);
+  check "getter/deleter preserve original branch" (snapshot original = before);
+  check "opaque field resource is wholly consumed"
+    (Heap.get_ordered remainder loc_name = None);
+  (match Heap.get remainder loc_name with
+   | Some ((fields, None), Some md) ->
+       check "all exposed fields/domain removed; metadata framed"
+         (Fields.is_empty fields && md = metadata)
+   | _ -> Alcotest.fail "selected consume left an independent field footprint");
+  let restored = produce_selected c remainder length_key outputs in
+  check "canonical whole resource is restored"
+    (snd (consume ~context:c restored) = [sequence_keys; sequence_values]);
+  check "original runtime lookup reads restored paired descriptor"
+    (snd (action ~context:c restored getCell [loc; length_key]) =
+     [loc; length_key; selected_value]);
+  check "metadata remains owned" (Heap.get_met restored loc_name = Some metadata)
+
+let selected_bounds () =
+  List.iter (fun c -> reject_selected_consume c (sequence_make c) length_key)
+    [selected_context ~lower:false (); selected_context ~upper:false ()]
+
+let selected_wrong_list () =
+  let c = update_context () in
+  let other = Expr.LVar "#selected_other_keys" in
+  Gillian.Symbolic.Type_env.update c.gamma "#selected_other_keys" Type.ListType;
+  Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (BinOp (other, LstNth, sequence_index), Equal, length_key));
+  reject_selected_consume c (sequence_make c) length_key
+
+let selected_missing_facts () =
+  let c = selected_context () in
+  reject_selected_consume c (sequence_make c) (ukey "not-owned");
+  let c = selected_context ~typed:false () in
+  reject_selected_consume c (sequence_make c) length_key;
+  let c = selected_context () in
+  reject_selected_consume c (Heap.init ()) length_key
+
+let selected_false_witnesses () =
+  let c = selected_context () in
+  let remainder, outputs = consume_selected c (sequence_make c) length_key in
+  let candidate index keys values descriptor = [index; keys; values; descriptor] in
+  List.iter (fun (prop, out) -> reject_selected_produce c remainder prop out)
+    [ length_key, candidate (Expr.int (-1)) sequence_keys sequence_values selected_value;
+      length_key, candidate (Expr.num 0.) sequence_keys sequence_values selected_value;
+      length_key, candidate sequence_index sequence_keys sequence_values (Expr.EList []);
+      length_key, candidate sequence_index (ukeys []) sequence_values selected_value;
+      length_key, candidate sequence_index sequence_keys (Expr.EList []) selected_value;
+      ukey "not-owned", outputs;
+      Expr.num 0., outputs ];
+  reject_selected_produce c (sequence_make c) length_key outputs
+
+let selected_no_cell_split () =
+  let c = selected_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try ignore (Memory.consume aCell heap c [loc; length_key]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "selected descriptor knowledge cannot split whole ownership" rejected;
+  check "cell rejection preserves complete resource" (snapshot heap = before)
+
+let descriptor n = Expr.EList
+  [ukey "d"; Expr.num n; Expr.bool true; Expr.bool true; Expr.bool true]
+
+let selected_concrete_mutation () =
+  let c = pc () in
+  let heap = Heap.init () in
+  Heap.init_object heap loc_name (Some metadata);
+  let heap, _ = action heap setCell [loc; ukey "z"; descriptor 1.] in
+  let heap, _ = action heap setCell [loc; ukey "a"; descriptor 2.] in
+  let heap, _ = action heap setProps [loc; Expr.ESet [ukey "z"; ukey "a"]] in
+  let remainder, outputs = consume_selected c heap (ukey "z") in
+  check "actual concrete selection uses the first owned index"
+    (outputs = [Expr.int 0; ukeys ["z"; "a"];
+                Expr.EList [descriptor 1.; descriptor 2.]; descriptor 1.]);
+  let heap = produce_selected c remainder (ukey "z") outputs in
+  let heap, _ = action heap setCell [loc; ukey "z"; descriptor 3.] in
+  let remainder, updated = consume_selected c heap (ukey "z") in
+  check "runtime update changes selected descriptor and retains order"
+    (updated = [Expr.int 0; ukeys ["z"; "a"];
+                Expr.EList [descriptor 3.; descriptor 2.]; descriptor 3.]);
+  let heap = produce_selected c remainder (ukey "z") updated in
+  let heap, _ = action heap setCell [loc; ukey "z"; Expr.Lit Literal.Nono] in
+  let heap, _ = action heap setCell [loc; ukey "z"; descriptor 4.] in
+  let remainder, reinserted = consume_selected c heap (ukey "z") in
+  check "delete/reinsert produces a new index and current order"
+    (reinserted = [Expr.int 1; ukeys ["a"; "z"];
+                   Expr.EList [descriptor 2.; descriptor 4.]; descriptor 4.]);
+  let restored = produce_selected c remainder (ukey "z") reinserted in
+  check "current observable order survives the checked roundtrip"
+    (snd (action restored getAllProps [loc]) = [loc; ukeys ["a"; "z"]]);
+  reject_selected_produce c restored (ukey "z") outputs
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -1194,5 +1321,12 @@ let () =
             ("named access cannot authorize logical production", named_sequence_no_logical_write);
             ("named access cannot split ownership", named_sequence_no_split);
             ("named equality cannot supply ownership", named_sequence_no_ownership);
+            ("selected whole-resource real roundtrip", selected_roundtrip);
+            ("selected witness bounds", selected_bounds);
+            ("selection cannot borrow another key list", selected_wrong_list);
+            ("selection requires identity type and ownership", selected_missing_facts);
+            ("selected false and overlapping witnesses", selected_false_witnesses);
+            ("selection cannot split cell ownership", selected_no_cell_split);
+            ("selected update and reinsertion witnesses", selected_concrete_mutation);
           ] );
     ]

@@ -22,3 +22,9 @@ let aOrderedFields = "OrderedFields"
 let getOrderedFields = "GetOrderedFields"
 let setOrderedFields = "SetOrderedFields"
 let delOrderedFields = "DeleteOrderedFields"
+
+(* The same exclusive footprint, with a checked selected descriptor witness. *)
+let aSelectedFields = "SelectedFields"
+let getSelectedFields = "GetSelectedFields"
+let setSelectedFields = "SetSelectedFields"
+let delSelectedFields = "DeleteSelectedFields"
