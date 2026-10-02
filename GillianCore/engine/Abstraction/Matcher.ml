@@ -695,7 +695,13 @@ module Make (State : SState.S) :
                 | Some NumberType | None -> false
                 | _ -> true
               in
-              if exact_binding then Res_list.return (update_store astate x v)
+              if exact_binding then (
+                (* Later post assertions use the substitution, and produce_posts
+                   copies it back into the store. Keep the same checked witness
+                   in both places instead of allocating a second return value. *)
+                if !Config.Verification.total then
+                  SVal.SESubst.put subst (PVar x) v;
+                Res_list.return (update_store astate x v))
               else
                 let value = Expr.LVar (LVar.alloc ()) in
                 let updated = update_store astate x value in
@@ -704,7 +710,10 @@ module Make (State : SState.S) :
                     ~production:!Config.delay_entailment updated.state
                     [ BinOp (value, Equal, v) ]
                 with
-                | Some state -> Res_list.return { updated with state }
+                | Some state ->
+                    if !Config.Verification.total then
+                      SVal.SESubst.put subst (PVar x) value;
+                    Res_list.return { updated with state }
                 | None -> []
             else
               other_state_err

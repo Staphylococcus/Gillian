@@ -147,6 +147,118 @@ let insertion_length_dependencies () =
   | Ok [ (_, outs) ] -> expect "equality invents no insertion outputs" [] outs
   | _ -> Alcotest.fail "expected one complete equality matching step"
 
+(* Exercise real post production, including its final store update. No heap
+   operation is needed for this return/predicate binding regression. *)
+module ReturnState = Engine.SState.Make (Engine.SMemory.Dummy)
+module ReturnMatcher = Engine.Matcher.Make (ReturnState)
+module ReturnSubst = Engine.SVal.SESubst
+module ReturnStore = Engine.SStore
+
+let return_var = Expr.PVar Utils.Names.return_variable
+let returned state = ReturnStore.get (ReturnState.get_store state.ReturnMatcher.state)
+    Utils.Names.return_variable |> Option.get
+
+let return_state () : ReturnMatcher.t =
+  let pred : Pred.t = {
+    pred_name = "ReturnValue"; pred_source_path = None; pred_loc = None;
+    pred_internal = false; pred_num_params = 1; pred_params = ["value", None];
+    ins_number = 1; pred_definitions = []; pred_facts = []; pred_guard = None;
+    pred_pure = true; pred_abstract = true; pred_nounfold = true;
+    pred_normalised = true;
+  } in
+  let pred_defs = Engine.MP.init_pred_defs () in
+  Hashtbl.add pred_defs pred.pred_name Engine.MP.{
+    pred; def_mp = Finished None; guard_mp = None };
+  { state = ReturnState.init (); preds = Preds.init []; wands = Engine.Wands.init [];
+    pred_defs }
+
+let with_total_return f () =
+  let old = !Utils.Config.Verification.total in
+  Utils.Config.Verification.total := true;
+  Fun.protect ~finally:(fun () -> Utils.Config.Verification.total := old) f
+
+let return_post op value = [
+  Asrt.Pure (Expr.BinOp (return_var, op, value));
+  Asrt.pred "ReturnValue" [return_var] [] ]
+
+let check_return_pred state =
+  match Preds.to_list state.ReturnMatcher.preds with
+  | [("ReturnValue", [value])] ->
+      Alcotest.(check bool) "later predicate and final store share the return witness"
+        true (ReturnState.equals state.state value (returned state))
+  | _ -> Alcotest.fail "expected one return predicate"
+
+let exact_return_posts () =
+  let values = [Expr.num 0.; Expr.num (-0.); Expr.num nan;
+    Expr.Lit (Literal.Bool false); Expr.Lit Literal.Null;
+    Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical (Utils.Utf16.of_code_units [0xd800])));
+    Expr.LVar "#returned_object"; Expr.EList [Expr.num (-0.); Expr.Lit Literal.Null];
+    Expr.LVar "#returned_value"] in
+  List.iter (fun value ->
+    let bindings = match value with
+      | Expr.LVar _ -> [value, value]
+      | _ -> [] in
+    let initial = return_state () and subst = ReturnSubst.init bindings in
+    if Expr.equal value (Expr.LVar "#returned_object") then
+      ignore (ReturnState.assume_t initial.state value Type.ObjectType);
+    let results = ReturnMatcher.produce_posts initial subst [return_post ValueEqual value] in
+    match results with
+    | [state] ->
+        Alcotest.(check bool)
+          "value identity survives a later predicate and final store copy"
+          true (ReturnState.equals state.state value (returned state));
+        check_return_pred state;
+        expect "the caller substitution remains untouched" None
+          (ReturnSubst.get subst return_var);
+        expect "the caller store remains untouched" None
+          (ReturnStore.get (ReturnState.get_store initial.state) Utils.Names.return_variable)
+    | _ -> Alcotest.fail "expected one exact return state") values
+
+let numeric_return_posts () =
+  let initial = return_state () in
+  match ReturnMatcher.produce_posts initial (ReturnSubst.init [])
+    [return_post Equal (Expr.num 0.)] with
+  | [state] ->
+      check_return_pred state;
+      let ret = returned state in
+      let opposite = Expr.BinOp (ret, ValueEqual, Expr.num (-0.)) in
+      Alcotest.(check bool) "ordinary zero equality still permits negative zero" true
+        (ReturnState.sat_check state.state opposite);
+      Alcotest.(check bool) "ordinary zero equality still permits positive zero" true
+        (ReturnState.sat_check state.state (Expr.BinOp (ret, ValueEqual, Expr.num 0.)));
+      Alcotest.(check bool) "ordinary zero equality cannot invent a nonzero return" false
+        (ReturnState.sat_check state.state (Expr.BinOp (ret, ValueEqual, Expr.num 1.)))
+  | _ -> Alcotest.fail "expected one numeric equality state"
+
+let nan_return_posts () =
+  let initial = return_state () and subst = ReturnSubst.init [] in
+  expect "ordinary NaN equality has no feasible return" []
+    (ReturnMatcher.produce_posts initial subst [return_post Equal (Expr.num nan)]);
+  expect "failed production cannot bind the caller return" None
+    (ReturnSubst.get subst return_var)
+
+let existing_return_posts () =
+  let value = Expr.Lit (Literal.Bool true) in
+  let initial = return_state () and subst = ReturnSubst.init [return_var, value] in
+  match ReturnMatcher.produce_posts initial subst [return_post ValueEqual value] with
+  | [state] ->
+      expect "an existing return binding remains authoritative" value (returned state);
+      check_return_pred state;
+      expect "existing caller substitution is preserved" (Some value)
+        (ReturnSubst.get subst return_var)
+  | _ -> Alcotest.fail "expected one existing return state"
+
+let alternative_return_posts () =
+  let initial = return_state () and subst = ReturnSubst.init [] in
+  let values = [Expr.Lit (Literal.Bool true); Expr.Lit (Literal.Bool false)] in
+  let results = ReturnMatcher.produce_posts initial subst
+    (List.map (return_post ValueEqual) values) in
+  expect "post alternatives retain independent exact values" values
+    (List.map returned results);
+  List.iter check_return_pred results;
+  expect "alternative bindings do not escape to the caller" None
+    (ReturnSubst.get subst return_var)
+
 let tests =
   List.map (fun (name, test) -> Alcotest.test_case name `Quick test)
     [
@@ -159,4 +271,9 @@ let tests =
       ("maintain and multiplicity", maintain);
       ("missing name and mismatched input", missing_and_wrong_input);
       ("insertion length dependencies", insertion_length_dependencies);
+      ("exact summary return", with_total_return exact_return_posts);
+      ("numeric summary return", with_total_return numeric_return_posts);
+      ("infeasible NaN summary return", with_total_return nan_return_posts);
+      ("existing summary return", with_total_return existing_return_posts);
+      ("alternative summary returns", with_total_return alternative_return_posts);
     ]
