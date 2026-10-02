@@ -597,7 +597,12 @@ module M = struct
     let reduce = Reduction.reduce_lexpr ~pfs ~gamma in
     let selection = function
     | Expr.BinOp (selected_keys, LstNth, index)
-      when reduce selected_keys = reduce keys ->
+      when reduce selected_keys = reduce keys ||
+           FOSolver.check_entailment Containers.SS.empty pfs
+             [ Expr.BinOp (selected_keys, Equal, keys) ] gamma ->
+        (* A checked prefix lookup can name an equal whole-list expression whose
+           reduction differs through recursive key aliases. Prove that identity;
+           unrelated or merely equal-length lists still cannot authorize a read. *)
         let bounds =
           [ Expr.BinOp (UnOp (TypeOf, index), Equal, Lit (Type IntType));
             Expr.BinOp (Expr.zero_i, ILessThanEqual, index);

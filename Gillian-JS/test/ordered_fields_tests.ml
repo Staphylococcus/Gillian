@@ -1254,6 +1254,70 @@ let selected_concrete_mutation () =
     (snd (action restored getAllProps [loc]) = [loc; ukeys ["a"; "z"]]);
   reject_selected_produce c restored (ukey "z") outputs
 
+let prefix_selection_context ?(owned_alias = true) () =
+  let c = sequence_context () in
+  let var name typ =
+    Gillian.Symbolic.Type_env.update c.gamma name typ;
+    Expr.LVar name in
+  let pk = var "#cursor_prefix_keys" Type.ListType in
+  let pv = var "#cursor_prefix_values" Type.ListType in
+  let rk = var "#cursor_rest_keys" Type.ListType in
+  let rv = var "#cursor_rest_values" Type.ListType in
+  let prop = var "#cursor_key" Type.Utf16Type in
+  let desc = var "#cursor_descriptor" Type.ListType in
+  let index = Expr.UnOp (LstLen, pk) in
+  let ks = Expr.NOp (LstCat, [pk; Expr.EList [prop]; rk]) in
+  let vs = Expr.NOp (LstCat, [pv; Expr.EList [desc]; rv]) in
+  let add = Gillian.Symbolic.Pure_context.extend c.pfs in
+  if owned_alias then add (Expr.BinOp (sequence_keys, Equal, ks));
+  add (Expr.BinOp (sequence_values, Equal, vs));
+  add (Expr.BinOp (UnOp (LstLen, pk), Equal, UnOp (LstLen, pv)));
+  add (Expr.BinOp (UnOp (LstLen, rk), Equal, UnOp (LstLen, rv)));
+  add (Expr.UnOp (LstAllUtf16, ks));
+  add (Expr.BinOp (prop, Equal, BinOp (ks, LstNth, index)));
+  add (Expr.BinOp (desc, ValueEqual, BinOp (vs, LstNth, index)));
+  add (Expr.BinOp (Expr.zero_i, ILessThanEqual, index));
+  add (Expr.BinOp (index, ILessThan, UnOp (LstLen, sequence_keys)));
+  c, prop, index
+
+let selected_prefix_alias_roundtrip () =
+  let c, prop, index = prefix_selection_context () in
+  let original = sequence_make c in
+  let before = snapshot original in
+  let remainder, outputs = consume_selected c original prop in
+  check "proved prefix alias retains the complete owned witnesses"
+    (List.nth outputs 1 = sequence_keys && List.nth outputs 2 = sequence_values);
+  check "selected index is the exact mathematical prefix length"
+    (Gillian.Logic.FOSolver.is_equal ~pfs:c.pfs ~gamma:c.gamma
+      (List.hd outputs) index);
+  check "selection retains original branch and frames metadata"
+    (snapshot original = before && Heap.get_met remainder loc_name = Some metadata);
+  let restored = produce_selected c remainder prop outputs in
+  check "proved alias roundtrip restores the entire ordered footprint"
+    (snd (consume ~context:c restored) = [sequence_keys; sequence_values])
+
+let selected_prefix_alias_read () =
+  let c, prop, index = prefix_selection_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let _, outputs = action ~context:c heap getCell [loc; prop] in
+  check "actual read uses the matching complete descriptor sequence"
+    (Gillian.Logic.FOSolver.is_equal ~pfs:c.pfs ~gamma:c.gamma
+      (List.nth outputs 2) (Expr.BinOp (sequence_values, LstNth, index)));
+  check "actual alias read preserves fields and metadata" (snapshot heap = before)
+
+let selected_prefix_alias_rejections () =
+  let c, prop, _ = prefix_selection_context ~owned_alias:false () in
+  reject_selected_consume c (sequence_make c) prop;
+  let c, prop, _ = prefix_selection_context () in
+  reject_selected_consume c (Heap.init ()) prop;
+  let c, prop, index = prefix_selection_context () in
+  let remainder, outputs = consume_selected c (sequence_make c) prop in
+  reject_selected_produce c remainder prop
+    (Expr.BinOp (index, IPlus, Expr.one_i) :: List.tl outputs);
+  reject_selected_produce c remainder prop
+    [List.hd outputs; sequence_keys; sequence_values; Expr.EList []]
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -1328,5 +1392,8 @@ let () =
             ("selected false and overlapping witnesses", selected_false_witnesses);
             ("selection cannot split cell ownership", selected_no_cell_split);
             ("selected update and reinsertion witnesses", selected_concrete_mutation);
+            ("selected prefix alias complete roundtrip", selected_prefix_alias_roundtrip);
+            ("selected prefix alias actual read", selected_prefix_alias_read);
+            ("selected prefix alias rejects false witnesses", selected_prefix_alias_rejections);
           ] );
     ]
