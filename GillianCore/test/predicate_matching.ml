@@ -383,6 +383,53 @@ let conjunctive_location_identity () =
       ("implication does not establish an identity",
         Expr.BinOp (Expr.LVar "#condition", Impl, eq x location)) ]
 
+(* Generated list-pattern witnesses must reject an inapplicable alternative,
+   not read past the supplied list or feed an unsubstituted formal to SMT. *)
+let list_witness_case actual wanted =
+  let initial : RecoveryMatcher.t = {
+    state = RecoveryState.init ();
+    preds = Preds.init [("CallerFrame", [])];
+    wands = Engine.Wands.init [];
+    pred_defs = Engine.MP.init_pred_defs ();
+  } in
+  let tree = Expr.PVar "tree" in
+  let elements = List.init wanted (fun i -> Expr.LVar ("#element_" ^ string_of_int i)) in
+  let outs = List.mapi (fun i variable ->
+    variable, Expr.BinOp (tree, LstNth, Expr.int i)) elements in
+  let step = Asrt.Pure (Expr.BinOp (tree, Equal, Expr.EList elements)), outs in
+  let supplied = Expr.EList (List.init actual (fun i -> Expr.int (i + 1))) in
+  let subst = ReturnSubst.init [tree, supplied] in
+  let before = Preds.to_list initial.preds in
+  let results = RecoveryMatcher.match_ initial (ReturnSubst.copy subst)
+    (Engine.MP.of_step_list [step]) Engine.Matcher.LogicCommand in
+  expect "matching keeps the caller frame snapshot" before (Preds.to_list initial.preds);
+  expect "matching keeps the caller substitution" (Some supplied) (ReturnSubst.get subst tree);
+  List.iter (fun element ->
+    expect "proposed outputs do not leak to the caller" None (ReturnSubst.get subst element)) elements;
+  if actual = wanted then (
+    match results with
+    | [Ok (state, learned, _)] ->
+        expect "successful match preserves the frame" before (Preds.to_list state.preds);
+        List.iteri (fun i element ->
+          expect "only actual list values are learned" (Some (Expr.int (i + 1)))
+            (ReturnSubst.get learned element)) elements
+    | _ -> Alcotest.fail "expected the applicable list alternative to match")
+  else
+    Alcotest.(check bool) "wrong list shape cannot manufacture a witness" false
+      (List.exists Result.is_ok results)
+
+let applicable_list_witnesses () =
+  list_witness_case 0 0;
+  list_witness_case 2 2;
+  list_witness_case 3 3
+
+let partial_list_witnesses () =
+  list_witness_case 0 1;
+  list_witness_case 2 3
+
+let wrong_list_shape () =
+  list_witness_case 3 2
+
 let tests =
   List.map (fun (name, test) -> Alcotest.test_case name `Quick test)
     [
@@ -404,4 +451,7 @@ let tests =
       ("false sequential recovery rejects", with_total_return false_recovery_goal);
       ("refuted goal needs no recovery", with_total_return refuted_recovery_goal);
       ("conjunctive closure location identity", with_total_return conjunctive_location_identity);
+      ("applicable list witnesses", with_total_return applicable_list_witnesses);
+      ("partial list witnesses reject", with_total_return partial_list_witnesses);
+      ("wrong list shape rejects", with_total_return wrong_list_shape);
     ]

@@ -1536,9 +1536,15 @@ module Make (State : SState.S) :
                          its retained expressions must still be defined; no
                          assumption is obtained from the proposal itself. *)
                       if !Config.Verification.total then
-                        State.eval_expr state out
-                      else out
+                        try Ok (State.eval_expr state out)
+                        with State.Internal_State_Error _ -> Error ()
+                      else Ok out
                     in
+                    (* A speculative witness can be partial on an inapplicable
+                       predicate alternative (e.g. an Array-only list field on
+                       an Object). Reject that matching alternative without
+                       asserting the witness or losing the caller state. *)
+                    let* out = out in
                     (* Special case: learning len x when we know x *)
                     let discharges =
                       match u with
@@ -1565,15 +1571,9 @@ module Make (State : SState.S) :
                         Ok (new_discharge :: discharges))
                   (Ok []) outs
               in
-              let discharges =
-                match discharges with
-                | Error () ->
-                    Fmt.failwith
-                      "INTERNAL ERROR: Matching failure: do not know all ins \
-                       for %a"
-                      Expr.pp f
-                | Ok discharges -> discharges
-              in
+              match discharges with
+              | Error () -> resource_fail
+              | Ok discharges ->
               (* To match a pure formula we must know all ins *)
               let opf = SVal.SESubst.subst_in_expr_opt subst f in
               match opf with
