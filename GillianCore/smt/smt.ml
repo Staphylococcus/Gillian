@@ -136,6 +136,20 @@ let number_to_integer value =
     (real_to_int
        (fp_un "fp.to_real" (app_ "fp.roundToIntegral" [ atom "RTZ"; value ])))
 
+(* Explicit integer counts may span the whole Array index range. Keep the
+   existing small conversion and UTF-16 indexing encoder unchanged; above that
+   interval unsigned 32-bit RTZ remains exact. Every other finite Number uses
+   the original general conversion. This selects an encoding, not input scope. *)
+let number_to_integer_count value =
+  let wide = bool_and
+      (fp_bin "fp.leq" (number_literal 65536.) value)
+      (fp_bin "fp.lt" value (number_literal 4294967296.)) in
+  ite wide
+    (app_ "bv2int"
+      [app (List [ atom "_"; atom "fp.to_ubv"; atom "32" ])
+         [ atom "RTZ"; value ]])
+    (number_to_integer value)
+
 module Variant = struct
   module type S = sig
     val name : string
@@ -1529,7 +1543,7 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       | _ when !Config.Verification.total -> ()
       | _ -> exceptf "SMT encoding: NumToInt requires a finite concrete operand");
       let>- le = get_num le in
-      let ordinary = number_to_integer le.expr in
+      let ordinary = number_to_integer_count le.expr in
       let integer = match e, le.expr with
         | Expr.BinOp (_, FPlus, Lit (Num 1.)),
           List [ Atom "fp.add"; Atom "RNE"; counter; _ ] ->
@@ -1545,7 +1559,7 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
               (fp_bin "fp.leq" (number_literal 0.) counter)
               (fp_bin "fp.lt" counter (number_literal 4294967295.)) in
             ite (bool_and integral range)
-              (num_add (number_to_integer counter) (int_k 1)) ordinary
+              (num_add (number_to_integer_count counter) (int_k 1)) ordinary
         | _ -> ordinary in
       integer >- IntType
   | IntToNum ->

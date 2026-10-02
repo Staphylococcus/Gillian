@@ -4668,6 +4668,105 @@ let literal_counter_contradiction () =
   Alcotest.(check bool) "signed zero cannot satisfy positive comparison" true
     (Option.is_none (Smt.check_sat signed_zero g))
 
+
+let integer_order_count_core () =
+  let names = Expr.LVar "#core_names" and values = Expr.LVar "#core_values" in
+  let n = Expr.LVar "#core_length" in
+  let len = Expr.UnOp (LstLen, names) and count = Expr.UnOp (NumToInt, n) in
+  let g = Gamma.init () in
+  List.iter (fun name -> Gamma.update g name Type.ListType)
+    ["#core_names"; "#core_values"];
+  Gamma.update g "#core_length" Type.NumberType;
+  let gt = Gamma.as_hashtbl g in
+  let is_int = Expr.UnOp (IsInt,n) in
+  let link = bin Equal len count in
+  let bound = bin ILessThanEqual count (Expr.int 4294967294) in
+  let position = bin KeyInsertIndex
+    (Expr.NOp (LstCat,[names; Expr.EList [Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "length"))]]))
+    (Expr.UnOp (NumberToUtf16,n)) in
+  let placement = bin Equal position len in
+  let facts = Expr.Set.of_list [
+    is_int; link; bound; placement;
+    Expr.UnOp (LstAllUtf16,names);
+    bin ILessThanEqual (Expr.int 0) len;
+    bin ILessThanEqual (Expr.int 0) count;
+    bin Equal len (Expr.UnOp (LstLen,values));
+    bin FLessThanEqual (Expr.num 0.) n;
+    bin FLessThan n (Expr.num 4294967295.);
+    not_ (bin ValueEqual n (Expr.num (-0.)));
+    not_ (bin LstContains names (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "length"))));
+    not_ (bin LstContains names (Expr.UnOp (NumberToUtf16,n)));
+  ] in
+  let saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    let core fs failed =
+      let fs = Expr.Set.add failed fs in
+      match Solver.integer_order_core fs gt failed with
+      | None -> failwith "expected original integer core"
+      | Some selected ->
+          Alcotest.(check bool) "integer core contains only original assertions" true
+            (Expr.Set.mem failed selected && Expr.Set.subset selected fs);
+          selected
+    in
+    List.iter (fun limit ->
+      let failed = bin ILessThanEqual (Expr.Lit (Int limit)) len in
+      let selected = core facts failed in
+      Alcotest.(check bool) "count core keeps both alias and bound" true
+        (Expr.Set.mem link selected && Expr.Set.mem bound selected);
+      Alcotest.(check bool) "host bound core omits unrelated scan machinery" false
+        (Expr.Set.mem placement selected);
+      Alcotest.(check bool) "original full-range list bound has native UNSAT core" true
+        (Smt.proves_unsat selected gt);
+      Alcotest.(check bool) "full entailment uses the checked bound" true
+        (Solver.check_entailment Utils.Containers.SS.empty
+           (Engine.PFS.of_list (Expr.Set.elements facts)) [not_ failed] g)
+    ) [Z.of_int 4294967295; Z.of_int max_int; Z.pred (Z.of_int max_int)];
+    List.iter (fun failed ->
+      let selected = core facts failed in
+      Alcotest.(check bool) "position core retains actual placement equality" true
+        (Expr.Set.mem placement selected);
+      Alcotest.(check bool) "actual insertion position guard has native UNSAT core" true
+        (Smt.proves_unsat selected gt)
+    ) [bin ILessThan position (Expr.int 0);
+       bin ILessThanEqual (bin IPlus len (Expr.int 2)) position];
+    (* Small bounds give actual SAT models, without asking the solver to
+       materialize a host-sized concrete list for a negative control. *)
+    let small_bound = bin ILessThanEqual count (Expr.int 3) in
+    let failed = bin ILessThanEqual (Expr.int 4) len in
+    let small = facts |> Expr.Set.remove bound |> Expr.Set.remove placement
+      |> Expr.Set.add small_bound in
+    List.iter (fun omitted ->
+      let selected = core (Expr.Set.remove omitted small) failed in
+      Alcotest.(check bool) "omitting count alias or bound permits native SAT" true
+        (Option.is_some (Smt.check_sat selected gt))
+    ) [link; small_bound];
+    let full = Expr.Set.add failed small in
+    List.iter (fun name ->
+      let missing = Hashtbl.copy gt in
+      Hashtbl.remove missing name;
+      let selected = Solver.integer_order_core full missing failed in
+      Alcotest.(check bool) "missing original count/list type cannot prove UNSAT" false
+        (match selected with Some selected -> Smt.proves_unsat selected missing | None -> false)
+    ) ["#core_names"; "#core_length"];
+    let selected = core (Expr.Set.remove is_int small) failed in
+    Alcotest.(check bool) "omitting integrality leaves a native countermodel" true
+      (Option.is_some (Smt.check_sat selected gt));
+    let partial = Expr.UnOp (LstLen,Expr.LstSub(names,Expr.int (-1),Expr.int 1)) in
+    let unsafe = bin ILessThanEqual partial (Expr.int 3) in
+    Alcotest.(check bool) "a partial length cannot authorize a core" true
+      (Option.is_none (Solver.integer_order_core (Expr.Set.singleton unsafe) gt unsafe));
+    let flag = Expr.LVar "#core_flag" in
+    Gamma.update g "#core_flag" Type.BooleanType;
+    let premises = [bin ILessThanEqual count (Expr.int 3); is_int; flag;
+      not_ (bin Equal count (Expr.int 2))] in
+    let goal = bin Or (bin ILessThan count (Expr.int 0)) flag in
+    Alcotest.(check bool) "inconclusive integer subset retains complete fallback" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+        (Engine.PFS.of_list premises) [goal] g);
+    Printf.printf "INTEGER_ORDER_COUNT_CORE_NATIVE_CONTROLS_COMPLETE\n%!"
+  )
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -4773,4 +4872,6 @@ let tests =
       (with_total natural_counter_query);
     Alcotest.test_case "original literal counter contradiction core" `Quick
       (with_total literal_counter_contradiction);
+    Alcotest.test_case "integer count bounds retain original aliases" `Quick
+      (with_total integer_order_count_core);
   ]

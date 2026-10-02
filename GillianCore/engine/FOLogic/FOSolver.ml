@@ -128,6 +128,62 @@ let sat ~matching ~pfs ~gamma formula : bool =
 
 (** ************ * ENTAILMENT * * ************ **)
 
+(* Original integer order facts can retain a count alias and its bound while
+   omitting unrelated descriptor/string constraints. This is only a weaker
+   native UNSAT query: no fact, integer witness or bound is manufactured. *)
+let integer_order_core formulae gamma goal =
+  let typed name typ = Hashtbl.find_opt gamma name = Some typ in
+  let observes_scan =
+    let found = ref false in
+    let visitor =
+      object
+        inherit [_] Visitors.iter as super
+        method! visit_expr () e =
+          (match e with BinOp (_, KeyInsertIndex, _) -> found := true | _ -> ());
+          super#visit_expr () e
+      end
+    in
+    visitor#visit_expr () goal;
+    !found
+  in
+  let rec key = function
+    | Expr.Lit (Utf16String _) -> true
+    | LVar name -> typed name Type.Utf16Type
+    | UnOp (NumberToUtf16, LVar name) -> typed name Type.NumberType
+    | _ -> false
+  and keys = function
+    | Expr.LVar name as e ->
+        typed name Type.ListType
+        && Expr.Set.mem (Expr.UnOp (LstAllUtf16, e)) formulae
+    | EList xs -> List.for_all key xs
+    | NOp (LstCat, xs) -> List.for_all keys xs
+    | _ -> false
+  in
+  let rec integer = function
+    | Expr.Lit (Int _) -> true
+    | LVar name -> typed name Type.IntType
+    | UnOp (LstLen, LVar name) -> typed name Type.ListType
+    | UnOp (NumToInt, (LVar name as n)) ->
+        typed name Type.NumberType
+        && Expr.Set.mem (Expr.UnOp (IsInt, n)) formulae
+    | BinOp (a, (IPlus | IMinus), b) -> integer a && integer b
+    | BinOp (xs, KeyInsertIndex, k) -> observes_scan && keys xs && key k
+    | _ -> false
+  in
+  let rec order = function
+    | Expr.BinOp (a, (Equal | ILessThan | ILessThanEqual), b) ->
+        integer a && integer b
+    | UnOp (Not, e) -> order e
+    | _ -> false
+  in
+  if
+    !Config.Verification.total && not !Config.under_approximation
+    && Expr.Set.mem goal formulae && order goal
+  then
+    let core = Expr.Set.filter order formulae in
+    if Expr.Set.equal core formulae then None else Some core
+  else None
+
 let check_entailment
     ?(matching = false)
     (existentials : SS.t)
@@ -462,7 +518,13 @@ let check_entailment
          a rounded length alias may drop the alias that witnesses UNSAT, so its
          optional query is skipped and the complete fallback below is kept. *)
       let model =
-        if length_zero_proved () then None
+        if
+          SS.is_empty existentials
+          && (match integer_order_core formulae gamma_tbl right_f with
+             | Some core -> Smt.proves_unsat core gamma_tbl
+             | None -> false)
+        then None
+        else if length_zero_proved () then None
         else if utf16_code_order_proved () then None
         else if
           contained_omission

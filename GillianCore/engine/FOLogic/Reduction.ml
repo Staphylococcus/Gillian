@@ -958,6 +958,122 @@ let reduce_dense_key_step pfs gamma keys key =
 (** Reduction of logical expressions
     - gamma is used for:
     - pfs are used for: Car, Cdr, SetDiff *)
+(* Numeric equality can differ only in the sign of zero. Integer truncation
+   identifies those zeros, and otherwise equal Number atoms convert identically.
+   Explicit integrality proves both conversions finite before any later identity
+   can collapse them; missing domain/type facts retain the original expression.
+   Canonicalize only originally typed atoms: keep the conversion itself so its
+   finite-domain obligation survives, and never substitute a partial operand. *)
+let reduce_integer_count_alias pfs gamma operand =
+  let typed = function
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some Type.NumberType
+    | _ -> false in
+  if not !Config.Verification.total || not (typed operand)
+     || not (PFS.mem pfs (Expr.UnOp (IsInt, operand))) then None
+  else
+    let alias = List.fold_left (fun chosen e ->
+      if typed e && PFS.mem pfs (Expr.UnOp (IsInt, e))
+         && Expr.compare e chosen < 0 then e else chosen)
+      operand (get_equal_expressions pfs operand) in
+    if Expr.equal alias operand then None
+    else Some (Expr.UnOp (NumToInt, alias))
+
+(* Concatenation is entirely evaluated before the element-type predicate.
+   Split that predicate only when every original operand is a total list/value;
+   otherwise a false prefix could conceal a failing later slice or index.
+   Consult the frozen input types, never types inferred while reducing it. *)
+let total_list_operands gamma parts =
+  let typed e = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x
+    | Lit (Constant _) -> None
+    | Lit l -> Some (Literal.type_of l)
+    | _ -> None in
+  let rec number e = typed e = Some Type.NumberType || match e with
+    | Expr.BinOp (a, FPlus, b) -> number a && number b
+    | _ -> false in
+  let rec value e = Option.is_some (typed e) || match e with
+    | Expr.EList xs -> List.for_all value xs
+    | UnOp (NumberToUtf16, n) -> number n
+    | NOp (LstCat, xs) -> List.for_all list xs
+    | _ -> false
+  and list e = typed e = Some Type.ListType || match e with
+    | Expr.EList xs -> List.for_all value xs
+    | NOp (LstCat, xs) -> List.for_all list xs
+    | _ -> false in
+  List.for_all list parts
+
+let reduce_utf16_list_cat gamma parts =
+  if !Config.Verification.total && total_list_operands gamma parts then
+    Some (Expr.conjunct
+      (List.map (fun e -> Expr.UnOp (LstAllUtf16, e)) parts))
+  else None
+
+(* Inserting at a checked prefix length places the value before its explicit
+   tail. Equal length witnesses may come from the separate key/descriptor
+   sequences; they do not identify those sequences or create heap ownership.
+   Every discarded position/operand must be originally typed and total. *)
+let reduce_insert_before_tail pfs gamma xs position value =
+  let typed e t = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some t
+    | Lit (Constant _) -> false
+    | Lit l -> Literal.type_of l = t
+    | _ -> false in
+  let key e = typed e Type.Utf16Type || match e with
+    | Expr.UnOp (NumberToUtf16,n) -> typed n Type.NumberType
+    | _ -> false in
+  let rec keys e = match e with
+    | Expr.EList es -> List.for_all key es
+    | NOp (LstCat,es) -> List.for_all keys es
+    | _ -> typed e Type.ListType && PFS.mem pfs (Expr.UnOp (LstAllUtf16,e)) in
+  let count = function
+    | Expr.UnOp (LstLen,e) -> typed e Type.ListType
+    | _ -> false in
+  let total_position = typed position Type.IntType || count position ||
+    match position with
+    | Expr.BinOp (ks,KeyInsertIndex,k) -> keys ks && key k
+    | _ -> false in
+  match xs with
+  | Expr.NOp (LstCat,[prefix;EList tail])
+    when !Config.Verification.total && typed prefix Type.ListType &&
+      total_position && total_list_operands gamma [xs;Expr.EList [value]] ->
+      let len=Expr.UnOp (LstLen,prefix) in
+      let lengths=List.filter count (len :: get_equal_expressions pfs len) in
+      let positions=position :: get_equal_expressions pfs position in
+      if List.exists (fun p -> List.exists (Expr.equal p) lengths) positions then
+        Some (Expr.NOp (LstCat,[prefix;Expr.EList (value::tail)]))
+      else None
+  | _ -> None
+
+(* A known prefix length locates a literal tail element exactly. The count may
+   name a separate originally typed list whose length is explicitly equal;
+   this is a boundary lookup, never an equality between their contents. *)
+let reduce_prefix_boundary_nth pfs gamma xs index =
+  let typed e t = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some t
+    | _ -> false in
+  let count = function
+    | Expr.UnOp (LstLen,e) -> typed e Type.ListType
+    | _ -> false in
+  let offset = function
+    | e when count e -> Some (e,Z.zero)
+    | Expr.BinOp (e,IPlus,Lit (Int n)) when count e -> Some (e,n)
+    | Expr.BinOp (Lit (Int n),IPlus,e) when count e -> Some (e,n)
+    | Expr.BinOp (e,IMinus,Lit (Int n)) when count e -> Some (e,Z.neg n)
+    | _ -> None in
+  match xs with
+  | Expr.NOp (LstCat,[prefix;EList tail])
+    when !Config.Verification.total && typed prefix Type.ListType &&
+      (typed index Type.IntType || Option.is_some (offset index)) &&
+      total_list_operands gamma [xs] ->
+      let len=Expr.UnOp (LstLen,prefix) in
+      let lengths=List.filter count (len :: get_equal_expressions pfs len) in
+      List.find_map (fun candidate ->
+        match offset candidate with
+        | Some (n,k) when List.exists (Expr.equal n) lengths && Z.sign k>=0 &&
+            Z.lt k (Z.of_int (List.length tail)) -> Some (List.nth tail (Z.to_int k))
+        | _ -> None) (index :: get_equal_expressions pfs index)
+  | _ -> None
+
 let rec reduce_lexpr_loop
     ?(matching = false)
     ?(reduce_lvars = false)
@@ -967,7 +1083,7 @@ let rec reduce_lexpr_loop
     (pfs : PFS.t)
     (gamma : Type_env.t)
     (le : Expr.t) =
-  (* Only the new scan shortcut consults this frozen input view. Ordinary
+  (* Only the guarded scan/count/typing shortcuts consult this frozen input view. Ordinary
      reduction keeps its existing mutable gamma and inference behavior. *)
   let input_gamma = match input_gamma with
     | Some original -> original
@@ -1011,6 +1127,17 @@ let rec reduce_lexpr_loop
 
   let le =
     match le with
+    | UnOp (NumToInt, operand) ->
+        Option.value ~default:le
+          (reduce_integer_count_alias pfs input_gamma operand)
+    | UnOp (LstAllUtf16, NOp (LstCat, parts)) ->
+        Option.value ~default:le (reduce_utf16_list_cat input_gamma parts)
+    | NOp (LstInsert,[xs;position;value]) ->
+        Option.value ~default:le
+          (reduce_insert_before_tail pfs input_gamma xs position value)
+    | BinOp (xs,LstNth,index) ->
+        Option.value ~default:le
+          (reduce_prefix_boundary_nth pfs input_gamma xs index)
     | BinOp (left, ((ILessThan | ILessThanEqual) as op), right) ->
         Option.value ~default:le
           (reduce_key_insert_bound pfs gamma left op right)

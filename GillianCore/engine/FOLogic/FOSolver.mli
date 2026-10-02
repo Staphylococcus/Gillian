@@ -23,6 +23,11 @@ val sat :
 (** [check_entailment existentials lpfs rpfs gamma] checks whether or not the
     entailment << ∃ [existentials]. [lpfs] => [rpfs] >> holds under the typing
     environment [gamma]. *)
+(** Select only original, typed integer order facts for a sufficient UNSAT
+    query. None leaves ordinary entailment unchanged; no input is mutated. *)
+val integer_order_core :
+  Expr.Set.t -> (string, Type.t) Hashtbl.t -> Expr.t -> Expr.Set.t option
+
 val check_entailment :
   ?matching:bool ->
   Utils.Containers.SS.t ->
