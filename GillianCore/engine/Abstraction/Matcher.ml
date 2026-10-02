@@ -877,9 +877,19 @@ module Make (State : SState.S) :
       | remaining -> ([], remaining)
     in
     let types, remaining = preserve_types sas in
+    (* Pure post equalities also identify closure/environment witnesses before
+       their cells can be materialised at fresh locations. Definedness has
+       already been checked independently above; retain its original position. *)
+    let facts, remaining =
+      List.partition
+        (function
+          | Asrt.Pure _ as a -> Option.is_none (Asrt.as_definedness a)
+          | _ -> false)
+        remaining
+    in
     let metadata, remaining = List.partition known_metadata remaining in
     produce_asrt_list ~track_infeasible astate subst
-      (types @ metadata @ remaining)
+      (types @ facts @ metadata @ remaining)
 
   let produce_posts (state : t) (subst : SVal.SESubst.t) (asrts : Asrt.t list) :
       t list =
