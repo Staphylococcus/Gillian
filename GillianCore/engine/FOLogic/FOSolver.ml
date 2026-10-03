@@ -347,14 +347,14 @@ let check_entailment_simplified
       (* Uint32 goals may retain costly formatter facts while a weakened
          conjunction is satisfiable. Skip these optional sufficient probes;
          the complete counterquery below still decides every such goal. *)
-      let observes_uint32 e =
+      let observes_uint32 ?(operand = fun _ -> true) e =
         let found = ref false in
         let visitor =
           object
             inherit [_] Visitors.iter as super
             method! visit_expr () e =
               (match e with
-              | Expr.UnOp (ToUint32Op, _) -> found := true
+              | Expr.UnOp (ToUint32Op, e) when operand e -> found := true
               | _ -> ());
               super#visit_expr () e
           end
@@ -362,7 +362,27 @@ let check_entailment_simplified
         visitor#visit_expr () e;
         !found
       in
-      let uint32_goal = observes_uint32 right_f in
+      (* Plain count goals can retain the same Uint32 formatter constraints.
+         Require a goal variable with the original integral native-count bound;
+         unrelated UTF16/index conversions retain their sufficient proof path. *)
+      let count_variable name =
+        let n = Expr.LVar name in
+        Hashtbl.find_opt gamma_tbl name = Some Type.NumberType
+        && SS.mem name (Expr.lvars right_f)
+        && Expr.Set.mem (Expr.UnOp (IsInt, n)) formulae
+        && Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThanEqual, n)) formulae
+        && Expr.Set.mem (Expr.BinOp (n, FLessThan, Expr.num 4294967295.)) formulae
+      in
+      let rec count_operand = function
+        | Expr.LVar name -> count_variable name
+        | Expr.BinOp (e, (FPlus | FMinus), Lit (Num _))
+        | Expr.BinOp (Lit (Num _), FPlus, e) -> count_operand e
+        | _ -> false
+      in
+      let uint32_query =
+        observes_uint32 right_f
+        || Expr.Set.exists (observes_uint32 ~operand:count_operand) formulae
+      in
       let contained =
         if
           !Config.Verification.total && SS.is_empty existentials
@@ -547,18 +567,18 @@ let check_entailment_simplified
         else if utf16_code_order_proved () then None
         else if
           contained_omission
-          && not uint32_goal
+          && not uint32_query
           && (not (Expr.Set.exists observes_utf16_length contained))
           && Smt.proves_unsat contained gamma_tbl
         then None
         else if
           numeric_omission
-          && not uint32_goal
+          && not uint32_query
           && (numeric_pieces_proved () || Smt.proves_unsat numeric gamma_tbl)
         then None
         else if
           useful_omission
-          && not uint32_goal
+          && not uint32_query
           (* A pure-Number query already has the complete numeric path. A
              focused subset can discard its transitive integrality/bounds. *)
           && (not (Expr.Set.for_all number_variables formulae))

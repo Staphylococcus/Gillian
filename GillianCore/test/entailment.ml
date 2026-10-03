@@ -4796,8 +4796,24 @@ let uint32_alias_complete_query () =
       (Solver.check_entailment Utils.Containers.SS.empty
         (Engine.PFS.of_list (Expr.Set.elements facts)) [goal] g) in
   let before = Expr.Set.elements facts in
+  let module L = Logging in
+  L.Mode.set_mode (Enabled Normal);
+  L.initialize [ L.file_reporter ];
+  Fun.protect
+    ~finally:(fun () ->
+      L.wrap_up ();
+      L.initialize [];
+      L.Mode.set_mode (Enabled Verbose))
+    (fun () ->
   check "Uint32 same-length false goal retains a complete SAT witness" false facts goal;
   check "Uint32 same-length ordering remains proved" true facts (not_ goal);
+  let plain_goal = bin Equal
+    (bin FPlus (Expr.LVar "#uint32_length") (Expr.num 1.))
+    (Expr.LVar "#uint32_count") in
+  check "Uint32 context with plain false goal retains a complete SAT witness"
+    false facts plain_goal;
+  check "Uint32 context with plain goal proves the original count separation"
+    true facts (not_ plain_goal);
   let zero = bin ValueEqual (Expr.LVar "#uint32_count") (Expr.num (-0.)) in
   check "Uint32 signed-zero alias ordering remains proved" true
     (Expr.Set.add zero facts) (not_ goal);
@@ -4806,7 +4822,7 @@ let uint32_alias_complete_query () =
   check "missing length alias cannot prove the ordering" false no_alias (not_ goal);
   Alcotest.(check bool) "Uint32 eligibility leaves original facts unchanged" true
     (before = Expr.Set.elements facts);
-  Printf.printf "UINT32_COMPLETE_QUERY_CONTROLS_FINISHED\n%!"
+  Printf.printf "UINT32_COMPLETE_QUERY_CONTROLS_FINISHED\n%!")
 
 let tests =
   [
