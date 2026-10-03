@@ -344,6 +344,25 @@ let check_entailment_simplified
         visitor#visit_expr () e;
         !found
       in
+      (* Uint32 goals may retain costly formatter facts while a weakened
+         conjunction is satisfiable. Skip these optional sufficient probes;
+         the complete counterquery below still decides every such goal. *)
+      let observes_uint32 e =
+        let found = ref false in
+        let visitor =
+          object
+            inherit [_] Visitors.iter as super
+            method! visit_expr () e =
+              (match e with
+              | Expr.UnOp (ToUint32Op, _) -> found := true
+              | _ -> ());
+              super#visit_expr () e
+          end
+        in
+        visitor#visit_expr () e;
+        !found
+      in
+      let uint32_goal = observes_uint32 right_f in
       let contained =
         if
           !Config.Verification.total && SS.is_empty existentials
@@ -528,15 +547,18 @@ let check_entailment_simplified
         else if utf16_code_order_proved () then None
         else if
           contained_omission
+          && not uint32_goal
           && (not (Expr.Set.exists observes_utf16_length contained))
           && Smt.proves_unsat contained gamma_tbl
         then None
         else if
           numeric_omission
+          && not uint32_goal
           && (numeric_pieces_proved () || Smt.proves_unsat numeric gamma_tbl)
         then None
         else if
           useful_omission
+          && not uint32_goal
           (* A pure-Number query already has the complete numeric path. A
              focused subset can discard its transitive integrality/bounds. *)
           && (not (Expr.Set.for_all number_variables formulae))

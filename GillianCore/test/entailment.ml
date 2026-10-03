@@ -4767,6 +4767,47 @@ let integer_order_count_core () =
     Printf.printf "INTEGER_ORDER_COUNT_CORE_NATIVE_CONTROLS_COMPLETE\n%!"
   )
 
+let uint32_alias_complete_query () =
+  (* Original AP_push query171 premises: formatter links and signed-zero-safe
+     conversion facts must stay with the complete counterquery. *)
+  let g = Gamma.init () in
+  List.iter (fun n -> Gamma.update g n Type.NumberType)
+    ["#uint32_count"; "#uint32_length"];
+  Gamma.update g "#uint32_values" Type.ListType;
+  let facts = parse_gil_set [
+    "(is_int #uint32_count)";
+    "(0. <= #uint32_count)";
+    "(#uint32_count < 4294967295.)";
+    "(#uint32_length == #uint32_count)";
+    "((num_to_int #uint32_count) v== #uint32_count)";
+    "((num_to_uint32 #uint32_count) v== (#uint32_count + 0.))";
+    "((num_to_uint32 (#uint32_count + 0.)) v== (#uint32_count + 0.))";
+    "((num_to_uint32 (#uint32_count + 1.)) v== (#uint32_count + 1.))";
+    "(((num_to_uint32 (#uint32_count + 0.)) + 1.) v== (#uint32_count + 1.))";
+    "((num_to_utf16 (num_to_uint32 (#uint32_count + 0.))) == (num_to_utf16 #uint32_count))";
+    "((num_to_utf16 (num_to_uint32 (#uint32_length + 0.))) == (num_to_utf16 #uint32_length))";
+    "(0i i<= (l-len #uint32_values))";
+  ] in
+  let goal = bin FLessThan
+    (Expr.UnOp (ToUint32Op, bin FPlus (Expr.LVar "#uint32_length") (Expr.num 0.)))
+    (Expr.UnOp (ToUint32Op, Expr.LVar "#uint32_count")) in
+  let check name expected facts goal =
+    Alcotest.(check bool) name expected
+      (Solver.check_entailment Utils.Containers.SS.empty
+        (Engine.PFS.of_list (Expr.Set.elements facts)) [goal] g) in
+  let before = Expr.Set.elements facts in
+  check "Uint32 same-length false goal retains a complete SAT witness" false facts goal;
+  check "Uint32 same-length ordering remains proved" true facts (not_ goal);
+  let zero = bin ValueEqual (Expr.LVar "#uint32_count") (Expr.num (-0.)) in
+  check "Uint32 signed-zero alias ordering remains proved" true
+    (Expr.Set.add zero facts) (not_ goal);
+  let alias = bin Equal (Expr.LVar "#uint32_length") (Expr.LVar "#uint32_count") in
+  let no_alias = Expr.Set.remove alias facts in
+  check "missing length alias cannot prove the ordering" false no_alias (not_ goal);
+  Alcotest.(check bool) "Uint32 eligibility leaves original facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Printf.printf "UINT32_COMPLETE_QUERY_CONTROLS_FINISHED\n%!"
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -4874,4 +4915,6 @@ let tests =
       (with_total literal_counter_contradiction);
     Alcotest.test_case "integer count bounds retain original aliases" `Quick
       (with_total integer_order_count_core);
+    Alcotest.test_case "Uint32 aliases retain complete counterqueries" `Quick
+      (with_total uint32_alias_complete_query);
   ]
