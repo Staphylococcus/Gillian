@@ -213,11 +213,70 @@ let javascript_invariant_binders () =
         "non-invariant program binders remain forbidden" true rejected)
     [ "assert (True) [bind: x_counter]"; "apply missing() [bind: x_counter]" ]
 
+let parse_loop text =
+  let file = Filename.temp_file "jsil-loop-rank-" ".jsil" in
+  let prog =
+    Fun.protect
+      ~finally:(fun () -> Sys.remove file)
+      (fun () ->
+        let out = open_out file in
+        output_string out
+          ("proc loop(xs) { " ^ text ^ "; ret := true; return };");
+        close_out out;
+        Parsing.parse_jsil_eprog_from_file file)
+  in
+  let proc = Option.get (Jsil_syntax.EProg.get_proc prog "loop") in
+  match proc.body.(0) with
+  | _, _, Jsil_syntax.LabCmd.LLogic (Jsil_syntax.LCmd.SL cmd) -> cmd
+  | _ -> Alcotest.fail "expected a loop invariant"
+
+let integer_loop_length () =
+  let original =
+    parse_loop
+      "invariant (types(xs:List)) [bind: xs] variant(l-len-int xs)"
+  in
+  (match original with
+  | Jsil_syntax.SLCmd.InvariantListLength (_, [ "xs" ], "xs") -> ()
+  | _ -> Alcotest.fail "exact loop measure lost its distinct syntax");
+  let recovered = parse_loop (Format.asprintf "%a" Jsil_syntax.SLCmd.pp original) in
+  Alcotest.(check bool) "loop syntax and binders roundtrip" true
+    (original = recovered);
+  let rank = function
+    | SLCmd.Invariant (_, _, rank) -> rank
+    | _ -> Alcotest.fail "expected lowered invariant"
+  in
+  check_expr "exact loop length has no Number conversion"
+    (Some (Expr.UnOp (LstLen, Expr.PVar "xs")))
+    (rank (Lower.jsil2gil_slcmd recovered));
+  let numeric = parse_loop "invariant (types(xs:List)) variant(l-len xs)" in
+  check_expr "ordinary loop length still converts to Number"
+    (Some (Expr.UnOp (IntToNum, Expr.UnOp (LstLen, Expr.PVar "xs"))))
+    (rank (Lower.jsil2gil_slcmd numeric));
+  let absent = parse_loop "invariant (types(xs:List))" in
+  check_expr "unranked loop remains unranked" None
+    (rank (Lower.jsil2gil_slcmd absent));
+  List.iter
+    (fun suffix ->
+      let rejected =
+        try
+          ignore (parse_loop ("invariant (True) " ^ suffix));
+          false
+        with Failure _ -> true
+      in
+      Alcotest.(check bool) "malformed exact loop rank rejected" true rejected)
+    [
+      "variant(l-len-int)";
+      "variant(l-len-int #xs)";
+      "variant(l-len-int (xs))";
+      "variant(l-len-int xs + 1)";
+    ]
+
 let () =
   Alcotest.run "JSIL procedure variants"
     [
       ( "frontend",
         [
+          Alcotest.test_case "exact integer loop length" `Quick integer_loop_length;
           Alcotest.test_case "JavaScript invariant binders" `Quick
             javascript_invariant_binders;
           Alcotest.test_case "Boolean integer rank" `Quick boolean_integer_rank;

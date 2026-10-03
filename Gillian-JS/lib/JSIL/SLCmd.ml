@@ -18,6 +18,8 @@ type t =
   | ApplyLem of string * Expr.t list * string list  (** Apply lemma *)
   | SepAssert of Asrt.t * string list  (** Assert *)
   | Invariant of Asrt.t * string list * Expr.t option  (** Invariant *)
+  | InvariantListLength of Asrt.t * string list * string
+      (** Exact List-length loop measure; proof syntax only. *)
 
 let pp_folding_info =
   let pp_ui f (v, le) = Fmt.pf f "(%s := %a)" v Expr.pp le in
@@ -56,3 +58,6 @@ let pp fmt (lcmd : t) : unit =
       Fmt.pf fmt "invariant %a %a%a" (Fmt.parens Asrt.pp) a pp_binders binders
         (Fmt.option (fun fmt e -> Fmt.pf fmt " variant(%a)" Expr.pp e))
         rank
+  | InvariantListLength (a, binders, param) ->
+      Fmt.pf fmt "invariant %a %a variant(l-len-int %s)" (Fmt.parens Asrt.pp) a
+        pp_binders binders param

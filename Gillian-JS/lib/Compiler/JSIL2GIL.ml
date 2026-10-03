@@ -144,6 +144,9 @@ let jsil2gil_slcmd (slcmd : SLCmd.t) : GSLCmd.t =
   | SepAssert (a, xs) -> SepAssert (jsil2gil_asrt a, xs)
   | Invariant (a, xs, rank) ->
       Invariant (jsil2gil_asrt a, xs, Option.map jsil2gil_expr rank)
+  | InvariantListLength (a, xs, param) ->
+      Invariant
+        (jsil2gil_asrt a, xs, Some (Expr.UnOp (LstLen, Expr.PVar param)))
 
 let rec jsil2gil_lcmd (lcmd : LCmd.t) : GLCmd.t =
   let f = jsil2gil_lcmd in
