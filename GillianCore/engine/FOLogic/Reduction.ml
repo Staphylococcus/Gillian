@@ -1086,15 +1086,20 @@ let reduce_insert_after_head pfs gamma xs position value =
     (fact (Expr.BinOp (zero,ILessThanEqual,position)) &&
      fact (Expr.UnOp (Not,Expr.BinOp (position,Equal,zero)))) in
   if not !Config.Verification.total || not (typed position Type.IntType) ||
-     not (total_list_operands gamma [xs;value]) then None
+     not (total_list_operands gamma [xs;Expr.EList [value]]) then None
   else
     List.find_map (function
       | Expr.NOp (LstCat,[EList [head];tail]) as cons
         when typed tail Type.ListType && total_list_operands gamma [cons] &&
           positive &&
           (fact (Expr.BinOp (position,ILessThanEqual,Expr.UnOp (LstLen,xs))) ||
-           fact (Expr.BinOp (position,ILessThanEqual,
-             Expr.BinOp (Expr.one_i,IPlus,Expr.UnOp (LstLen,tail))))) ->
+           List.exists (function
+             | Expr.UnOp (LstLen,lst) as length when typed lst Type.ListType ->
+                 fact (Expr.BinOp (position,ILessThanEqual,
+                   Expr.BinOp (Expr.one_i,IPlus,length)))
+             | _ -> false)
+             (Expr.UnOp (LstLen,tail) ::
+               get_equal_expressions pfs (Expr.UnOp (LstLen,tail)))) ->
           Some (Expr.NOp (LstCat,[Expr.EList [head];
             Expr.NOp (LstInsert,[tail;
               Expr.BinOp (position,IMinus,Expr.one_i);value])]))

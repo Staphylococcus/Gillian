@@ -2059,6 +2059,29 @@ let checked_cons_insertion () =
       Reduction.reduce_lexpr ~gamma:(Gamma.copy g) ~pfs:(context facts) e in
     Alcotest.(check bool) "positive integer insertion follows the owned cons witness"
       true (Expr.equal(reduce term)(reduce wanted));
+    List.iter (fun inserted ->
+      let g=gamma () in
+      Gamma.remove g "#cons_head";
+      Gamma.remove g "#cons_value";
+      Gamma.update g "#cons_head" Utf16Type;
+      Gamma.update g "#cons_value" (Literal.type_of inserted);
+      Alcotest.(check bool) "typed scalar insertion follows a UTF16 cons witness"
+        true (Expr.equal(reduce ~g term)(reduce ~g wanted));
+      let visitor=object inherit [_] Visitors.endo
+        method! visit_LVar () _ name=Expr.PVar name end in
+      List.iter (fun index ->
+        let h=literal [0xd800] and rest=[literal [97];literal [0]] in
+        let store=Engine.CExprEval.CStore.init [
+          "#cons_head",h;"#cons_tail",Literal.LList rest;
+          "#cons_xs",Literal.LList(h::rest);"#cons_index",Literal.Int(Z.of_int index);
+          "#cons_value",inserted] in
+        let eval e=Engine.CExprEval.evaluate_expr store(visitor#visit_expr () e) in
+        Alcotest.(check bool) "unboxed insertion agrees with concrete evaluation"
+          true (Literal.equal(eval term)(eval(reduce ~g term))) ) [1;2;3];
+      Gamma.remove g "#cons_value";
+      Alcotest.(check bool) "an untyped inserted scalar cannot use the shortcut"
+        true (match reduce ~g term with Expr.NOp(LstInsert,_) -> true | _ -> false)
+    ) [literal [0xdc00];Literal.Num(-0.);Literal.Num nan;Literal.Bool false;Literal.Null];
     List.iter(fun positivity ->
       let fs=[link;positivity;upper] in
       Alcotest.(check bool) "either explicit strict-positive integer form is sufficient"
@@ -2068,6 +2091,21 @@ let checked_cons_insertion () =
     let fs=[link;lower;nonzero;original_upper] in
     Alcotest.(check bool) "the original list bound is sufficient without a length alias"
       true (Expr.equal(reduce ~facts:fs term)(reduce ~facts:fs wanted));
+    let other=Expr.LVar "#cons_other" in
+    let g=gamma () in Gamma.update g "#cons_other" ListType;
+    let equal_length=eq (len tail) (len other) in
+    let other_upper=bin ILessThanEqual i (bin IPlus (Expr.int 1) (len other)) in
+    let fs=[link;lower;nonzero;equal_length;other_upper] in
+    Alcotest.(check bool) "an originally typed equal-length list carries the same bound"
+      true (Expr.equal(reduce ~g ~facts:fs term)(reduce ~g ~facts:fs wanted));
+    List.iter (fun omitted ->
+      Alcotest.(check bool) "both the length equality and its upper bound are required"
+        true (match reduce ~g ~facts:(List.filter(fun f -> not(Expr.equal f omitted)) fs) term with
+          Expr.NOp(LstInsert,_) -> true | _ -> false)) [equal_length;other_upper];
+    Gamma.remove g "#cons_other";
+    Alcotest.(check bool) "an equal-length alias cannot borrow a missing original type"
+      true (try not(Expr.equal(reduce ~g ~facts:fs term)(reduce ~g ~facts:fs wanted))
+        with Reduction.ReductionException _ -> true);
     List.iteri(fun omitted _ ->
       Alcotest.(check bool) "every cons/positivity/bound premise is required"
         true (match reduce ~facts:(List.filteri(fun n _ -> n<>omitted) facts) term with
