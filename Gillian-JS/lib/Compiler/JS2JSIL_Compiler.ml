@@ -5579,12 +5579,10 @@ and translate_statement tr_ctx e =
       next0:  x4 := "i__toObject" (x2_v) with err                     4.  Otherwise, convert whatever we have to an object
           xlf := "i__getAllEnumerableFields" (x4)  with err               Put all of its enumerable properties (protochain included) in xlf
           xf  := getFields (xlf)                              Get all of those properties
-          len := l-len (xf)                               Get the number of properties
-          x_c := 0;                                   Initialise counter
       head:   x_ret_1 := PHI(x_ret_0, x_ret_3)                        Setup return value
-          x_c_1 := PSI(x_c, x_c_2);                           Setup counter
-          goto [x_c_1 < len] body end_loop                      6.  Are we done?
-      body:   xp := l-nth (xf, x_c_1)                               6a. Get the nth property
+          remaining := PHI(xf, remaining_next);                  Setup remaining keys
+          goto [remaining != {{}}] body end_loop                 6.  Are we done?
+      body:   xp := car remaining                                6a. Get the next property
           xl := [xlf, xp];                                  6a. Get the location of where it should be
           xhf := hasField (xl, xp)                                        6a. Understand if it's still there!
           goto [xhf] next1 next3                                6a. And jump accordingly
@@ -5596,7 +5594,7 @@ and translate_statement tr_ctx e =
           goto [ not (x_ret_2 = empty) ] next2 next3
       next2:    skip
       next3:  x_ret_3 := PHI(x_ret_1, x_ret_2)
-      next4:  x_c_2 := x_c_1 + 1
+      next4:  remaining_next := cdr remaining
           goto head
       end_loop: x_ret_4 := PHI(x_ret_1, x_ret_1, break_vars)
               goto [ x_ret_4 = empty ] next5 next6
@@ -5681,37 +5679,30 @@ and translate_statement tr_ctx e =
       let xf = fresh_var () in
       let cmd_xfr_ass = LBasic (GetFields (xf, PVar xlf)) in
 
-      (* let xf = fresh_var () in
-         let cmd_xf_ass = LBasic (Assignment (xf, UnOp (SetToList, PVar xfr))) in *)
-
-      (* len := l-len (xf)   *)
-      let len = fresh_var () in
-      let cmd_ass_len = LBasic (Assignment (len, UnOp (LstLen, PVar xf))) in
-
-      (* x_c := 0 *)
-      let x_c = fresh_var () in
-      let cmd_ass_xc = LBasic (Assignment (x_c, Lit (Num 0.))) in
-
-      (*   x_ret_1 := PHI(x_ret_0, x_ret_3)  *)
-      let x_c_1 = fresh_var () in
-      let x_c_2 = fresh_var () in
+      (* Internal enumeration consumes a List, not a binary64 counter. Adding
+         one to a Number stops advancing at 2^53; the keys are not JS Numbers. *)
+      let remaining = fresh_var () in
+      let remaining_next = fresh_var () in
       let cmd_ass_xret1 =
         LPhiAssignment
           [
             (x_ret_1, [ PVar x_ret_0; PVar x_ret_3 ]);
-            (x_c_1, [ PVar x_c; PVar x_c_2 ]);
+            (remaining, [ PVar xf; PVar remaining_next ]);
           ]
       in
 
-      (* goto [x_c_1 < len] body end_loop  *)
-      let cmd_goto_len =
-        LGuardedGoto (BinOp (PVar x_c_1, FLessThan, PVar len), body, end_loop)
+      (* goto [remaining != {{}}] body end_loop *)
+      let cmd_goto_remaining =
+        LGuardedGoto
+          ( UnOp (Not, BinOp (PVar remaining, Equal, EList [])),
+            body,
+            end_loop )
       in
 
-      (* xp := l-nth (xf, x_c_1)  *)
+      (* xp := car remaining *)
       let xp = fresh_var () in
       let cmd_ass_xp =
-        LBasic (Assignment (xp, BinOp (PVar xf, LstNth, PVar x_c_1)))
+        LBasic (Assignment (xp, UnOp (Car, PVar remaining)))
       in
 
       (* xl := [xlf, xp]; *)
@@ -5749,9 +5740,9 @@ and translate_statement tr_ctx e =
           [ (x_ret_3, [ PVar x_ret_1; PVar x_ret_1; PVar x_ret_2 ]) ]
       in
 
-      (* x_c_2 := x_c_1 + 1 *)
-      let cmd_ass_incr =
-        LBasic (Assignment (x_c_2, BinOp (PVar x_c_1, FPlus, Lit (Num 1.))))
+      (* remaining_next := cdr remaining *)
+      let cmd_ass_advance =
+        LBasic (Assignment (remaining_next, UnOp (Cdr, PVar remaining)))
       in
 
       (*  x_ret_4 := PHI(x_ret_1, break_vars)  *)
@@ -5798,20 +5789,15 @@ and translate_statement tr_ctx e =
               (None, cmd_get_enum_fields);
               (*           xlf := "i__getAllEnumerableFields" (x4)  with err            *)
               (None, cmd_xfr_ass);
-              (* (None,          cmd_xf_ass);   *)
               (*           xf  := getFields (xlf)                                       *)
-              (None, cmd_ass_len);
-              (*           len := l-len (xf)                                            *)
-              (None, cmd_ass_xc);
-              (*           x_c := 0                                                     *)
             ]
         @ annotate_cmds head_cmds
         @ annotate_cmds
             [
-              (None, cmd_goto_len);
-              (*           goto [x_c_1 < len] body end_loop                           *)
+              (None, cmd_goto_remaining);
+              (*           goto [remaining != {{}}] body end_loop                    *)
               (Some body, cmd_ass_xp);
-              (* body:     xp := l-nth (xf, x_c_1)                                    *)
+              (* body:     xp := car remaining                                       *)
               (None, cmd_ass_xl);
               (*           xl := [xlf, xp]                                              *)
               (None, cmd_ass_hf);
@@ -5840,8 +5826,8 @@ and translate_statement tr_ctx e =
               (* next2:    skip                                                         *)
               (Some next3, cmd_phi_xret3);
               (* next3:    x_ret_3 := PHI(x_ret_1, x_ret_1, x_ret_2)                    *)
-              (Some next4, cmd_ass_incr);
-              (* next4:    x_c_2 := x_c_1 + 1                                           *)
+              (Some next4, cmd_ass_advance);
+              (* next4:    remaining_next := cdr remaining                             *)
               (None, LGoto head);
               (*           goto head                                                    *)
               (Some end_loop, cmd_phi_xret4);

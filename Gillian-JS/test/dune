@@ -1,9 +1,14 @@
 (tests
  (names utf16_tests property_order_tests proof_terms_tests ordered_fields_tests delete_object_tests)
- (modules (:standard \ jsil_variant_tests))
+ (modules (:standard \ jsil_variant_tests for_in_cursor_tests))
  (libraries semantics alcotest wtf8))
 
 (test
  (name jsil_variant_tests)
  (modules jsil_variant_tests)
  (libraries alcotest js2jsil_lib parsing jsil_syntax))
+
+(test
+ (name for_in_cursor_tests)
+ (modules for_in_cursor_tests)
+ (libraries alcotest js2jsil_lib jsil_syntax JS_Parser))
