@@ -216,7 +216,11 @@ struct
           posts
       in
       if not to_verify then
-        let pre' = SPState.to_assertions ss_pre in
+        let pre' =
+          MP.retain_precondition_guards ~original:(fst pre)
+            ~bindings:(SSubst.to_list subst)
+            (SPState.to_assertions ss_pre)
+        in
         (None, Some ((pre', snd pre), posts))
       else
         (* Step 4 - create a matching plan for the postconditions and s_test *)
@@ -269,7 +273,11 @@ struct
             in
             raise exc
         | Ok post_mp ->
-            let pre' = SPState.to_assertions ss_pre in
+            let pre' =
+              MP.retain_precondition_guards ~original:(fst pre)
+                ~bindings:(SSubst.to_list subst)
+                (SPState.to_assertions ss_pre)
+            in
             let ss_pre =
               match flag with
               (* Lemmas should not have stores when being proven *)

@@ -623,6 +623,26 @@ let ins_outs_assertion
       in
       ins_and_outs_from_lists kb (largs @ List.rev llie) lloe
 
+(* A normalized heap can use fresh abstract locations whose disequalities
+   reduce to true. Summary matching may later bind those locations to caller
+   locations, so retain the source guards over their original logical names.
+   Keep their normalization bindings too: heap export may have renamed the
+   witnesses, and exact identity must preserve signed zero and NaN. *)
+let retain_precondition_guards ~original ~bindings normalised =
+  let guards = List.filter Asrt.is_pure_asrt original in
+  let variables = Asrt.lvars guards in
+  let bindings =
+    List.filter_map
+      (fun (variable, value) ->
+        match variable with
+        | Expr.LVar name
+          when SS.mem name variables && not (Expr.equal variable value) ->
+            Some (Asrt.Pure (Expr.BinOp (variable, ValueEqual, value)))
+        | _ -> None)
+      bindings
+  in
+  normalised @ bindings @ guards
+
 let simplify_asrts ?(sorted = true) a =
   let rec aux (a : Asrt.atom) : Asrt.atom list =
     match a with

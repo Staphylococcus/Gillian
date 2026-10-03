@@ -689,6 +689,13 @@ module Make (SPState : PState.S) = struct
     in
     SESubst.init bnds'
 
+  (* Retain names eliminated by the final state simplification as well as
+     earlier bindings, whose values must follow that same simplification. *)
+  let exported_subst subst final_subst =
+    let exported = SESubst.copy final_subst in
+    SESubst.merge_left exported (compose_substs subst final_subst);
+    exported
+
   let normalise_core_asrts
       (store : SStore.t)
       (pfs : PFS.t)
@@ -937,7 +944,8 @@ module Make (SPState : PState.S) = struct
               gamma
           then (
             (* Step 9 -- Final simplifications - TO SIMPLIFY!!! *)
-            let _, states = SPState.simplify ~matching:true astate in
+            let final_subst, states = SPState.simplify ~matching:true astate in
+            let subst = exported_subst subst final_subst in
             let+ state = states in
             L.verbose (fun m ->
                 m "AFTER NORMALISATION: %d states: @\n%a" (List.length states)

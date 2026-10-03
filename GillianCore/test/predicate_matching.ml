@@ -430,6 +430,148 @@ let partial_list_witnesses () =
 let wrong_list_shape () =
   list_witness_case 3 2
 
+let source_precondition_guard () =
+  let env = Expr.LVar "#source_env" in
+  let normalised_loc = Expr.ALoc "normalised_env" in
+  let global = Expr.Lit (Literal.Loc "$lg") in
+  let guard = Asrt.Pure (Expr.UnOp (Not, Expr.BinOp (env, Equal, global))) in
+  let original = [guard; Asrt.Types [env, Type.ObjectType]] in
+  let normalised = [Asrt.Pure (Expr.BinOp (env, Equal, normalised_loc))] in
+  let exported = Engine.MP.retain_precondition_guards ~original ~bindings:[] normalised in
+  let plan assertion =
+    match Engine.MP.init (Expr.Set.of_list [env; normalised_loc])
+        Expr.Set.empty (Hashtbl.create 0) [assertion, (None, None)] with
+    | Ok mp -> mp
+    | Error _ -> Alcotest.fail "source guards must remain plannable"
+  in
+  let matches assertion actual =
+    ReturnMatcher.match_ (return_state ())
+      (ReturnSubst.init [env, actual; normalised_loc, actual])
+      (plan assertion) Engine.Matcher.LogicCommand
+    |> List.exists Result.is_ok
+  in
+  Alcotest.(check bool) "normalized location alone admits the global alias" true
+    (matches normalised global);
+  Alcotest.(check bool) "source non-global guard rejects a rebound global alias" false
+    (matches exported global);
+  Alcotest.(check bool) "source guard retains a permitted local alias" true
+    (matches exported (Expr.Lit (Literal.Loc "$local")));
+  let typed_original = [Asrt.Types [env, Type.ObjectType]] in
+  let typed = Engine.MP.retain_precondition_guards ~original:typed_original ~bindings:[] normalised in
+  Alcotest.(check bool) "source type rejects a rebound non-object" false
+    (matches typed (Expr.num 1.));
+  Alcotest.(check bool) "source type retains a permitted object" true
+    (matches typed global)
+
+let source_precondition_bindings () =
+  let env = Expr.LVar "#source_env" in
+  let normalised_loc = Expr.ALoc "normalised_env" in
+  let parameter = Expr.PVar "argument" in
+  let global = Expr.Lit (Literal.Loc "$lg") in
+  let original = [Asrt.Types [env, Type.ObjectType];
+    Asrt.Pure (Expr.UnOp (Not, Expr.BinOp (env, Equal, global)))] in
+  let normalised = [Asrt.Pure (Expr.BinOp (parameter, ValueEqual, normalised_loc))] in
+  let plan assertion = Engine.MP.init (Expr.Set.singleton parameter)
+      Expr.Set.empty (Hashtbl.create 0) [assertion, (None, None)] in
+  let unbound = Engine.MP.retain_precondition_guards ~original ~bindings:[] normalised in
+  Alcotest.(check bool) "unbound source guards cannot become a matching plan" false
+    (Result.is_ok (plan unbound));
+  let bound = Engine.MP.retain_precondition_guards ~original
+      ~bindings:[env, normalised_loc] normalised in
+  let matches assertion actual =
+    match plan assertion with
+    | Error _ -> Alcotest.fail "normalization bindings must make source guards plannable"
+    | Ok mp ->
+        ReturnMatcher.match_ (return_state ()) (ReturnSubst.init [parameter, actual])
+          mp Engine.Matcher.LogicCommand |> List.exists Result.is_ok
+  in
+  Alcotest.(check bool) "learned source witness retains a local alias" true
+    (matches bound (Expr.Lit (Literal.Loc "$local")));
+  Alcotest.(check bool) "learned source witness rejects a global alias" false
+    (matches bound global);
+  Alcotest.(check bool) "learned source witness rejects a non-object" false
+    (matches bound (Expr.num 1.));
+  List.iter (fun value ->
+    let original = [Asrt.Pure (Expr.BinOp (env, ValueEqual, value))] in
+    let normalised = [Asrt.Pure (Expr.BinOp (parameter, ValueEqual, env))] in
+    let bound = Engine.MP.retain_precondition_guards ~original
+        ~bindings:[env, value] normalised in
+    Alcotest.(check bool) "normalization bindings preserve exact numeric values" true
+      (matches bound value)) [Expr.num 0.; Expr.num (-0.); Expr.num nan];
+  let original = [Asrt.Types [env, Type.NumberType]] in
+  let bound = Engine.MP.retain_precondition_guards ~original
+      ~bindings:[env, Expr.num (-0.)]
+      [Asrt.Pure (Expr.BinOp (parameter, ValueEqual, env))] in
+  Alcotest.(check bool) "negative-zero witness cannot match positive zero" false
+    (matches bound (Expr.num 0.))
+
+(* Normalize a pure footprint through the real state simplifier. The empty
+   heap neither owns nor produces cells; its substitutions preserve it. *)
+module NormalisationState = Engine.SState.Make (struct
+  include Engine.SMemory.Dummy
+  let mem_constraints _ = []
+  let get_print_info variables _ = (variables, Utils.Containers.SS.empty)
+  let substitution_in_place ~pfs:_ ~gamma:_ _ heap =
+    [(heap, Expr.Set.empty, [])]
+  let assertions ?to_keep:_ _ = []
+end)
+module NormalisationPredicateBase = Engine.PState.Make (NormalisationState)
+module NormalisationPredicateState = struct
+  include NormalisationPredicateBase
+  (* Model a witness resolved by heap production, after pure normalization.
+     The actual simplifier and normalizer must export that newly learned alias. *)
+  let simplify ?save ?kill_new_lvars ?matching state =
+    let alias = Expr.BinOp (Expr.LVar "#lvar_source_environment", ValueEqual,
+      Expr.ALoc "normalisation_environment") in
+    let state = match assume_a state [alias] with
+      | Some state -> state
+      | None -> Alcotest.fail "final normalization alias must be satisfiable" in
+    NormalisationPredicateBase.simplify ?save ?kill_new_lvars ?matching state
+end
+module SourceNormaliser = Engine.Normaliser.Make (NormalisationPredicateState)
+
+let source_normalisation_bindings () =
+  let parameter = Expr.PVar "argument" in
+  let witness = Expr.LVar "#lvar_source_environment" in
+  let global = Expr.Lit (Literal.Loc "$lg") in
+  let original = [
+    Asrt.Types [parameter, Type.ObjectType];
+    Asrt.Pure (Expr.BinOp (parameter, ValueEqual, witness));
+    Asrt.Pure (Expr.UnOp (Not, Expr.BinOp (witness, Equal, global)));
+  ] in
+  let state, subst =
+    match SourceNormaliser.normalise_assertion
+        ~pred_defs:(Engine.MP.init_pred_defs ()) ~init_data:() original with
+    | Ok [result] -> result
+    | _ -> Alcotest.fail "expected one normalized pure footprint"
+  in
+  let actual = Option.get
+      (ReturnStore.get (NormalisationPredicateState.get_store state) "argument") in
+  let expression = Alcotest.testable Expr.pp Expr.equal in
+  Alcotest.(check (option expression))
+    "final witness binding agrees with normalized store" (Some actual)
+    (ReturnSubst.get subst witness);
+  Alcotest.(check (option expression))
+    "earlier formal binding follows final simplification" (Some actual)
+    (ReturnSubst.get subst parameter);
+  let exported = Engine.MP.retain_precondition_guards ~original
+      ~bindings:(ReturnSubst.to_list subst)
+      (NormalisationPredicateState.to_assertions state) in
+  let plan = match Engine.MP.init (Expr.Set.singleton parameter) Expr.Set.empty
+      (Hashtbl.create 0) [exported, (None, None)] with
+    | Ok plan -> plan
+    | Error _ -> Alcotest.fail "normalized source guards must remain plannable"
+  in
+  let matches value = ReturnMatcher.match_ (return_state ())
+      (ReturnSubst.init [parameter, value]) plan Engine.Matcher.LogicCommand
+    |> List.exists Result.is_ok in
+  Alcotest.(check bool) "normalized source guards retain a local alias" true
+    (matches (Expr.Lit (Literal.Loc "$local")));
+  Alcotest.(check bool) "normalized source guards reject a global alias" false
+    (matches global);
+  Alcotest.(check bool) "normalized source guards reject a non-object" false
+    (matches (Expr.num 1.))
+
 let tests =
   List.map (fun (name, test) -> Alcotest.test_case name `Quick test)
     [
@@ -442,6 +584,9 @@ let tests =
       ("maintain and multiplicity", maintain);
       ("missing name and mismatched input", missing_and_wrong_input);
       ("insertion length dependencies", insertion_length_dependencies);
+      ("source precondition guard", with_total_return source_precondition_guard);
+      ("source precondition bindings", with_total_return source_precondition_bindings);
+      ("source normalization bindings", with_total_return source_normalisation_bindings);
       ("exact summary return", with_total_return exact_return_posts);
       ("numeric summary return", with_total_return numeric_return_posts);
       ("infeasible NaN summary return", with_total_return nan_return_posts);
