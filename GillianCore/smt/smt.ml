@@ -1218,11 +1218,11 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
   | ILessThan ->
       let>- p1 = get_int p1 in
       let>- p2 = get_int p2 in
-      num_lt p1.expr p2.expr >- IntType
+      num_lt p1.expr p2.expr >- BooleanType
   | ILessThanEqual ->
       let>- p1 = get_int p1 in
       let>- p2 = get_int p2 in
-      num_leq p1.expr p2.expr >- IntType
+      num_leq p1.expr p2.expr >- BooleanType
   | FPlus ->
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in

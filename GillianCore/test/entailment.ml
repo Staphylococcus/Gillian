@@ -4824,6 +4824,46 @@ let uint32_alias_complete_query () =
     (before = Expr.Set.elements facts);
   Printf.printf "UINT32_COMPLETE_QUERY_CONTROLS_FINISHED\n%!")
 
+let integer_comparison_boolean_values () =
+  let g = gamma () in
+  Gamma.update g "#comparison_flag" Type.BooleanType;
+  let flag = Expr.LVar "#comparison_flag" in
+  let native_sat label expected facts =
+    Alcotest.(check bool) label expected
+      (Option.is_some (Smt.check_sat (Expr.Set.of_list facts) (Gamma.as_hashtbl g)))
+  in
+  List.iter (fun (name, op, compare) ->
+    let comparison = bin op x y in
+    List.iter (fun (left, right) ->
+      let expected = compare left right in
+      let prefix = Printf.sprintf "%s(%d,%d) " name left right in
+      let context = [bin Equal x (Expr.int left); bin Equal y (Expr.int right);
+        bin Equal flag comparison] in
+      native_sat (prefix ^ "Boolean-valued comparison admits a model") true context;
+      native_sat (prefix ^ "correct Boolean claim admits a model") true
+        (bin Equal flag (Expr.bool expected) :: context);
+      native_sat (prefix ^ "false Boolean claim has no model") false
+        (bin Equal flag (Expr.bool (not expected)) :: context);
+      native_sat (prefix ^ "negated comparison remains Boolean") true
+        (bin Equal (not_ comparison) (Expr.bool (not expected)) :: context)
+    ) [2,3; 3,2; 3,3];
+    native_sat (name ^ "symbolic true comparison contradicts its negation") false
+      [bin Equal comparison (Expr.bool true); not_ comparison];
+    native_sat (name ^ "symbolic false comparison retains its countermodel") true
+      [bin Equal comparison (Expr.bool false); not_ comparison]
+  ) ["less", ILessThan, ( < ); "less_equal", ILessThanEqual, ( <= )];
+  let target = Expr.LVar "#comparison_target" in
+  Gamma.update g "#comparison_target" Type.IntType;
+  let capacity = Expr.int 4294967295 in
+  let exceeded = bin ILessThan capacity target in
+  native_sat "original normal capacity partition retains a model" true
+    [bin Equal exceeded (Expr.bool false); bin Equal target capacity];
+  native_sat "original error capacity partition retains a model" true
+    [bin Equal exceeded (Expr.bool true); bin ILessThan capacity target];
+  native_sat "false capacity partition is rejected" false
+    [bin Equal exceeded (Expr.bool false); bin ILessThan capacity target];
+  Printf.printf "INTEGER_COMPARISON_BOOL_CONTROLS_FINISHED\n%!"
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -4933,4 +4973,6 @@ let tests =
       (with_total integer_order_count_core);
     Alcotest.test_case "Uint32 aliases retain complete counterqueries" `Quick
       (with_total uint32_alias_complete_query);
+    Alcotest.test_case "integer comparisons are Boolean values" `Quick
+      (with_total integer_comparison_boolean_values);
   ]
