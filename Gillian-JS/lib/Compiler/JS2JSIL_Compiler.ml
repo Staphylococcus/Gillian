@@ -7088,6 +7088,37 @@ let generate_proc ?use_cc e fid params strictness vis_fid spec : EProc.t =
       );
     ]
   in
+  (* Babel's default-parameter lowering reads this function's arguments.
+     Verification historically omitted the existing arguments initializer.
+     Materialise it only at the opt-in boundary and only for reached strict
+     functions; this runtime helper implements unmapped strict arguments. *)
+  let own_arguments_reads =
+    JS_Utils.js_fold
+      (fun exp depth _ children ->
+        if depth <> 0 then []
+        else
+          match exp.JS_Parser.Syntax.exp_stx with
+          | JS_Parser.Syntax.Var "arguments" -> () :: children
+          | _ -> children)
+      (fun exp depth ->
+        match exp.JS_Parser.Syntax.exp_stx with
+        | JS_Parser.Syntax.Function _ | JS_Parser.Syntax.FunctionExp _ ->
+            depth + 1
+        | _ -> depth)
+      0 e <> []
+  in
+  let verification_arguments =
+    if
+      Option.is_some !ES2015Frontend.profile
+      && Exec_mode.is_verification_exec !Config.current_exec_mode
+      && own_arguments_reads
+    then (
+      if not strictness then
+        ES2015Frontend.fail
+          "Opt-in verification supports own arguments reads only in strict functions";
+      cmds_arg_obj)
+    else if_verification [] cmds_arg_obj
+  in
 
   (* x_sc_0 = x_scope @ {{ x_er }} *)
   let cmd_ass_er_to_sc =
@@ -7189,7 +7220,7 @@ let generate_proc ?use_cc e fid params strictness vis_fid spec : EProc.t =
   let fid_cmds =
     [ cmd_er_m_creation; cmd_er_creation; cmd_er_flag ]
     @ cmds_decls @ cmds_params
-    @ if_verification [] cmds_arg_obj
+    @ verification_arguments
     @ [ cmd_ass_er_to_sc; cmd_ass_te; cmd_ass_se; cmd_ass_re ]
     @ cmds_hoist_fdecls @ cmds_e
     @ [ cmd_dr_ass; cmd_return_phi; cmd_del_te; cmd_del_se; cmd_del_re ]
