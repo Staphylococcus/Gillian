@@ -8,6 +8,7 @@ module TargetLangOptions = struct
     harness : bool;
     burn_jsil : bool;
     forbid_div_by_zero : bool;
+    es2015_front_end : string option;
   }
 
   let term =
@@ -26,16 +27,26 @@ module TargetLangOptions = struct
     let forbid_div_by_zero =
       Arg.(value & flag & info [ "forbid-div-by-zero" ] ~docs ~doc)
     in
-    let f jsil harness burn_jsil forbid_div_by_zero =
-      { jsil; harness; burn_jsil; forbid_div_by_zero }
+    let doc =
+      "Opt in to a pinned ES2015 Babel frontend profile before ES5 parsing. \
+       The stored input source is preserved; compiler derivatives and source \
+       maps are retained by the profile's bridge."
     in
-    Term.(const f $ jsil $ harness $ burn_jsil $ forbid_div_by_zero)
+    let es2015_front_end =
+      Arg.(value & opt (some string) None & info [ "es2015-front-end" ] ~docs ~doc)
+    in
+    let f jsil harness burn_jsil forbid_div_by_zero es2015_front_end =
+      { jsil; harness; burn_jsil; forbid_div_by_zero; es2015_front_end }
+    in
+    Term.(const f $ jsil $ harness $ burn_jsil $ forbid_div_by_zero $ es2015_front_end)
 
-  let apply { jsil; harness; burn_jsil = conf_burn_jsil; forbid_div_by_zero } =
+  let apply
+      { jsil; harness; burn_jsil = conf_burn_jsil; forbid_div_by_zero; es2015_front_end } =
     burn_jsil := conf_burn_jsil;
     Javert_utils.Js_config.js := not jsil;
     Javert_utils.Js_config.js2jsil_harnessing := harness;
-    Javert_utils.Js_config.forbid_div_by_zero := forbid_div_by_zero
+    Javert_utils.Js_config.forbid_div_by_zero := forbid_div_by_zero;
+    ES2015Frontend.profile := es2015_front_end
 end
 
 type init_data = unit
@@ -70,6 +81,7 @@ let parse_and_compile_js path =
         JS_PreParser.stringify_assume_and_assert e_str
       else e_str
     in
+    let e_str = ES2015Frontend.transform ~path e_str in
     let js_prog = JS_Parser.parse_string_exn ~program_path:path e_str in
     let (ext_prog : Jsil_syntax.EProg.t), _, _ =
       JS2JSIL_Compiler.js2jsil ~filename:path js_prog
@@ -94,6 +106,8 @@ let parse_and_compile_js path =
     let core_prog = JSIL2GIL.jsil2core_prog ext_prog in
     Ok (core_prog, JavaScriptSource js_prog)
   with
+  | ES2015Frontend.Frontend_error message ->
+      Gillian_result.compilation_error message
   | JS_Parser.Error.ParserError e ->
       let msg = Fmt.str "Parsing error: %s\n" (JS_Parser.Error.str e) in
       let additional_data = `Assoc [ ("is_parser_error", `Bool true) ] in
