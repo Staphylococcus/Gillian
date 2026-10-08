@@ -6,6 +6,27 @@ module SESubst = SVal.SESubst
 let new_lvar_name var = lvar_prefix ^ var
 
 module Make (SPState : PState.S) = struct
+  (* Diagnostic only: wall time can be adjusted; process CPU excludes children.
+     No exception is caught, and no expression or proof state is inspected here. *)
+  let normalisation_phase stage count f =
+    let target =
+      Option.value ~default:"-" !Gillian_result.Error.current_target
+    in
+    L.normal (fun m ->
+        m "NORMALISE_PHASE BEGIN target=%s stage=%s count=%d" target stage
+          count);
+    let wall = Unix.gettimeofday () in
+    let cpu = Sys.time () in
+    let result = f () in
+    let cpu_elapsed = Sys.time () -. cpu in
+    let wall_elapsed = Unix.gettimeofday () -. wall in
+    L.normal (fun m ->
+        m
+          "NORMALISE_PHASE END target=%s stage=%s wall_seconds=%.6f \
+           process_cpu_seconds=%.6f"
+          target stage wall_elapsed cpu_elapsed);
+    result
+
   (*  ------------------------------------------------------------------
    *  List Preprocessing
    *  ------------------------------------------------------------------
@@ -468,8 +489,9 @@ module Make (SPState : PState.S) = struct
 
       L.verbose (fun m -> m "About to simplify.");
       let _ =
-        Simplifications.simplify_pfs_and_gamma pfs gamma ~matching:true
-          ~save_spec_vars:(SS.empty, true)
+        normalisation_phase "pure_simplify" (PFS.length pfs) (fun () ->
+          Simplifications.simplify_pfs_and_gamma pfs gamma ~matching:true
+          ~save_spec_vars:(SS.empty, true))
       in
       L.verbose (fun m -> m "Done simplifying.");
       pfs
@@ -704,25 +726,32 @@ module Make (SPState : PState.S) = struct
       (subst : SESubst.t)
       (c_asrts : (string * Expr.t list * Expr.t list) list) :
       (string * Expr.t list * Expr.t list) list * SESubst.t * SESubst.t =
-    let new_pfs = PFS.copy pfs in
+    let new_pfs = normalisation_phase "core_pfs_copy" (PFS.length pfs) (fun () ->
+      PFS.copy pfs) in
     let fe = normalise_lexpr ~store ~subst gamma in
     let c_asrts' =
+      normalisation_phase "core_arguments" (List.length c_asrts) (fun () ->
       List.map
         (fun (a, ins, outs) -> (a, List.map fe ins, List.map fe outs))
-        c_asrts
+        c_asrts)
     in
-    let fos = generate_overlapping_constraints c_asrts' in
-    List.iter (fun fo -> PFS.extend new_pfs fo) fos;
+    let fos = normalisation_phase "overlap_generate" (List.length c_asrts') (fun () ->
+      generate_overlapping_constraints c_asrts') in
+    normalisation_phase "overlap_classify_insert" (List.length fos) (fun () ->
+      Reduction.extend_pfs_with_overlap_guards gamma new_pfs fos);
     let subst', _ =
-      Simplifications.simplify_pfs_and_gamma new_pfs gamma ~matching:true
-        ~save_spec_vars:(SS.empty, true)
+      normalisation_phase "core_simplify" (PFS.length new_pfs) (fun () ->
+        Simplifications.simplify_pfs_and_gamma new_pfs gamma ~matching:true
+        ~save_spec_vars:(SS.empty, true))
     in
-    let subst = compose_substs subst subst' in
+    let subst = normalisation_phase "core_compose_substs" (List.length (SESubst.to_list subst)) (fun () ->
+      compose_substs subst subst') in
     let lsvars =
       Expr.Set.of_list (List.map (fun x -> Expr.LVar x) (SS.elements svars))
     in
     let subst' =
-      SESubst.filter subst' (fun x _ -> not (Expr.Set.mem x lsvars))
+      normalisation_phase "core_filter_subst" (List.length (SESubst.to_list subst')) (fun () ->
+      SESubst.filter subst' (fun x _ -> not (Expr.Set.mem x lsvars)))
     in
 
     L.verbose (fun m ->
@@ -733,9 +762,10 @@ module Make (SPState : PState.S) = struct
 
     let f_subst = SESubst.subst_in_expr subst' ~partial:true in
     let c_asrts'' =
+      normalisation_phase "core_substitution" (List.length c_asrts') (fun () ->
       List.map
         (fun (a, ins, outs) -> (a, List.map f_subst ins, List.map f_subst outs))
-        c_asrts'
+        c_asrts')
     in
     (* ( List.map (normalise_core_asrt store new_pfs pfs gamma subst) c_asrts'',
        subst ) *)
@@ -850,6 +880,7 @@ module Make (SPState : PState.S) = struct
       ?(pvars : SS.t option)
       (a : Asrt.t) : ((SPState.t * SESubst.t) list, string) result =
     let falsePFs pfs = PFS.mem pfs Expr.false_ in
+    normalisation_phase "original_domains" (List.length a) (fun () ->
     (if !Config.Verification.total then
        let subst =
          SESubst.init
@@ -862,9 +893,10 @@ module Make (SPState : PState.S) = struct
        Totality.check_assertion_production ~evaluate:SPState.eval_expr
          ~assertion:(fun st e -> SPState.assert_a st [ e ])
          ~assume:(fun st es -> SPState.assume_a st es)
-         state original);
+         state original));
     let a = List.filter (fun a -> Option.is_none (Asrt.as_definedness a)) a in
-    let a = normalise_a_bit a in
+    let a = normalisation_phase "initial_reduction" (List.length a) (fun () ->
+      normalise_a_bit a) in
     let svars = SS.filter is_spec_var_name (Asrt.lvars a) in
     L.verbose (fun m ->
         m "@[<v 2>Normalising assertion:@ %a@]@ svars: @[<h>%a@]" Asrt.pp a
@@ -872,7 +904,7 @@ module Make (SPState : PState.S) = struct
           svars);
 
     (* Step 1 -- Preprocess list expressions - resolve l-nth(E, i) when possible  *)
-    let a = preprocess_lists a in
+    let a = normalisation_phase "preprocess_lists" (List.length a) (fun () -> preprocess_lists a) in
 
     (* Step 2a -- Create empty symbolic heap, symbolic store, typing environment, and substitution *)
     let store = SStore.init [] in
@@ -881,7 +913,8 @@ module Make (SPState : PState.S) = struct
 
     (* Step 2b -- Separate assertion *)
     let c_asrts, pfs, types, preds, wands =
-      try separate_assertion a
+      try normalisation_phase "separate_assertion" (List.length a) (fun () ->
+        separate_assertion a)
       with Failure msg ->
         L.verbose (fun m -> m "I died here terribly with msg: %s!\n" msg);
         raise (Failure msg)
@@ -894,7 +927,8 @@ module Make (SPState : PState.S) = struct
      * 3.1 - type assertions -> initialises gamma
      * 3.2 - pure assertions -> initialises store and pfs
      *)
-    let success = normalise_types store gamma subst types in
+    let success = normalisation_phase "normalise_types" (List.length types) (fun () ->
+      normalise_types store gamma subst types) in
     if not success then (
       L.verbose (fun m ->
           m
@@ -902,7 +936,8 @@ module Make (SPState : PState.S) = struct
              normalised");
       Error "normalise_assertion: type assertions could not be normalised")
     else
-      let pfs = normalise_pure_assertions store gamma subst pvars pfs in
+      let pfs = normalisation_phase "pure_normalization" (List.length pfs) (fun () ->
+        normalise_pure_assertions store gamma subst pvars pfs) in
       if falsePFs pfs then (
         L.verbose (fun m ->
             m "WARNING: normalise_assertion: pure formulae false");
@@ -910,7 +945,8 @@ module Make (SPState : PState.S) = struct
       else (
         L.verbose (fun m -> m "Here is the store: %a" SStore.pp store);
         (* Step 4 -- Extend the typing environment using equalities in the pfs *)
-        extend_typing_env_using_assertion_info gamma (PFS.to_list pfs);
+        normalisation_phase "extend_typing" (PFS.length pfs) (fun () ->
+          extend_typing_env_using_assertion_info gamma (PFS.to_list pfs));
 
         (* Step 5 -- normalise core assertions *)
         let c_asrts', subst', subst =
@@ -934,17 +970,20 @@ module Make (SPState : PState.S) = struct
         let astate = SPState.set_wands astate wands' in
         let open Syntaxes.List in
         let res =
-          let* astate = produce_core_asrts astate c_asrts' in
+          let* astate = normalisation_phase "produce_core" (List.length c_asrts') (fun () ->
+            produce_core_asrts astate c_asrts') in
 
           (* Step 8 -- Check if the symbolic state makes sense *)
           let mem_constraints = SPState.mem_constraints astate in
           if
-            FOSolver.check_satisfiability
+            normalisation_phase "state_satisfiability" (PFS.length pfs) (fun () ->
+              FOSolver.check_satisfiability
               (mem_constraints @ PFS.to_list pfs)
-              gamma
+              gamma)
           then (
             (* Step 9 -- Final simplifications - TO SIMPLIFY!!! *)
-            let final_subst, states = SPState.simplify ~matching:true astate in
+            let final_subst, states = normalisation_phase "final_simplification" (PFS.length pfs) (fun () ->
+                SPState.simplify ~matching:true astate) in
             let subst = exported_subst subst final_subst in
             let+ state = states in
             L.verbose (fun m ->

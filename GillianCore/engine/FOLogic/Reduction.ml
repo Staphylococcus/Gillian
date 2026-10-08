@@ -6,6 +6,136 @@ exception ReductionException of Expr.t * string
 module L = Logging
 module CStore = Store.Make (CVal.M)
 
+(* Diagnostic process flag, read once. These counters never supply proof facts. *)
+let preparation_profile_enabled =
+  Sys.getenv_opt "GILLIAN_PREPARATION_LOOKUP_PROFILE" = Some "1"
+
+type preparation_profile_counter = {
+  started : int; completed : int; hits : int; size_min : int; size_max : int;
+  samples : int; cpu_sum : float; cpu_max : float; cpu_zero : int;
+}
+
+type preparation_profile_snapshot = {
+  enabled : bool;
+  membership : preparation_profile_counter array array;
+  copies : preparation_profile_counter array;
+  counter_resets : int;
+  periodic_reports : int;
+  final_report_requested : bool;
+  report_payload_bytes : int;
+  incomplete : bool;
+}
+
+type preparation_profile_cell = {
+  mutable calls : int; mutable returns : int; mutable successes : int;
+  mutable smallest : int; mutable largest : int; mutable timed : int;
+  mutable cpu : float; mutable maximum_cpu : float; mutable zeros : int;
+}
+
+let preparation_profile_cell () =
+  { calls = 0; returns = 0; successes = 0; smallest = max_int; largest = 0;
+    timed = 0; cpu = 0.; maximum_cpu = 0.; zeros = 0 }
+
+(* Backends: scan, closed-index. Sites: And not-left/not-right/left/right,
+   Or left/right/not-left/not-right. Copies: input, quantifier, quantifier-input. *)
+let preparation_profile_membership =
+  Array.init 2 (fun _ -> Array.init 8 (fun _ -> preparation_profile_cell ()))
+let preparation_profile_copies = Array.init 3 (fun _ -> preparation_profile_cell ())
+let preparation_profile_resets = ref 0
+let preparation_profile_reports = ref 0
+let preparation_profile_final = ref false
+let preparation_profile_bytes = ref 0
+let preparation_profile_last_report = ref None
+let preparation_profile_incomplete = ref false
+
+let preparation_profile_increment value =
+  if value = max_int then (preparation_profile_incomplete := true; value)
+  else value + 1
+
+let preparation_profile_reset () =
+  let clear cell =
+    cell.calls <- 0; cell.returns <- 0; cell.successes <- 0;
+    cell.smallest <- max_int; cell.largest <- 0; cell.timed <- 0;
+    cell.cpu <- 0.; cell.maximum_cpu <- 0.; cell.zeros <- 0 in
+  Array.iter (Array.iter clear) preparation_profile_membership;
+  Array.iter clear preparation_profile_copies;
+  preparation_profile_resets := preparation_profile_increment !preparation_profile_resets
+
+let preparation_profile_snapshot () =
+  let copy cell : preparation_profile_counter =
+    { started = cell.calls; completed = cell.returns; hits = cell.successes;
+      size_min = (if cell.calls = 0 then 0 else cell.smallest);
+      size_max = cell.largest; samples = cell.timed; cpu_sum = cell.cpu;
+      cpu_max = cell.maximum_cpu; cpu_zero = cell.zeros } in
+  { enabled = preparation_profile_enabled;
+    membership = Array.map (Array.map copy) preparation_profile_membership;
+    copies = Array.map copy preparation_profile_copies;
+    counter_resets = !preparation_profile_resets;
+    periodic_reports = !preparation_profile_reports;
+    final_report_requested = !preparation_profile_final;
+    report_payload_bytes = !preparation_profile_bytes;
+    incomplete = !preparation_profile_incomplete }
+
+let preparation_profile_observe cell size f =
+  cell.calls <- preparation_profile_increment cell.calls;
+  cell.smallest <- min cell.smallest size; cell.largest <- max cell.largest size;
+  let sampled = cell.calls = 1 || cell.calls mod 256 = 0 in
+  let cpu = if sampled then Sys.time () else 0. in
+  let result = f () in
+  cell.returns <- preparation_profile_increment cell.returns;
+  if sampled then (
+    let elapsed = Sys.time () -. cpu in
+    if elapsed < 0. || not (Float.is_finite elapsed) then
+      preparation_profile_incomplete := true
+    else (
+      cell.timed <- preparation_profile_increment cell.timed;
+      cell.cpu <- cell.cpu +. elapsed;
+      cell.maximum_cpu <- max cell.maximum_cpu elapsed;
+      if elapsed = 0. then cell.zeros <- preparation_profile_increment cell.zeros));
+  result
+
+let preparation_profile_copy category gamma =
+  if not preparation_profile_enabled then Type_env.copy gamma
+  else preparation_profile_observe preparation_profile_copies.(category)
+      (Hashtbl.length (Type_env.as_hashtbl gamma)) (fun () -> Type_env.copy gamma)
+
+let preparation_profile_dump ?(final = false) () =
+  if preparation_profile_enabled then (
+    let now = Unix.gettimeofday () in
+    if (final && not !preparation_profile_final)
+       || ((not final) && !preparation_profile_reports < 40
+           && match !preparation_profile_last_report with
+              | None -> true | Some last -> now -. last >= 5.) then (
+      if final then preparation_profile_final := true
+      else preparation_profile_reports := !preparation_profile_reports + 1;
+      preparation_profile_last_report := Some now;
+      let snapshot = preparation_profile_snapshot () in
+      let row (c : preparation_profile_counter) = `Assoc
+        ["started",`Int c.started; "completed",`Int c.completed; "hits",`Int c.hits;
+         "size_min",`Int c.size_min; "size_max",`Int c.size_max;
+         "samples",`Int c.samples; "cpu_sum",`Float c.cpu_sum;
+         "cpu_max",`Float c.cpu_max; "cpu_zero",`Int c.cpu_zero] in
+      let rows cells = `List (Array.to_list (Array.map row cells)) in
+      let payload = Yojson.Safe.to_string (`Assoc
+        ["final",`Bool final; "incomplete",`Bool snapshot.incomplete;
+         "counter_resets",`Int snapshot.counter_resets;
+         "periodic_reports",`Int snapshot.periodic_reports;
+         "prior_payload_bytes",`Int snapshot.report_payload_bytes;
+         "scan",rows snapshot.membership.(0);
+         "closed_index",rows snapshot.membership.(1); "copies",rows snapshot.copies]) in
+      let prefix = "PREPARATION_LOOKUP_PROFILE " in
+      let bytes payload = String.length prefix + String.length payload + 1 in
+      let payload =
+        if bytes payload <= 8192 && !preparation_profile_bytes + bytes payload <= 524288
+        then payload
+        else (
+          preparation_profile_incomplete := true;
+          "{\"incomplete\":true,\"reason\":\"report_bound\"}") in
+      if !preparation_profile_bytes + bytes payload <= 524288 then (
+        preparation_profile_bytes := !preparation_profile_bytes + bytes payload;
+        L.normal (fun m -> m "%s%s" prefix payload))
+      else preparation_profile_incomplete := true))
+
 let _256 = Z.of_int 256
 let _65535 = Z.of_int 65535
 
@@ -1135,12 +1265,30 @@ let reduce_prefix_boundary_nth pfs gamma xs index =
         | _ -> None) (index :: get_equal_expressions pfs index)
   | _ -> None
 
+let is_closed_boolean_guard (le : Expr.t) =
+  let closed_location = function
+    | Expr.ALoc _ | Expr.Lit (Loc _ | Null) -> true
+    | _ -> false
+  in
+  let rec all = function
+    | [] -> true
+    | Expr.Lit (Bool _) :: rest -> all rest
+    | Expr.BinOp (left, Equal, right) :: rest
+      when closed_location left && closed_location right -> all rest
+    | Expr.UnOp (Not, child) :: rest -> all (child :: rest)
+    | Expr.BinOp (left, (And | Or), right) :: rest ->
+        all (left :: right :: rest)
+    | _ -> false
+  in
+  all [ le ]
+
 let rec reduce_lexpr_loop
     ?(matching = false)
     ?(reduce_lvars = false)
     ?(resolve_constants = true)
     ?(fuel = 20)
     ?input_gamma
+    ?pfs_mem
     (pfs : PFS.t)
     (gamma : Type_env.t)
     (le : Expr.t) =
@@ -1148,7 +1296,18 @@ let rec reduce_lexpr_loop
      reduction keeps its existing mutable gamma and inference behavior. *)
   let input_gamma = match input_gamma with
     | Some original -> original
-    | None -> Type_env.copy gamma in
+    | None -> preparation_profile_copy 0 gamma in
+  let backend, original_mem = match pfs_mem with
+    | Some mem -> 1, mem
+    | None -> 0, PFS.mem pfs in
+  let mem site expression =
+    if not preparation_profile_enabled then original_mem expression
+    else
+      let cell = preparation_profile_membership.(backend).(site) in
+      let result = preparation_profile_observe cell (PFS.length pfs)
+          (fun () -> original_mem expression) in
+      if result then cell.successes <- preparation_profile_increment cell.successes;
+      result in
   (* Resolve fixed runtime constants before any syntactic identity can erase
      them. Share their values with concrete evaluation; never sample dynamic
      constants while simplifying a proof. Recursive descent reuses this pass
@@ -1173,7 +1332,7 @@ let rec reduce_lexpr_loop
     if fuel <= 0 then Fun.id
     else
       reduce_lexpr_loop ~matching ~reduce_lvars ~resolve_constants:false
-        ~fuel:(fuel - 1) ~input_gamma pfs gamma
+        ~fuel:(fuel - 1) ~input_gamma ?pfs_mem pfs gamma
   in
 
   (* Total proofs must preserve Boolean evaluation order. Reduce the left
@@ -1321,7 +1480,7 @@ let rec reduce_lexpr_loop
         (* We create a new pfs and gamma where:
            - All shadowed variables are substituted with a fresh variable
            - The gamma has been updated with the types given in the binder *)
-        let new_gamma = Type_env.copy gamma in
+        let new_gamma = preparation_profile_copy 1 gamma in
         let new_pfs = PFS.copy pfs in
         let subst_bindings = List.map (fun (x, _) -> (x, LVar.alloc ())) bt in
         let subst =
@@ -1344,7 +1503,7 @@ let rec reduce_lexpr_loop
         PFS.substitution subst new_pfs;
         (* Preserve declared binder types in the shortcut's input view without
            borrowing any type inferred while reducing the quantified body. *)
-        let new_input_gamma = Type_env.copy input_gamma in
+        let new_input_gamma = preparation_profile_copy 2 input_gamma in
         List.iter
           (fun (x, t) ->
             (match Type_env.get input_gamma x with
@@ -2572,11 +2731,11 @@ let rec reduce_lexpr_loop
             (* Rest *)
             | _, _ ->
                 if
-                  (PFS.mem pfs @@ Expr.negate flel)
-                  || (PFS.mem pfs @@ Expr.negate fler)
+                  (mem 0 @@ Expr.negate flel)
+                  || (mem 1 @@ Expr.negate fler)
                 then Lit (Bool false)
-                else if PFS.mem pfs flel then fler
-                else if PFS.mem pfs fler then flel
+                else if mem 2 flel then fler
+                else if mem 3 fler then flel
                 else BinOp (flel, And, fler))
         | Or when lexpr_is_bool gamma def -> (
             match (flel, fler) with
@@ -2585,9 +2744,9 @@ let rec reduce_lexpr_loop
             | Lit (Bool false), x | x, Lit (Bool false) -> x
             (* Rest *)
             | _, _ ->
-                if PFS.mem pfs flel || PFS.mem pfs fler then Lit (Bool true)
-                else if PFS.mem pfs @@ Expr.negate flel then fler
-                else if PFS.mem pfs @@ Expr.negate fler then flel
+                if mem 4 flel || mem 5 fler then Lit (Bool true)
+                else if mem 6 @@ Expr.negate flel then fler
+                else if mem 7 @@ Expr.negate fler then flel
                 else BinOp (flel, Or, fler))
         | StrCat when lexpr_is_string gamma def -> (
             match (flel, fler) with
@@ -2724,7 +2883,15 @@ and reduce_lexpr
     ?(gamma = Type_env.init ())
     (le : Expr.t) =
   (* let t = Unix.gettimeofday () in *)
-  let result = reduce_lexpr_loop ~matching ~reduce_lvars pfs gamma le in
+  (* Boolean literals have no context, inference or definedness work. Closed
+     location guards never consult or change the frozen input-gamma view. *)
+  let result =
+    match le with
+    | Expr.Lit (Bool _) -> le
+    | _ when is_closed_boolean_guard le ->
+        reduce_lexpr_loop ~matching ~reduce_lvars ~input_gamma:gamma pfs gamma le
+    | _ -> reduce_lexpr_loop ~matching ~reduce_lvars pfs gamma le
+  in
   (* Utils.Statistics.update_statistics "Reduce Expression" (Unix.gettimeofday () -. t); *)
   if not @@ Expr.equal le result then
     Logging.verbose (fun f ->
@@ -2913,6 +3080,170 @@ and substitute_for_list_length (pfs : PFS.t) (le : Expr.t) : Expr.t =
   List.fold_left
     (fun le (len_expr, _lex) -> substitute_for_specific_length pfs len_expr le)
     le len_eqs
+
+type formula_filter_ops = {
+  reduce_formula : Expr.t -> Expr.t;
+  extend : Expr.t -> unit;
+  substitute : SVal.SESubst.t -> unit;
+  substitute_expr : Expr.t -> Expr.t -> unit;
+}
+
+(* Own the snapshot for one complete filter pass. The mapper can only perform
+   bound reductions and original mutations, never supply membership answers. *)
+let filter_map_pfs_with_live_reduction ?(matching = false) gamma pfs mapper =
+  let facts = ref None in
+  let pending_filters = ref false in
+  let callback_mutated = ref false in
+  let invalidate () = facts := None in
+  let mem expression =
+    let snapshot = match !facts with
+      | Some snapshot -> snapshot
+      | None ->
+          let snapshot = PFS.to_set pfs in
+          facts := Some snapshot;
+          snapshot
+    in
+    Expr.Set.mem expression snapshot
+  in
+  let mutate operation =
+    callback_mutated := true;
+    invalidate ();
+    operation ();
+    invalidate ()
+  in
+  let reduce_formula original =
+    (* Keep public dispatch, per-root frozen typing and logging. Private
+       quantified/implication contexts retain their ordinary scan fallback. *)
+    let result = match original with
+      | Expr.Lit (Bool _) -> original
+      | _ when is_closed_boolean_guard original ->
+          reduce_lexpr_loop ~matching ~input_gamma:gamma ~pfs_mem:mem
+            pfs gamma original
+      | _ -> reduce_lexpr_loop ~matching ~pfs_mem:mem pfs gamma original
+    in
+    if not @@ Expr.equal original result then
+      Logging.verbose (fun f ->
+          f "reduce_lexpr: @[%a -> %a@]" Expr.pp original Expr.pp result);
+    result
+  in
+  let ops = {
+    reduce_formula;
+    extend = (fun expression -> mutate (fun () -> PFS.extend pfs expression));
+    substitute = (fun subst -> mutate (fun () -> PFS.substitution subst pfs));
+    substitute_expr = (fun original replacement -> mutate (fun () ->
+        PFS.subst_expr_for_expr original replacement pfs));
+  } in
+  PFS.filter_map_stop
+    (fun original ->
+      callback_mutated := false;
+      let action = mapper ops original in
+      (match action with
+       | `Filter ->
+           (* Ext_list decrements length now but delays unlinking. These
+              formulas stay visible until a subsequent kept-cell commit. *)
+           pending_filters := true
+       | `Replace replacement ->
+           (* A substitution may alter this cell, rebuild the snapshot, then
+              return the original argument. Track mutation, not just equality. *)
+           if !pending_filters || !callback_mutated
+              || not (Expr.equal original replacement) then invalidate ();
+           pending_filters := false
+       | `Stop -> invalidate ());
+      action)
+    pfs
+
+(* Internal sanitizer pass: each reduction observes the original live queue.
+   Index exact structural facts; generic roots retain their frozen gamma copy. *)
+let reduce_pfs_in_place ?(matching = false) gamma pfs =
+  let adjust delta expression counts =
+    let count = Option.value ~default:0
+        (Expr.Map.find_opt expression counts) + delta in
+    if count = 0 then Expr.Map.remove expression counts
+    else Expr.Map.add expression count counts
+  in
+  let counts = ref (PFS.fold_left
+      (fun counts expression -> adjust 1 expression counts) Expr.Map.empty pfs) in
+  let mem expression = Expr.Map.mem expression !counts in
+  PFS.map_inplace
+    (fun original ->
+      let result = match original with
+        | Expr.Lit (Bool _) -> reduce_lexpr ~matching ~pfs ~gamma original
+        | _ when is_closed_boolean_guard original ->
+            let result = reduce_lexpr_loop ~matching ~input_gamma:gamma
+                ~pfs_mem:mem pfs gamma original in
+            if not @@ Expr.equal original result then
+              Logging.verbose (fun f ->
+                  f "reduce_lexpr: @[%a -> %a@]" Expr.pp original Expr.pp result);
+            result
+        | _ ->
+            let result = reduce_lexpr_loop ~matching ~pfs_mem:mem pfs gamma original in
+            if not @@ Expr.equal original result then
+              Logging.verbose (fun f ->
+                  f "reduce_lexpr: @[%a -> %a@]" Expr.pp original Expr.pp result);
+            result
+      in
+      (* A failing reduction commits neither its cell nor this index update.
+         Counts retain duplicates in the reduced prefix/untouched suffix. *)
+      counts := adjust 1 result (adjust (-1) original !counts);
+      result)
+    pfs
+
+(* This private PFS is append-only during overlap classification. Seed exact
+   structural membership once, and expose only earlier retained originals to
+   each reducer call. Quantified/implication contexts keep their scan fallback. *)
+let extend_pfs_with_overlap_guards gamma pfs guards =
+  let facts = ref (PFS.to_set pfs) in
+  let mem expression = Expr.Set.mem expression !facts in
+  let classify classified_gamma original =
+    (* Match the public reducer's literal/closed/generic dispatch and logging;
+       generic roots still take their original frozen input-gamma copy. *)
+    let result = match original with
+      | Expr.Lit (Bool _) -> original
+      | _ when is_closed_boolean_guard original ->
+          reduce_lexpr_loop ~matching:true ~input_gamma:classified_gamma
+            ~pfs_mem:mem pfs classified_gamma original
+      | _ -> reduce_lexpr_loop ~matching:true ~pfs_mem:mem
+          pfs classified_gamma original
+    in
+    if not @@ Expr.equal original result then
+      Logging.verbose (fun f ->
+          f "reduce_lexpr: @[%a -> %a@]" Expr.pp original Expr.pp result);
+    result
+  in
+  List.iter
+    (fun fo ->
+      (* Classify the whole guard in matching mode: abstract locations may
+         alias. Keep the original guard unless it reduces to literal true;
+         speculative typing must not escape this classification. *)
+      let redundant =
+        match fo with
+        (* Closed location inputs are defined without consulting gamma;
+           identical location/null output leaves make this whole guard true. *)
+        | Expr.BinOp
+            (Expr.UnOp (Not, Expr.BinOp
+               ((Expr.ALoc _ | Expr.Lit (Literal.Loc _)), Equal,
+                (Expr.ALoc _ | Expr.Lit (Literal.Loc _)))),
+             Or, Expr.BinOp
+               (((Expr.ALoc _ | Expr.Lit (Literal.Loc _)
+                 | Expr.Lit Literal.Null) as output), Equal, other))
+          when Expr.equal output other -> true
+        | _ -> try
+          let classified_gamma = Type_env.copy gamma in
+          classify classified_gamma fo = Expr.true_
+          && Hashtbl.length (Type_env.as_hashtbl classified_gamma)
+             = Hashtbl.length (Type_env.as_hashtbl gamma)
+          && Type_env.fold classified_gamma
+               (fun var typ unchanged ->
+                 unchanged && Type_env.get gamma var = Some typ)
+               true
+        with ReductionException _ -> false
+      in
+      if not redundant && not (mem fo) then (
+        (* Equivalent to extend's verified-miss append, without a second scan.
+           No speculative reduced result or not-yet-appended guard is indexed. *)
+        PFS.merge_into_left pfs (PFS.of_list [fo]);
+        facts := Expr.Set.add fo !facts))
+    guards
 
 let resolve_expr_to_location (pfs : PFS.t) (gamma : Type_env.t) (e : Expr.t) :
     string option =

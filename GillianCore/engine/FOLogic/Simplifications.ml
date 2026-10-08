@@ -49,16 +49,36 @@ let simplification_cache = Simplification_cache.create 1
 
 (*************************************)
 
+(* Diagnostic only: adjustable wall clock; process CPU excludes children.
+   The thunk is evaluated once; exceptions and proof operations are unchanged. *)
+let simplification_phase stage count f =
+  let target = Option.value ~default:"-" !Gillian_result.Error.current_target in
+  L.normal (fun m ->
+      m "SIMPLIFY_PHASE BEGIN target=%s stage=%s count=%d" target stage count);
+  Reduction.preparation_profile_dump ();
+  let wall = Unix.gettimeofday () in
+  let cpu = Sys.time () in
+  let result = f () in
+  let cpu_elapsed = Sys.time () -. cpu in
+  let wall_elapsed = Unix.gettimeofday () -. wall in
+  L.normal (fun m ->
+      m "SIMPLIFY_PHASE END target=%s stage=%s wall_seconds=%.6f process_cpu_seconds=%.6f"
+        target stage wall_elapsed cpu_elapsed);
+  Reduction.preparation_profile_dump ();
+  result
+
 let reduce_pfs_in_place ?(matching = false) _ gamma (pfs : PFS.t) =
-  PFS.map_inplace (Reduction.reduce_lexpr ~matching ~gamma ~pfs) pfs
+  Reduction.reduce_pfs_in_place ~matching gamma pfs
 
 let sanitise_pfs ?(matching = false) store gamma pfs =
-  let old_pfs = ref (PFS.init ()) in
-  while not (PFS.equal !old_pfs pfs) do
-    old_pfs := PFS.copy pfs;
-    reduce_pfs_in_place ~matching store gamma pfs
-  done;
-  PFS.remove_duplicates pfs
+  simplification_phase "sanitise_fixedpoint" (PFS.length pfs) (fun () ->
+    let old_pfs = ref (PFS.init ()) in
+    while not (PFS.equal !old_pfs pfs) do
+      old_pfs := PFS.copy pfs;
+      reduce_pfs_in_place ~matching store gamma pfs
+    done);
+  simplification_phase "sanitise_dedup" (PFS.length pfs) (fun () ->
+    PFS.remove_duplicates pfs)
 
 let sanitise_pfs_no_store ?(matching = false) =
   sanitise_pfs ~matching (Hashtbl.create 1)
@@ -339,20 +359,22 @@ let simplify_pfs_and_gamma
   in
 
   let key : simpl_key_type =
-    {
+    simplification_phase "cache_key" (PFS.length lpfs) (fun () -> {
       kill_new_lvars;
       gamma_list = Type_env.to_list gamma;
       pfs_list = PFS.to_list lpfs;
       existentials = !existentials;
       matching;
       save_spec_vars (* rpfs_lvars = (PFS.lvars rpfs) *);
-    }
+    })
   in
-  match Simplification_cache.mem simplification_cache key with
+  match simplification_phase "cache_lookup" (PFS.length lpfs) (fun () ->
+    Simplification_cache.mem simplification_cache key) with
   | true ->
       (* update_statistics "Simpl: cached" 0.; *)
       let { simpl_gamma; simpl_pfs; simpl_existentials; subst } =
-        Simplification_cache.find simplification_cache key
+        simplification_phase "cache_find" (PFS.length lpfs) (fun () ->
+          Simplification_cache.find simplification_cache key)
       in
       Type_env.reset gamma simpl_gamma;
       PFS.set lpfs simpl_pfs;
@@ -404,12 +426,13 @@ let simplify_pfs_and_gamma
         `Stop
       in
       (* PF simplification *)
-      let rec filter_mapper_formula (pfs : PFS.t) (pf : Expr.t) :
+      let rec filter_mapper_formula
+          (ops : Reduction.formula_filter_ops) (pfs : PFS.t) (pf : Expr.t) :
           [ `Stop | `Replace of Expr.t | `Filter ] =
         (* Reduce current assertion *)
-        let rec_call = filter_mapper_formula pfs in
-        let extend_with = PFS.extend pfs in
-        let whole = Reduction.reduce_lexpr ~matching ~gamma ~pfs pf in
+        let rec_call = filter_mapper_formula ops pfs in
+        let extend_with = ops.extend in
+        let whole = ops.reduce_formula pf in
         match whole with
         (* These we must not encounter here *)
         | ForAll (bt, _) ->
@@ -591,10 +614,9 @@ let simplify_pfs_and_gamma
                       | false, true -> (y, x)
                       | _ -> (x, y)
                     in
-                    PFS.subst_expr_for_expr
+                    ops.substitute_expr
                       (UnOp (LstLen, LVar y))
-                      (UnOp (LstLen, LVar x))
-                      lpfs;
+                      (UnOp (LstLen, LVar x));
                     `Replace whole
                 | Lit (Loc _), ALoc _ | ALoc _, Lit (Loc _) ->
                     (* TODO: What should actually happen here... *)
@@ -620,7 +642,7 @@ let simplify_pfs_and_gamma
                     let temp_subst =
                       SESubst.init [ (ALoc alocr, ALoc alocl) ]
                     in
-                    PFS.substitution temp_subst lpfs;
+                    ops.substitute temp_subst;
                     let substituted =
                       SESubst.subst_in_expr ~partial:true temp_subst whole
                     in
@@ -667,7 +689,7 @@ let simplify_pfs_and_gamma
                               Error "Type mismatch"
                           | _ ->
                               let temp_subst = SESubst.init [ (LVar v, le) ] in
-                              PFS.substitution temp_subst lpfs;
+                              ops.substitute temp_subst;
 
                               (if SESubst.mem result (LVar v) then
                                  let le' =
@@ -679,7 +701,7 @@ let simplify_pfs_and_gamma
                                           ((Fmt.to_to_string Expr.pp) le)
                                           ((Fmt.to_to_string Expr.pp) le'))); *)
                                  if le <> le' then
-                                   PFS.extend lpfs (BinOp (le, ValueEqual, le')));
+                                   ops.extend (BinOp (le, ValueEqual, le')));
                               SESubst.iter result (fun x le ->
                                   let sle =
                                     SESubst.subst_in_expr temp_subst
@@ -904,7 +926,7 @@ let simplify_pfs_and_gamma
       (*****************************************
        ********* THIS IS THE BEGINNING *********
        *****************************************)
-      PFS.sort lpfs;
+      simplification_phase "initial_sort" (PFS.length lpfs) (fun () -> PFS.sort lpfs);
       let old_pfs = ref (PFS.init ()) in
       let iteration_count = ref 0 in
 
@@ -913,23 +935,29 @@ let simplify_pfs_and_gamma
         L.tmi (fun fmt -> fmt "Iteration: %d" !iteration_count);
         L.tmi (fun fmt -> fmt "PFS:\n%a" PFS.pp lpfs);
 
-        old_pfs := PFS.copy lpfs;
+        simplification_phase "iteration_copy" (PFS.length lpfs) (fun () ->
+          old_pfs := PFS.copy lpfs);
 
         (* Step 1 - Simplify unit types and sort *)
-        simplify_unit_types ();
-        PFS.sort lpfs;
+        simplification_phase "unit_types" (PFS.length lpfs) simplify_unit_types;
+        simplification_phase "iteration_sort" (PFS.length lpfs) (fun () -> PFS.sort lpfs);
 
         (* Step 2 - Main loop *)
-        if PFS.filter_map_stop (filter_mapper_formula lpfs) lpfs then
+        if simplification_phase "formula_filter" (PFS.length lpfs) (fun () ->
+          Reduction.filter_map_pfs_with_live_reduction ~matching gamma lpfs
+            (fun ops -> filter_mapper_formula ops lpfs)) then
           pfs_false lpfs rpfs;
 
-        PFS.substitution result lpfs;
+        simplification_phase "result_substitution" (PFS.length lpfs) (fun () ->
+          PFS.substitution result lpfs);
 
         if
           PFS.length lpfs = 0
           || (PFS.length lpfs > 0 && not (PFS.get_nth 0 lpfs = Some Expr.false_))
         then (
           (* Step 3 - Bring back my variables *)
+          simplification_phase "restore_sanitise" (PFS.length lpfs) (fun () ->
+          simplification_phase "restore_variables" (PFS.length lpfs) (fun () ->
           SESubst.iter result (fun v le ->
               match v with
               | LVar v ->
@@ -940,10 +968,11 @@ let simplify_pfs_and_gamma
                        || ((not kill_new_lvars) && vars_to_save <> SS.empty))
                     && not (Names.is_aloc_name v)
                   then PFS.extend lpfs (BinOp (LVar v, ValueEqual, le))
-              | _ -> ());
+              | _ -> ()));
 
-          sanitise_pfs_no_store ~matching gamma lpfs;
+          sanitise_pfs_no_store ~matching gamma lpfs);
 
+          simplification_phase "typing_cleanup" (PFS.length lpfs) (fun () ->
           let current_lvars = SS.union (PFS.lvars lpfs) (PFS.lvars rpfs) in
           Type_env.iter gamma (fun v _ ->
               if SS.mem v !vars_to_kill && not (SS.mem v current_lvars) then
@@ -957,17 +986,19 @@ let simplify_pfs_and_gamma
                        ( Expr.zero_i,
                          ILessThanEqual,
                          UnOp (LstLen, Expr.from_var_name v) ))
-              | _ -> ());
+              | _ -> ()));
 
-          analyse_list_structure lpfs;
+          simplification_phase "list_analysis" (PFS.length lpfs) (fun () ->
+            analyse_list_structure lpfs);
 
-          PFS.sort lpfs)
+          simplification_phase "final_sort" (PFS.length lpfs) (fun () -> PFS.sort lpfs))
       done;
 
       L.verbose (fun m -> m "PFS/Gamma simplification completed:\n");
       L.verbose (fun m -> m "PFS:@\n%a@\n" PFS.pp lpfs);
       L.verbose (fun m -> m "Gamma:@\n%a@\n" Type_env.pp gamma);
 
+      simplification_phase "cache_store" (PFS.length lpfs) (fun () ->
       let cached_simplification =
         {
           simpl_gamma = Type_env.to_list gamma;
@@ -977,12 +1008,13 @@ let simplify_pfs_and_gamma
         }
       in
       Simplification_cache.replace simplification_cache key
-        cached_simplification;
+        cached_simplification);
 
       (* Utils.Statistics.update_statistics "FOS: SimplifyPFSandGamma"
          (Unix.gettimeofday () -. t); *)
 
       (* Step 5 - Sort ALoc transitivity *)
+      simplification_phase "aloc_cleanup" (PFS.length lpfs) (fun () ->
       let rec find_loc_all_the_way aloc res =
         let f = find_loc_all_the_way in
         match SESubst.get result aloc with
@@ -1006,6 +1038,7 @@ let simplify_pfs_and_gamma
             PFS.substitution aloc_subst lpfs;
             PFS.substitution aloc_subst rpfs)
       in
+      ());
 
       (* Step 6 - Conclude *)
       (result, !existentials)

@@ -1048,6 +1048,9 @@ struct
     let prog', tests', tests =
       get_tests_to_verify ~init_data prog pnames_to_verify lnames_to_verify
     in
+    if Reduction.preparation_profile_enabled then (
+      Reduction.preparation_profile_dump ~final:true ();
+      Stdlib.exit 86);
     (* STEP 6: Run the symbolic tests *)
     let cur_time = Unix.gettimeofday () in
     Printf.printf "Running symbolic tests: %f\n" (cur_time -. !start_time);

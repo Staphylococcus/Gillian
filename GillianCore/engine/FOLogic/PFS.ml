@@ -64,7 +64,15 @@ let sort (p_formulae : t) : unit =
 let iter = Ext_list.iter
 let fold_left = Ext_list.fold_left
 let map_inplace = Ext_list.map_inplace
-let remove_duplicates pfs = Ext_list.remove_duplicates ~equal:Expr.equal pfs
+let remove_duplicates pfs =
+  let seen = ref Expr.Set.empty in
+  Ext_list.filter
+    (fun formula ->
+      if Expr.Set.mem formula !seen then false
+      else (
+        seen := Expr.Set.add formula !seen;
+        true))
+    pfs
 let filter_map_stop = Ext_list.filter_map_stop
 let filter_stop_cond = Ext_list.filter_stop_cond
 let filter = Ext_list.filter
