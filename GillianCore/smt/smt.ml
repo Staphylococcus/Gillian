@@ -2625,6 +2625,9 @@ let optional_timeout cap =
    preserve 0/2 for explicit (lower + 1) < upper, otherwise 0/1, whenever the
    original weak lower bound is present. A strict-only 0 < lower instead tries
    1/3 or 1/2, respectively; these are guesses, never added source premises.
+   Positive finite literal lower bounds raise this one candidate to the least
+   integral value satisfying those bounds. Preserve the old zero-bound pair
+   priority and decline successors outside the exact natural Number range.
    Every original assertion/type remains present. Only a native validated SAT
    model decides; failed hints keep the unchanged path. *)
 let nonempty_counter_model fs gamma =
@@ -2667,6 +2670,16 @@ let nonempty_counter_model fs gamma =
         if Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThanEqual,
           Expr.LVar lower)) fs then 0., upper_value
         else 1., upper_value +. 1. in
+      let span = upper_value -. lower_value in
+      let lower_value = Expr.Set.fold (fun formula value -> match formula with
+        | Expr.BinOp (Lit (Num bound), ((FLessThan | FLessThanEqual) as op), LVar x)
+          when x = lower && Float.is_finite bound && bound > 0. ->
+            max value (if op = FLessThan then floor bound +. 1. else ceil bound)
+        | _ -> value) fs lower_value in
+      let upper_value = lower_value +. span in
+      if not (Float.is_finite lower_value && lower_value >= 0.
+        && upper_value > lower_value && upper_value <= 9007199254740991.)
+      then None else
       let query = List.fold_left (fun query (name, value) -> Expr.Set.add
         (Expr.BinOp (Expr.LVar name, ValueEqual, Expr.num value)) query)
         fs [lower, lower_value; upper, upper_value] in

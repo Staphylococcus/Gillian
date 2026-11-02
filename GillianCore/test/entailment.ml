@@ -17706,3 +17706,73 @@ let tests = tests @
         Alcotest.test_case "strict natural counter conflicting hint fallback and whole contradiction" `Quick
           (with_total strict_counter_fallback_contradiction)]
    | _ -> [])
+
+(* General literal bounds use the complete retained frame, not a numeric slice.
+   These controls exercise native models, fallback and causal false guesses. *)
+let bounded_counter_original_cache () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,lower,upper,one = strict_counter_fixture "saved" in
+  let fs = List.fold_left (fun fs n -> Expr.Set.add
+      (one (Printf.sprintf "(%d. < #pcIndex)" n)) fs) fs [1;2;3;4] in
+  ignore (strict_counter_run ~hint:(5.,6.,"sat") ~wanted:(5.,6.)
+    "bounded-full-frame-prefix4" fs gamma lower upper "sat");
+  let log = nonblank_counter_read "file.log" and files = List.sort String.compare (nonblank_counter_files ()) in
+  let model = Smt.check_sat fs gamma in
+  Alcotest.(check bool) "bounded original full-key cache does not query" true
+    (log = nonblank_counter_read "file.log" && files = List.sort String.compare (nonblank_counter_files ()));
+  strict_counter_values "bounded-cached" (Option.get model) gamma lower upper (Some (5.,6.));
+  let changed = Hashtbl.copy gamma in Hashtbl.add changed "#bounded_unused" Type.BooleanType;
+  ignore (strict_counter_run ~hint:(5.,6.,"sat") ~wanted:(5.,6.)
+    "bounded-unused-Gamma-cache-miss" fs changed lower upper "sat");
+  List.iter (fun label ->
+    let fs,gamma,lower,upper,one = strict_counter_fixture label in
+    ignore (strict_counter_run ~hint:(5.,6.,"sat") ~wanted:(5.,6.) label
+      (Expr.Set.add (one "(4. < #pcIndex)") fs) gamma lower upper "sat"))
+    ["alpha";"collision"])
+
+let bounded_counter_literals () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,formula,span,a,b) ->
+    let fs,gamma,lower,upper,one = strict_counter_fixture label in
+    let fs = Expr.Set.add (one formula) fs in
+    let fs = if span then Expr.Set.add (one "((#pcIndex + 1.) < #nodeN)") fs else fs in
+    ignore (strict_counter_run ~hint:(a,b,"sat") ~wanted:(a,b)
+      label fs gamma lower upper "sat"))
+    ["weak-positive", "(4. <= #pcIndex)",false,4.,5.;
+     "strict-fraction", "(4.5 < #pcIndex)",false,5.,6.;
+     "weak-fraction", "(4.5 <= #pcIndex)",false,5.,6.;
+     "strict-extra-gap", "(4. < #pcIndex)",true,5.,7.;
+     "array-upper-bound", "(4294967293. < #pcIndex)",false,4294967294.,4294967295.])
+
+let bounded_counter_rejections () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,lower,upper,one = strict_counter_fixture "bounded-conflict" in
+  let fs = Expr.Set.add (one "(4. < #pcIndex)") fs in
+  ignore (strict_counter_run ~hint:(5.,6.,"unsat") ~required:true ~wanted:(6.,7.)
+    "bounded-false-hint-preserves-original-SAT"
+    (strict_counter_pins fs lower upper 6. 7.) gamma lower upper "sat");
+  let impossible = Expr.Set.add (bin ValueEqual upper (Expr.num 5.)) fs in
+  ignore (strict_counter_run ~hint:(5.,6.,"unsat")
+    "bounded-whole-frame-contradiction" impossible gamma lower upper "unsat");
+  List.iter (fun (label,query) ->
+    let caller = "control-bounded-counter-" ^ label in
+    let before = nonblank_counter_rows () in
+    let rejected,contexts = pending_context_capture (fun () ->
+      Option.is_none (Smt.exec_sat ~caller_kind:caller query gamma)) in
+    Alcotest.(check bool) (label ^ " native UNSAT, never an original SAT witness") true rejected;
+    finite_number_bound_complete label before contexts "unsat";
+    ignore (strict_counter_endpoint label before contexts caller query gamma "unsat"))
+    ["original-contradiction",impossible;
+     "below-literal-bound",strict_counter_pins fs lower upper 4. 5.;
+     "no-strict-gap",strict_counter_pins fs lower upper 5. 5.];
+  let overflow = Expr.Set.add (bin FLessThan (Expr.num 9007199254740990.) lower) fs in
+  ignore (strict_counter_run "unsafe-successor-public-fallback"
+    overflow gamma lower upper "unsat"))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None ->
+       [Alcotest.test_case "bound-derived counter complete original frame model and cache" `Quick
+          (with_total bounded_counter_original_cache);
+        Alcotest.test_case "bound-derived counter finite literals fractions and maximum array" `Quick
+          (with_total bounded_counter_literals);
+        Alcotest.test_case "bound-derived counter causal rejection fallback and unsafe successor" `Quick
+          (with_total bounded_counter_rejections)]
+   | _ -> [])
