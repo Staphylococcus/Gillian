@@ -8,6 +8,21 @@ open Prog_env
 module L = Logging
 module Utf16 = Utf16_encoding
 
+let smt_cost_profile_id = ref 0
+
+let smt_cost_profile caller =
+  if Sys.getenv_opt "GILLIAN_SMT_COST_PROFILE" <> Some "1" then
+    fun _ _ -> ()
+  else (
+    incr smt_cost_profile_id;
+    let id = !smt_cost_profile_id in
+    fun phase query ->
+      let wall = Unix.gettimeofday () in
+      let cpu = Sys.time () in
+      L.normal (fun m ->
+          m "SMT_COST id=%d phase=%s query=%s caller=%s wall=%.9f cpu=%.9f"
+            id phase query caller wall cpu))
+
 exception SMT_error of string
 
 let exceptf fmt = Fmt.kstr (fun s -> raise (SMT_error s)) fmt
@@ -2461,6 +2476,7 @@ let exec_sat'
     ~raw_unknown
     (fs : Expr.Set.t)
     (gamma : typenv) : model option =
+  let cost = smt_cost_profile caller_kind in
   let () = ensure_solver_open () in
   let primary_command = primary_check_command_for_phase phase_selection in
   let primary_command_text = primary_check_command_text primary_command in
@@ -2470,6 +2486,7 @@ let exec_sat'
           (Fmt.iter ~sep:(Fmt.any "@\n") Expr.Set.iter Expr.pp)
           fs pp_typenv gamma)
   in
+  let () = cost "setup" "none" in
   let () = reset_solver () in
   let () = cmd (set_option ":timeout" timeout_ms) in
   (* Reset retains options; restore the default unless this query explicitly
@@ -2478,7 +2495,9 @@ let exec_sat'
     cmd (set_option ":smt.phase_selection" (string_of_int phase_selection))
   in
   with_necessary_usr_datatypes @@ fun () ->
+  let () = cost "encode" "none" in
   let encoded_assertions, declarations = encode_assertions fs gamma in
+  let () = cost "capture" "none" in
   let query = if !Config.dump_smt then
     Dump.dump fs gamma encoded_assertions else "none" in
   let () = capture_native_smt_context ~query ~caller_kind ~timeout_ms
@@ -2497,13 +2516,16 @@ let exec_sat'
     | _ -> ());
     cmd declaration
   in
+  let () = cost "submit" query in
   let () = List.iter emit declarations in
   let () = List.iter cmd encoded_assertions in
   L.verbose (fun fmt -> fmt "Reached SMT.");
   L.normal (fun m ->
     m "SMT_PRIMARY_CHECK_DISPATCH query=%s command=%s" query primary_command_text);
   let current_solver = !solver in
+  let () = cost "primary-heartbeat" query in
   let result = primary_check current_solver primary_command in
+  let () = cost "postcheck" query in
   (* Join the actual native result to its allocated dump, without changing
      formulas, solver policy or the existing unknown diagnostic/error path. *)
   L.normal (fun m ->
@@ -2567,6 +2589,7 @@ let exec_sat'
           }
     | Unsat -> None
   in
+  let () = cost "done" query in
   ret
 
 let run_sat
@@ -4497,6 +4520,8 @@ let lift_model
     (gamma : typenv)
     (subst_update : string -> Expr.t -> unit)
     (target_vars : Expr.Set.t) : unit =
+  let cost = smt_cost_profile "model-lift" in
+  let () = cost "lift" "none" in
   let () = reset_solver () in
   let () = List.iter cmd model.sort_declarations in
   let model_eval = (model_eval' !solver model.values).eval [] in
@@ -4618,7 +4643,8 @@ let lift_model
                in
                m "SMT binding for %s: %s\n" x binding)
          in
-         v |> Option.iter (fun v -> subst_update x (Expr.Lit v)))
+         v |> Option.iter (fun v -> subst_update x (Expr.Lit v)));
+  cost "done" "none"
 
 (* Standalone preparation controls link the real verifier but must never start
    SMT. Close the untouched solver before module initialization can spawn it;
