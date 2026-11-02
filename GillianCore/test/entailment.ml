@@ -18606,6 +18606,7 @@ let wrapped_filter_counter_guards () = with_nonblank_counter_trace (fun () ->
      Missing Number-domain coverage is retained in strict_counter_guards_weak;
      never encode an invalid Gamma merely to force a recognizer decline. *)
   let fixture label =
+    let label = String.map (function ' ' -> '_' | c -> c) label in
     let lower=Expr.LVar ("#wrapped_guard_" ^ label ^ "_lower")
     and upper=Expr.LVar ("#wrapped_guard_" ^ label ^ "_upper") in
     let gamma=Hashtbl.create 3 in
