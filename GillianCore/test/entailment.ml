@@ -17826,7 +17826,7 @@ let compatible_seed_values label fs gamma model n i bits =
         (slice_bound_truth concrete))) fs;
   actual_n
 
-let compatible_seed_run ?(seed = Some "sat") ?(final = "sat") ?bits label fs gamma n i s t =
+let compatible_seed_run ?(seed = Some "sat") ?literal ?(final = "sat") ?bits label fs gamma n i s t =
   let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
   let before = nonblank_counter_rows () and full = "control-compatible-seed-full-contradiction" in
   let model,contexts = pending_context_capture (fun () ->
@@ -17840,20 +17840,28 @@ let compatible_seed_run ?(seed = Some "sat") ?(final = "sat") ?bits label fs gam
   List.iter (fun context -> Alcotest.(check bool) (label ^ " actual full model validation") true
     (pending_context_field "model_validate" (pending_context_field "initial_options" context)
      = `String "true")) contexts;
-  (match seed with
-   | None -> Alcotest.(check bool) (label ^ " incompatible literal seed has no native endpoint") true
+  (match seed,literal with
+   | None,Some value ->
+       let expected = fs |> Expr.Set.add (bin ValueEqual n (Expr.num value))
+         |> Expr.Set.add (bin ValueEqual i (Expr.num 0.)) in
+       ignore (zero_inclusive_list_context label contexts "optional-seeded-model" expected gamma);
+       ignore (nonblank_counter_observe label before "optional-seeded-model" "sat" expected gamma)
+   | None,None -> Alcotest.(check bool) (label ^ " incompatible literal seed has no native endpoint") true
        (not (List.exists (fun c -> pending_context_field "caller" c = `String "optional-seeded-model") contexts))
-   | Some status ->
+   | Some status,None ->
        let expected = compatible_seed_query fs n i s t in
        ignore (zero_inclusive_list_context label contexts "optional-seeded-model" expected gamma);
-       ignore (nonblank_counter_observe label before "optional-seeded-model" status expected gamma));
-  if final = "unsat" || seed <> Some "sat" then (
+       ignore (nonblank_counter_observe label before "optional-seeded-model" status expected gamma)
+   | Some _,Some _ -> Alcotest.fail "ambiguous expected seed route");
+  if final = "unsat" || (seed <> Some "sat" && literal = None) then (
     let caller = if final = "unsat" then full else "required-complete" in
     ignore (zero_inclusive_list_context label contexts caller fs gamma);
     ignore (nonblank_counter_observe label before caller final fs gamma));
   Alcotest.(check bool) (label ^ " complete-query returned model status") (final = "sat") (Option.is_some model);
   Option.iter (fun model ->
     let actual = compatible_seed_values label fs gamma model n i bits in
+    Option.iter (fun wanted -> Alcotest.(check int64) (label ^ " actual literal-fallback Number")
+      (Int64.bits_of_float wanted) (Int64.bits_of_float actual)) literal;
     if seed = Some "sat" then Alcotest.(check bool)
       (label ^ " actual compatible seed model is numeric zero") true (actual = 0.)) model;
   nonblank_counter_retained label fs gamma original types;
@@ -17875,15 +17883,15 @@ let compatible_seed_zero_cache () = with_nonblank_counter_trace (fun () ->
   ignore (compatible_seed_run "compatible-unused-Gamma-cache-miss" fs changed n i s t))
 
 let compatible_seed_literal_bounds () = with_nonblank_counter_trace (fun () ->
-  List.iter (fun (label,make) ->
+  List.iter (fun (label,make,literal) ->
     let fs,gamma,n,i,s,t = compatible_seed_fixture label in
-    ignore (compatible_seed_run ~seed:None label (Expr.Set.add (make n) fs) gamma n i s t))
-    ["strict_lower",(fun n -> bin FLessThan (Expr.num 2.) n);
-     "weak_lower",(fun n -> bin FLessThanEqual (Expr.num 2.) n);
-     "strict_upper",(fun n -> bin FLessThan n (Expr.num (-2.)));
-     "weak_upper",(fun n -> bin FLessThanEqual n (Expr.num (-2.)));
-     "right_literal_equality",(fun n -> bin Equal n (Expr.num 3.));
-     "left_literal_equality",(fun n -> bin ValueEqual (Expr.num 3.) n)])
+    ignore (compatible_seed_run ~seed:None ?literal label (Expr.Set.add (make n) fs) gamma n i s t))
+    ["strict_lower",(fun n -> bin FLessThan (Expr.num 2.) n),Some 3.;
+     "weak_lower",(fun n -> bin FLessThanEqual (Expr.num 2.) n),Some 2.;
+     "strict_upper",(fun n -> bin FLessThan n (Expr.num (-2.))),None;
+     "weak_upper",(fun n -> bin FLessThanEqual n (Expr.num (-2.))),None;
+     "right_literal_equality",(fun n -> bin Equal n (Expr.num 3.)),None;
+     "left_literal_equality",(fun n -> bin ValueEqual (Expr.num 3.) n),None])
 
 let compatible_seed_contradiction_fallback () = with_nonblank_counter_trace (fun () ->
   let fs,gamma,n,i,s,t = compatible_seed_fixture "contradiction" in
@@ -17914,4 +17922,161 @@ let tests = tests @
           (with_total compatible_seed_contradiction_fallback);
         Alcotest.test_case "compatible literal seeds preserve both signed-zero identities" `Quick
           (with_total compatible_seed_signed_zeros)]
+   | _ -> [])
+
+(* Complete retained q1655 GIL frame, not a numeric slice or imported SMT.
+   Restore its actual ALoc before alpha-renaming all logical variables. *)
+let passive_length_frame label =
+  let name x = if label = "saved" then x else if label = "collision" then
+      if x = "#nodeN" then "#z_passive_count" else if x = "#lvar_1833" then "#a_passive_index"
+      else x ^ "_passive_collision" else x ^ "_passive_" ^ label in
+  let rename = object inherit [_] Visitors.endo
+    method! visit_LVar () _ x = if x = "#loc_372" then Expr.ALoc x else Expr.LVar (name x)
+  end in
+  let one text = let parsed = parse_gil_set [text] in
+    Alcotest.(check int) "passive length one original AST atom" 1 (Expr.Set.cardinal parsed);
+    rename#visit_expr () (Expr.Set.choose parsed) in
+  let fs = Expr.Set.of_list (List.map one [
+    "(! (u16\"2\" -e- #pushWriteKeys))";
+    "(! (#nodeB == #loc_372))"; "(! (#loc_372 == #nodeB))";
+    "(is_int #lvar_1833)"; "(is_int #nodeN)";
+    "(0i i<= (l-len #lvar_1372))"; "(0i i<= (l-len #lvar_1373))";
+    "(0i i<= (l-len #lvar_1838))"; "(0i i<= (l-len #nodeValues))";
+    "(0i i<= (l-len #pcSuffix))"; "(0i i<= (as_int #nodeN))";
+    "(0i i<= (-2i i+ (as_int #nodeN)))";
+    "(0. <= #lvar_1833)"; "(0. <= #nodeN)"; "(2. < #nodeN)";
+    "(#lvar_1674 v== {{ #lvar_1729 }})"; "(#lvar_1675 v== -{ u16\"1\" }-)";
+    "(#lvar_1730 v== {{  }})"; "(#lvar_1731 v== -{  }-)";
+    "(#lvar_1791 v== u16\"$.payload[\")"; "(#lvar_1792 v== 4.)";
+    "(#lvar_1810 v== u16\"$.payload[2]\")"; "(#lvar_1811 v== 4.)";
+    "(#lvar_1828 v== 2.)"; "(#lvar_1833 == 0.)"; "(#lvar_1833 < 1.)";
+    "(#lvar_1834 v== 2.)"; "(#nodeN == #nodeN)"; "(#nodeN <= 4294967295.)";
+    "((u16-len #lvar_1673) i<= 9007199254740991i)";
+    "((u16-len #lvar_1729) i<= 9007199254740991i)";
+    "((u16-len #pcCurrent) i<= 9007199254740991i)"]) in
+  let gamma = Hashtbl.create 26 in
+  List.iter (fun (x,typ) -> Hashtbl.add gamma (name x) typ)
+    ["#lvar_1370",Type.SetType;"#lvar_1833",Type.NumberType;"#nodeKeys",Type.SetType;
+     "#lvar_1673",Type.Utf16Type;"#lvar_1372",Type.ListType;"#lvar_1369",Type.SetType;
+     "#lvar_1837",Type.Utf16Type;"#lvar_1839",Type.SetType;"#lvar_1373",Type.ListType;
+     "#nodeMax",Type.NumberType;"#lvar_1831",Type.ObjectType;"#nodeSafe",Type.NumberType;
+     "#nodeMin",Type.NumberType;"#nodeB",Type.ObjectType;"#lvar_1830",Type.ObjectType;
+     "#lvar_1838",Type.ListType;"#pcSuffix",Type.ListType;"#nodeN",Type.NumberType;
+     "#pcBeforeKeys",Type.SetType;"#pcAfterKeys",Type.SetType;"#nodeEps",Type.NumberType;
+     "#lvar_1729",Type.Utf16Type;"#pcCurrent",Type.Utf16Type;"#lvar_1371",Type.SetType;
+     "#nodeValues",Type.ListType;"#pushWriteKeys",Type.SetType];
+  Alcotest.(check int) "exact complete push-frame FS32" 32 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "exact complete push-frame Gamma26" 26 (Hashtbl.length gamma);
+  Alcotest.(check bool) "push-frame actual ALoc preserved" true
+    (Expr.Set.exists (fun e -> Utils.Containers.SS.mem "#loc_372" (Expr.alocs e)) fs
+     && not (Expr.Set.exists (fun e -> Utils.Containers.SS.mem "#loc_372" (Expr.lvars e)) fs));
+  fs,gamma,Expr.LVar (name "#nodeN"),Expr.LVar (name "#lvar_1833"),one
+
+let passive_length_run ?(candidate = Some 3.) ?(status = "sat") label fs gamma n i =
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () and full = "control-passive-length-full-contradiction" in
+  let model,contexts = pending_context_capture (fun () ->
+    let model = Smt.check_sat fs gamma in
+    if status = "unsat" then (
+      Alcotest.(check bool) (label ^ " original contradiction rejected") true (Option.is_none model);
+      Alcotest.(check bool) (label ^ " distinct complete original native UNSAT") true
+        (Option.is_none (Smt.exec_sat ~caller_kind:full fs gamma)));
+    model) in
+  finite_number_bound_complete label before contexts status;
+  List.iter (fun context -> Alcotest.(check bool) (label ^ " actual full model validation") true
+    (pending_context_field "model_validate" (pending_context_field "initial_options" context)
+     = `String "true")) contexts;
+  (match candidate with
+   | Some value ->
+       let expected = fs |> Expr.Set.add (bin ValueEqual n (Expr.num value))
+         |> Expr.Set.add (bin ValueEqual i (Expr.num 0.)) in
+       let query = zero_inclusive_list_context label contexts "optional-seeded-model" expected gamma in
+       ignore (nonblank_counter_observe label before "optional-seeded-model" "sat" expected gamma);
+       let selected = List.find (fun c -> pending_context_field "query" c = `String query) contexts in
+       Alcotest.(check bool) "full candidate retains actual ALoc Int declaration" true
+         (match pending_context_field "encoded_assertions" selected with
+          | `List xs -> List.mem (`String "(declare-const $$loc_372 Int)") xs | _ -> false)
+   | None ->
+       (* No hint endpoint is an observed eligibility decline, never a native
+          rejection of that hint. The complete original still must decide. *)
+       Alcotest.(check bool) (label ^ " no optional seed after an excluded observation") true
+         (not (List.exists (fun c -> pending_context_field "caller" c = `String "optional-seeded-model") contexts));
+       let caller = if status = "unsat" then full else "required-complete" in
+       ignore (zero_inclusive_list_context label contexts caller fs gamma);
+       ignore (nonblank_counter_observe label before caller status fs gamma));
+  Alcotest.(check bool) (label ^ " complete model status") (status = "sat") (Option.is_some model);
+  Option.iter (fun model ->
+    let actual = compatible_seed_values label fs gamma model n i None in
+    Option.iter (fun wanted -> Alcotest.(check int64) (label ^ " actual literal-derived count")
+      (Int64.bits_of_float wanted) (Int64.bits_of_float actual)) candidate) model;
+  nonblank_counter_retained label fs gamma original types;
+  model
+
+let passive_length_original_cache () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,n,i,one = passive_length_frame "saved" in
+  ignore (passive_length_run "full-original32" fs gamma n i);
+  let log = nonblank_counter_read "file.log" and dumps = List.sort String.compare (nonblank_counter_files ())
+  and contexts = Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare in
+  let cached = Smt.check_sat fs gamma in
+  Alcotest.(check bool) "passive length complete original cache emits no endpoint" true
+    (log = nonblank_counter_read "file.log" && dumps = List.sort String.compare (nonblank_counter_files ())
+     && contexts = (Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare));
+  Alcotest.(check bool) "cached complete native model retains count3" true
+    (compatible_seed_values "passive-cached" fs gamma (Option.get cached) n i None = 3.);
+  let changed = Hashtbl.copy gamma in Hashtbl.add changed "#unused_passive_object" Type.ObjectType;
+  ignore (passive_length_run "unused-Gamma-cache-miss" fs changed n i);
+  let current = one "#pcCurrent" in
+  let kept = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical "kept-current")) in
+  let model = passive_length_run "full-frame-retains-nonempty-string"
+    (Expr.Set.add (bin ValueEqual current kept) fs) gamma n i |> Option.get in
+  let lifted = Hashtbl.create 1 in Smt.lift_model model gamma (Hashtbl.add lifted) (Expr.Set.singleton current);
+  match current with
+  | Expr.LVar name -> Alcotest.(check bool) "native UTF16 model is not pinned empty" true
+      (Hashtbl.find_opt lifted name = Some kept)
+  | _ -> assert false)
+
+let passive_length_renamed () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun label -> let fs,gamma,n,i,_ = passive_length_frame label in
+    ignore (passive_length_run label fs gamma n i)) ["alpha";"collision"])
+
+let passive_length_excluded_observations () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,observation,status) ->
+    let fs,gamma,n,i,one = passive_length_frame label in
+    ignore (passive_length_run ~candidate:None ~status label
+      (Expr.Set.add (one observation) fs) gamma n i))
+    ["negative-upper","((u16-len #pcCurrent) i<= -1i)","unsat";
+     "negated-upper","(! ((u16-len #pcCurrent) i<= 0i))","sat";
+     "raw-lower","(0i i<= (u16-len #pcCurrent))","sat";
+     "content","((u16-trim #pcCurrent) == u16\"\")","sat"])
+
+let passive_length_rejections_zero () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,n,i,_ = passive_length_frame "rejections" in
+  ignore (passive_length_run ~candidate:None ~status:"unsat" "whole-original-contradiction"
+    (Expr.Set.add (bin FLessThanEqual n (Expr.num 2.)) fs) gamma n i);
+  List.iter (fun (label,value) ->
+    let caller = "control-passive-length-" ^ label in
+    let expected = fs |> Expr.Set.add (bin ValueEqual n (Expr.num value))
+      |> Expr.Set.add (bin ValueEqual i (Expr.num 0.)) in
+    let before = nonblank_counter_rows () in
+    let rejected,contexts = pending_context_capture (fun () ->
+      Option.is_none (Smt.exec_sat ~caller_kind:caller expected gamma)) in
+    Alcotest.(check bool) (label ^ " actual full-query invalid hint UNSAT") true rejected;
+    finite_number_bound_complete label before contexts "unsat";
+    ignore (zero_inclusive_list_context label contexts caller expected gamma);
+    ignore (nonblank_counter_observe label before caller "unsat" expected gamma))
+    ["count2",2.;"count-overflow",4294967296.];
+  let fs,gamma,n,i,s,t = compatible_seed_fixture "passive_zero" in
+  ignore (compatible_seed_run "passive-upper-bounds-keep-compatible-zero-first" fs gamma n i s t))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None ->
+       [Alcotest.test_case "passive UTF16 upper lengths complete push frame model cache and free contents" `Quick
+          (with_total passive_length_original_cache);
+        Alcotest.test_case "passive UTF16 upper lengths renamed and colliding full-frame models" `Quick
+          (with_total passive_length_renamed);
+        Alcotest.test_case "passive UTF16 upper lengths excluded observations preserve full fallback" `Quick
+          (with_total passive_length_excluded_observations);
+        Alcotest.test_case "passive UTF16 upper lengths complete rejections and old zero priority" `Quick
+          (with_total passive_length_rejections_zero)]
    | _ -> [])

@@ -3375,7 +3375,12 @@ let seeded_model fs gamma =
               super#visit_expr () e
           end
         in
-        Expr.Set.iter (contents#visit_expr ()) fs;
+        Expr.Set.iter (function
+          | Expr.BinOp (UnOp (Utf16Len, LVar string), ILessThanEqual,
+              Lit (Int bound))
+            when Hashtbl.find_opt gamma string = Some Type.Utf16Type
+              && Z.sign bound >= 0 -> ()
+          | expression -> contents#visit_expr () expression) fs;
         if contents#seen then None else
         let number x = Hashtbl.find_opt gamma x = Some Type.NumberType in
         let literal_values = Expr.Set.fold (fun e acc -> match e with
