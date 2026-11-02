@@ -560,6 +560,7 @@ let unfold_preds (preds : (string, Pred.t) Hashtbl.t) :
   (copy_preds, recursion_info)
 
 let unfold_spec
+    ?(emit_provenance = true)
     (preds : (string, Pred.t) Hashtbl.t)
     (rec_info : (string, bool) Hashtbl.t)
     (spec : Spec.t) : Spec.t =
@@ -602,7 +603,8 @@ let unfold_spec
       pres
   in
   let spec_sspecs =
-    if not (Preparation_provenance.captures "procedure" spec.spec_name) then
+    if not emit_provenance ||
+       not (Preparation_provenance.captures "procedure" spec.spec_name) then
       List.concat_map aux spec.spec_sspecs
     else
       List.concat (List.mapi (fun ordinal (sspec : Spec.st) ->
@@ -855,6 +857,7 @@ let unfold_procs
   copy_procs
 
 let unfold_specs
+    ~emit_provenance
     (preds : (string, Pred.t) Hashtbl.t)
     (rec_info : (string, bool) Hashtbl.t)
     (specs : (string, Spec.t) Hashtbl.t) : (string, Spec.t) Hashtbl.t =
@@ -862,7 +865,7 @@ let unfold_specs
 
   Hashtbl.iter
     (fun name (spec : Spec.t) ->
-      let spec' = unfold_spec preds rec_info spec in
+      let spec' = unfold_spec ~emit_provenance:(emit_provenance name) preds rec_info spec in
       Hashtbl.replace copy_specs name spec')
     specs;
 
@@ -1080,7 +1083,16 @@ let preprocess (prog : ('a, int) Prog.t) (unfold : bool) : ('a, int) Prog.t =
         let procs'' = unfold_procs preds'' rec_info procs' in
         let bi_specs = unfold_bispecs preds'' rec_info prog.bi_specs in
         let lemmas'' = unfold_lemmas preds'' rec_info lemmas' in
-        let onlyspecs' = unfold_specs preds'' rec_info onlyspecs in
+        (* Total verification uses an attached body contract even when invalid
+           or unchecked; never emit a second parent for its shadowed axiom.
+           Unfold the axiom normally so passive capture cannot alter semantics. *)
+        let emit_provenance name =
+          not !Config.Verification.total ||
+          match Hashtbl.find_opt procs' name with
+          | Some proc -> Option.is_none proc.Proc.proc_spec
+          | None -> true
+        in
+        let onlyspecs' = unfold_specs ~emit_provenance preds'' rec_info onlyspecs in
         (* create_partial_matches procs'';  *)
         (preds'', procs'', bi_specs, lemmas'', onlyspecs')
   in
