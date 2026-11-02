@@ -18550,9 +18550,10 @@ let wrapped_filter_counter_original () = with_nonblank_counter_trace (fun () ->
   let encoded = match pending_context_field "encoded_assertions" c with
     | `List xs -> List.map typed_lookup_alias_text xs
     | _ -> Alcotest.fail "encoded assertions are not a native list" in
-  let pins = [
-    "(assert(=(Num $$lvar_1429)(Num((_ to_fp 11 53)#x0000000000000000))))";
-    "(assert(=(Num $$n)(Num((_ to_fp 11 53)#x3ff0000000000000))))"] in
+  let pins = List.map (fun s ->
+    Fmt.str "%a" Sexplib.Sexp.pp_mach (Sexplib.Sexp.of_string s)) [
+    "(assert (= (Elem (Num $$lvar_1429)) (Elem (Num ((_ to_fp 11 53) #x0000000000000000)))))";
+    "(assert (= (Elem (Num $$n)) (Elem (Num ((_ to_fp 11 53) #x3ff0000000000000)))))"] in
   List.iter (fun pin -> Alcotest.(check int) "one literal hint only" 1
     (List.length (List.filter (String.equal pin) encoded))) pins;
   let base = List.filter (fun x -> not (List.mem x pins)) encoded |> List.sort String.compare in
