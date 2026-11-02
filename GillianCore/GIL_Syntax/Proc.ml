@@ -183,6 +183,57 @@ let indexed_of_labeled (lproc : ('annot, string) t) : ('annot, int) t =
   let proc : ('annot, int) t = { lproc with proc_body = b } in
   proc
 
+(* Proof-input aliases must not become executable locals, including through a
+   macro's free variables. Reject macro cycles/missing definitions conservatively. *)
+let validate_raw_args ~macros proc =
+  match proc.proc_spec with
+  | None -> ()
+  | Some spec ->
+      Spec.validate_raw_args spec;
+      match spec.spec_raw_args with
+      | None -> ()
+      | Some names ->
+          let module SS = Containers.SS in
+          let surplus = List.filteri (fun i _ -> i >= List.length proc.proc_params) names |> SS.of_list in
+          let check vars =
+            if not (SS.is_empty (SS.inter vars surplus)) then
+              invalid_arg "Invalid raw argument interface: surplus input occurs in body"
+          in
+          let visitor = object
+            inherit [_] Visitors.iter
+            method! visit_PVar () name = check (SS.singleton name)
+          end in
+          let binders names = check (SS.of_list names) in
+          let rec logic seen cmd =
+            check (LCmd.pvars cmd);
+            visitor#visit_lcmd () cmd;
+            match cmd with
+            | LCmd.If (_, yes, no) -> List.iter (logic seen) (yes @ no)
+            | SL (SepAssert (_, names) | Invariant (_, names, _) | Consume (_, names)
+                | ApplyLem (_, _, names)) -> binders names
+            | SL (Unfold (_, _, Some pairs, _)) ->
+                List.iter (fun (left, right) -> binders [left; right]) pairs
+            | SL (Fold (_, _, Some (_, pairs))) -> binders (List.map fst pairs)
+            | Macro (name, _) ->
+                if SS.mem name seen then invalid_arg "Raw argument interface: cyclic macro";
+                let macro = match Hashtbl.find_opt macros name with
+                  | Some macro -> macro
+                  | None -> invalid_arg "Raw argument interface: missing macro" in
+                List.iter (logic (SS.add name seen)) macro.Macro.macro_definition
+            | _ -> ()
+          in
+          Array.iter (fun (_, _, cmd) ->
+            check (Cmd.pvars cmd);
+            visitor#visit_cmd () cmd;
+            match cmd with
+            | Cmd.Call (call, _) ->
+                Option.iter (fun (_, pairs) -> binders (List.map fst pairs)) call.bindings
+            | Par calls -> List.iter (fun call ->
+                Option.iter (fun (_, pairs) -> binders (List.map fst pairs)) call.Cmd.bindings) calls
+            | Cmd.PhiAssignment phis -> check (SS.of_list (List.map fst phis))
+            | Logic cmd -> logic SS.empty cmd
+            | _ -> ()) proc.proc_body
+
 let check_proc_spec_correspondence
     (procedures : (string, ('annot, 'a) t) Hashtbl.t) : unit =
   Hashtbl.iter

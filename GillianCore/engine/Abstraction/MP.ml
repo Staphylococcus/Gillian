@@ -871,7 +871,7 @@ let init_specs (preds : (string, int list) Hashtbl.t) (specs : Spec.t list) :
                 spec.spec_name
                 (List.length spec.spec_sspecs)));
         let params =
-          KB.of_list (List.map (fun x -> Expr.PVar x) spec.spec_params)
+          KB.of_list (List.map (fun x -> Expr.PVar x) (Spec.input_params spec))
         in
         let sspecs :
             (Asrt.t * ((string * SS.t) option * (Flag.t * Asrt.t list) option))
@@ -1121,9 +1121,9 @@ let pp_spec
       spec.spec_sspecs
   in
   let pp_sspec = pp_sspec ?preds_printer ~preds in
-  Fmt.pf fmt "@[<v 2>spec %s (@[<h>%a@])@\n%a;@\n%a@]" spec.spec_name
+  Fmt.pf fmt "@[<v 2>spec %s (@[<h>%a@])%a@\n%a;@\n%a@]" spec.spec_name
     Fmt.(list ~sep:comma string)
-    spec.spec_params
+    spec.spec_params Spec.pp_raw_args spec
     Fmt.(list ~sep:(any "@\n") pp_sspec)
     normal_specs
     Fmt.(list ~sep:(any "@\n") pp_sspec)
@@ -1140,14 +1140,14 @@ let pp_normal_spec
       spec.spec_sspecs
   in
   let pp_sspec = pp_sspec ?preds_printer ~preds in
-  Fmt.pf fmt "@[<v 2>spec %s (@[<h>%a@])@\n%a@]" spec.spec_name
+  Fmt.pf fmt "@[<v 2>spec %s (@[<h>%a@])%a@\n%a@]" spec.spec_name
     Fmt.(list ~sep:comma string)
-    spec.spec_params
+    spec.spec_params Spec.pp_raw_args spec
     Fmt.(list ~sep:(any "@\n") pp_sspec)
     normal_specs
 
 let add_spec (prog : 'a prog) (spec : Spec.t) : unit =
-  let params = KB.of_list (List.map (fun x -> Expr.PVar x) spec.spec_params) in
+  let params = KB.of_list (List.map (fun x -> Expr.PVar x) (Spec.input_params spec)) in
   let proc =
     match Prog.get_proc prog.prog spec.spec_name with
     | None -> raise (Failure "DEATH. ADDING SPEC TO UNKNOWN PROC!")

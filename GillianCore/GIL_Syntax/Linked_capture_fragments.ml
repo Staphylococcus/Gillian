@@ -147,6 +147,7 @@ let read_single r route : TypeDef__.single_spec =
 let write_spec w route (s:TypeDef__.spec) =
   ws w (route@["spec_name"]) s.spec_name;
   write_list w ws (route@["spec_params"]) s.spec_params;
+  write_option w (fun w route -> write_list w ws route) (route@["spec_raw_args"]) s.spec_raw_args;
   write_list w write_single (route@["spec_sspecs"]) s.spec_sspecs;
   wb w (route@["spec_normalised"]) s.spec_normalised;
   wb w (route@["spec_incomplete"]) s.spec_incomplete;
@@ -155,12 +156,13 @@ let write_spec w route (s:TypeDef__.spec) =
 let read_spec r route : TypeDef__.spec =
   let spec_name=rs r (route@["spec_name"]) in
   let spec_params=read_list r rs (route@["spec_params"]) in
+  let spec_raw_args=read_option r (fun r route -> read_list r rs route) (route@["spec_raw_args"]) in
   let spec_sspecs=read_list r read_single (route@["spec_sspecs"]) in
   let spec_normalised=rb r (route@["spec_normalised"]) in
   let spec_incomplete=rb r (route@["spec_incomplete"]) in
   let spec_to_verify=rb r (route@["spec_to_verify"]) in
   let spec_location=read_option r rl (route@["spec_location"]) in
-  {spec_name;spec_params;spec_sspecs;spec_normalised;spec_incomplete;spec_to_verify;spec_location}
+  {spec_name;spec_params;spec_raw_args;spec_sspecs;spec_normalised;spec_incomplete;spec_to_verify;spec_location}
 let write_pred w route (p:TypeDef__.pred) =
   ws w (route@["pred_name"]) p.pred_name;
   write_option w ws (route@["pred_source_path"]) p.pred_source_path;

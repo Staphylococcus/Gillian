@@ -629,6 +629,9 @@ let initialise_v1 s prog =
        "parent_count", `Int (Array.length source.groups);
        "parameters", (C.guard_plain spec.spec_params;
          `List (List.map (fun p -> `String p) spec.spec_params));
+       "raw_arguments", (C.guard_plain spec.spec_raw_args;
+         match spec.spec_raw_args with None -> `Null | Some names ->
+           `List (List.map (fun name -> `String name) names));
        "spec_to_verify", `Bool spec.spec_to_verify;
        "source_path", (C.guard_plain proc.proc_source_path;
          match proc.proc_source_path with None -> `Null | Some p -> `String p);
@@ -698,7 +701,9 @@ let framed_parents s ~event ~prepared procs lemmas =
          F.values[F.bytes n;F.list(fun add -> List.iter(fun x -> add(F.bytes x))xs)])t in
       emit_framed s event (F.fields(stream_source source @[
         "raw_parent",F.int ordinal;"parent_count",F.int(Array.length source.groups);
-        "parameters",parameters spec.spec_params;"spec_to_verify",F.bool spec.spec_to_verify;
+        "parameters",parameters spec.spec_params;
+        "raw_arguments",(match spec.spec_raw_args with None -> F.null | Some names -> parameters names);
+        "spec_to_verify",F.bool spec.spec_to_verify;
         "source_path",path proc.proc_source_path;
         "source_location",stream_location spec.spec_location;
         "pre",stream_located c.ss_pre;"posts",stream_posts c.ss_posts;

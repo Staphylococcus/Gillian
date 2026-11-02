@@ -119,6 +119,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token UTF16SUB
 %token LSTCAT
 %token VERIFY_SCOPE
+%token RAW_ARGS
 %token LSTREV
 %token STRCAT
 %token UTF16CAT
@@ -805,15 +806,20 @@ g_only_spec_target:
 g_spec_target:
 (* (incomplete) spec xpto (x, y) [[ assertion ]] [[ post1; ...; postn ]] NORMAL|ERROR *)
   incomplete = option(INCOMPLETE); SPEC; spec_head = spec_head_target;
+  spec_raw_args = option(raw_args_target);
   spec_sspecs = separated_nonempty_list(SCOLON, g_sspec_target)
   { let (spec_name, spec_params) = spec_head in
     let spec_normalised = !Config.previously_normalised in
     let spec_to_verify = true in
     let spec_incomplete = Option.is_some incomplete in
     let spec_location = Some (get_loc $startpos $endpos) in
-    let spec : Spec.t = { spec_name; spec_params; spec_sspecs; spec_normalised; spec_incomplete; spec_to_verify; spec_location } in
+    let spec : Spec.t = { spec_name; spec_params; spec_raw_args; spec_sspecs; spec_normalised; spec_incomplete; spec_to_verify; spec_location } in
     spec
   }
+;
+
+raw_args_target:
+  RAW_ARGS; LBRACE; names = separated_list(COMMA, proc_name); RBRACE { names }
 ;
 
 g_spec_line:

@@ -1084,7 +1084,9 @@ struct
           if
             Option.is_some prog.totality
             && (not !inline)
-            && List.length v_args <> List.length params
+            && List.length v_args <> (match spec with
+                 | Some s -> Spec.summary_arity s.data
+                 | None -> List.length params)
           then
             Totality.unsupported
               (pid ^ " requires exact call arity for a total summary.");
@@ -1108,6 +1110,12 @@ struct
                       symb_exec_next := false;
                       symb_exec_proc ()
                   | false ->
+                      let args = match spec.data.spec_raw_args with
+                        | None -> args
+                        | Some _ ->
+                            if Option.is_none prog.totality then
+                              Totality.unsupported "raw argument summaries require total verification.";
+                            v_args in
                       exec_with_spec spec x j args pid subst symb_exec_proc
                         eval_state)
               | None ->
@@ -1191,7 +1199,10 @@ struct
                 let spec, params = get_spec_and_params prog pid state in
                 let args = build_args v_args params in
                 match spec with
-                | Some spec -> (spec, var_name, pid, args, bindings)
+                | Some spec ->
+                    if Option.is_some spec.data.spec_raw_args then
+                      Totality.unsupported "raw argument summaries are not supported in parallel calls.";
+                    (spec, var_name, pid, args, bindings)
                 | None ->
                     failwith
                       "Found function without specification in a parallel call")

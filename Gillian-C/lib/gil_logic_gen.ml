@@ -781,6 +781,7 @@ let trans_spec ~ann ?(only_spec = false) cl_spec =
       {
         spec_name = fname;
         spec_params = params;
+        spec_raw_args = None;
         spec_sspecs = List.map (trans_sspec ~ann fname) sspecs;
         spec_normalised = false;
         spec_incomplete = false;

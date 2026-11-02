@@ -460,6 +460,10 @@ struct
       (preds : MP.preds_tbl_t)
       (pred_ins : (string, int list) Hashtbl.t)
       (spec : Spec.t) : t list * Spec.t =
+    Spec.validate_raw_args spec;
+    if Option.is_some spec.spec_raw_args &&
+       (not !Config.Verification.total || spec.spec_name = !Config.entry_point) then
+      Totality.unsupported "raw argument interfaces require total verification of a non-entry helper.";
     List.iter
       (fun (s : Spec.st) ->
         Spec.validate_verifier_scope s;
@@ -491,7 +495,7 @@ struct
           (fun (id, tests, sspecs) sspec ->
             let tests_and_specs =
               testify_sspec ~init_data spec_name preds pred_ins spec.spec_name
-                spec.spec_params id sspec
+                (Spec.input_params spec) id sspec
             in
             let new_tests, new_specs =
               List.fold_left
@@ -1149,6 +1153,8 @@ struct
 
   let check_closed_entry_shape (prog : prog_t) proc =
       let spec = Totality.spec proc in
+      if Option.is_some spec.spec_raw_args then
+        Totality.unsupported "closed entry/initializer cannot declare raw argument inputs.";
       (* Concrete fresh names are an implementation detail, represented by
          abstract fresh identities in this execution. Neither the program nor
          its postcondition may guess the concrete allocator's next name. *)

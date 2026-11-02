@@ -110,6 +110,7 @@ let attach_checked_specs
       if spec.spec_name <> name || stub.proc_params <> target.proc_params ||
          spec.spec_params <> target.proc_params then
         reject ("ordered source formals/name mismatch " ^ name);
+      Proc.validate_raw_args ~macros:prog.macros { target with Proc.proc_spec = Some spec };
       if spec.spec_normalised then reject ("normalized sidecar contract " ^ name);
       if spec.spec_incomplete || not spec.spec_to_verify || spec.spec_sspecs = [] then
         reject ("incomplete or unchecked contract " ^ name);

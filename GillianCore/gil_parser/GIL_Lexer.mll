@@ -134,6 +134,7 @@
         "lemma",        GIL_Parser.LEMMA;
         "variant",      GIL_Parser.VARIANT;
         "verify_scope", GIL_Parser.VERIFY_SCOPE;
+        "raw_args", GIL_Parser.RAW_ARGS;
         "spec",         GIL_Parser.SPEC;
         "bispec",       GIL_Parser.BISPEC;
         "normal",       GIL_Parser.NORMAL;

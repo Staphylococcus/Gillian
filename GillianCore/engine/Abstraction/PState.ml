@@ -1343,7 +1343,7 @@ module Make (State : SState.S) :
       (subst : (string * (string * vt) list) option)
       (astate : t) : (t * Flag.t, err_t) Res_list.t =
     run_spec_aux ?existential_bindings:(Option.map snd subst)
-      spec.data.spec_name spec.data.spec_params spec.mp (Some x) args astate
+      spec.data.spec_name (Spec.input_params spec.data) spec.mp (Some x) args astate
 
   let run_par_spec specs astate =
     let specs =
@@ -1352,7 +1352,7 @@ module Make (State : SState.S) :
                MP.spec * string * vt list * (string * (string * vt) list) option)
            ->
           ( spec.data.spec_name,
-            spec.data.spec_params,
+            Spec.input_params spec.data,
             spec.mp,
             Some x,
             args,

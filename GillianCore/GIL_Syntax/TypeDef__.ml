@@ -310,6 +310,7 @@ and single_spec = {
 and spec = {
   spec_name : string;
   spec_params : string list;
+  spec_raw_args : string list option; [@default None]
   spec_sspecs : single_spec list;
   spec_normalised : bool;
   spec_incomplete : bool;

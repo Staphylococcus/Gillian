@@ -25,7 +25,8 @@ type st = TypeDef__.single_spec = {
 (** {b Full GIL specifications}. *)
 type t = TypeDef__.spec = {
   spec_name : string;  (** Procedure/spec name *)
-  spec_params : string list;  (** Procedure/spec parameters *)
+  spec_params : string list;  (** Executable procedure parameters *)
+  spec_raw_args : string list option;  (** Complete checked call vector *)
   spec_sspecs : st list;  (** List of single specifications *)
   spec_normalised : bool;  (** If the spec is already normalised *)
   spec_incomplete : bool;  (** If the spec is incomplete *)
@@ -45,6 +46,7 @@ let s_init
   { ss_pre; ss_posts; ss_variant; ss_verifier_scope; ss_flag; ss_to_verify; ss_label }
 
 let init
+    ?spec_raw_args
     (spec_name : string)
     (spec_params : string list)
     (spec_sspecs : st list)
@@ -55,6 +57,7 @@ let init
   {
     spec_name;
     spec_params;
+    spec_raw_args;
     spec_sspecs;
     spec_normalised;
     spec_incomplete;
@@ -66,6 +69,39 @@ let extend (spec : t) (sspecs : st list) : t =
   { spec with spec_sspecs = sspecs @ spec.spec_sspecs }
 
 let get_params (spec : t) : string list = spec.spec_params
+
+(* A fixed complete argument vector, with the executable formals as its exact
+   prefix. Surplus names are proof inputs, never executable parameters. *)
+let input_params (spec : t) =
+  Option.value ~default:spec.spec_params spec.spec_raw_args
+
+let validate_raw_args (spec : t) =
+  match spec.spec_raw_args with
+  | None -> ()
+  | Some names ->
+      let invalid why = invalid_arg ("Invalid raw argument interface: " ^ why) in
+      if not spec.spec_to_verify || spec.spec_incomplete || spec.spec_sspecs = []
+         || List.exists (fun (s : st) -> not s.ss_to_verify) spec.spec_sspecs
+      then invalid "requires a complete checked specification";
+      let prefix = List.filteri (fun i _ -> i < List.length spec.spec_params) names in
+      if prefix <> spec.spec_params then invalid "formal prefix differs";
+      (* Quoted metadata slots permit keywords, but no lexer-incompatible
+         escapes. This proof-only interface uses simple ASCII identifiers. *)
+      let identifier name =
+        Str.string_match (Str.regexp "[A-Za-z_][A-Za-z0-9_]*") name 0
+        && Str.match_end () = String.length name in
+      if List.exists (fun name -> not (identifier name) || not (Names.is_pvar_name name)) names
+         || SS.cardinal (SS.of_list names) <> List.length names
+      then invalid "empty or duplicate input name";
+      List.iteri (fun i name ->
+        if i >= List.length spec.spec_params && name = Names.return_variable
+        then invalid "reserved surplus name") names
+
+let summary_arity (spec : t) = List.length (input_params spec)
+
+let pp_raw_args fmt spec =
+  Option.iter (fun names -> Fmt.pf fmt " raw_args(%a)"
+    Fmt.(list ~sep:comma Dump.string) names) spec.spec_raw_args
 
 let pp_verifier_scope fmt b =
   Fmt.pf fmt " verify_scope(%a; %a)" Expr.pp b.vsb_source Expr.pp b.vsb_target
@@ -146,10 +182,10 @@ let pp fmt spec =
     | false -> ()
   in
   let name = Pp_utils.maybe_quote_ident spec.spec_name in
-  Fmt.pf fmt "@[<v 2>@[<h>%aspec %s(%a)@]@\n%a@]" pp_incomplete
+  Fmt.pf fmt "@[<v 2>@[<h>%aspec %s(%a)%a@]@\n%a@]" pp_incomplete
     spec.spec_incomplete name
     Fmt.(list ~sep:comma string)
-    spec.spec_params
+    spec.spec_params pp_raw_args spec
     Fmt.(list ~sep:semi pp_sspec)
     spec.spec_sspecs
 

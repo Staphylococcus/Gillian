@@ -826,6 +826,7 @@ let order_procs
           ~predecessors:prog.predecessors proc
       in
       Hashtbl.replace prog.procs name proc;
+      Proc.validate_raw_args ~macros:prog.macros proc;
       let spec = spec proc in
       let rank = variant spec in
       let callees = body_calls ~is_action_total proc in
@@ -841,7 +842,10 @@ let order_procs
             | None -> unsupported (callee ^ " has no body.")
           in
           if SS.mem callee selected then (
-            if arity <> List.length target.proc_params then
+            Proc.validate_raw_args ~macros:prog.macros target;
+            let target_spec = match target.proc_spec with Some s -> s
+              | None -> unsupported (callee ^ " has no checked specification.") in
+            if arity <> Spec.summary_arity target_spec then
               unsupported
                 (callee
                ^ " requires exact call arity in the current totality fragment."

@@ -95,7 +95,7 @@ let fixture () =
   let loc={Location.loc_start={pos_line=3;pos_column=4};loc_end={pos_line=5;pos_column=6};loc_source="origin\000\255"} in
   let anno=Annot.Basic.make ~origin_loc:loc ~loop_info:["a";"a"] () in
   let true_=Expr.Lit(Literal.Bool true) in
-  let spec={Spec.spec_name="p";spec_params=["x"];spec_sspecs=[
+  let spec={Spec.spec_name="p";spec_params=["x"];spec_raw_args=None;spec_sspecs=[
     {Spec.ss_pre=([Asrt.Pure true_],Some loc);ss_posts=[([Asrt.Emp],Some loc)];ss_variant=None;ss_verifier_scope=None;
      ss_flag=Flag.Normal;ss_to_verify=true;ss_label=Some("L",["x"])}];spec_normalised=false;
     spec_incomplete=false;spec_to_verify=true;spec_location=Some loc} in
@@ -569,6 +569,8 @@ let scope_fixture () =
   Spec.init "scopefn" [] [case] false false true None,case
 let scope_roundtrip () =
   let spec,case=scope_fixture() in
+  let spec={spec with spec_raw_args=Some["raw_sc";"raw_this";"raw_a";"raw_b"]} in
+  Spec.validate_raw_args spec;
   Spec.validate_verifier_scope case;
   ignore(K.checked ~guard:(K.guard_ast(fun v x->v#visit_spec () x))
     ~to_json:Spec.to_yojson ~of_json:Spec.of_yojson spec);
@@ -577,6 +579,15 @@ let scope_roundtrip () =
   let parsed=match Parser.parse_eprog_from_string text with
     | Ok p->Option.get (Prog.get_proc_exn p.labeled_prog "scopefn").proc_spec
     | Error _->Alcotest.fail "GIL metadata text parse" in
+  check(parsed.spec_raw_args=spec.spec_raw_args)"raw args GIL roundtrip";
+  let punctuation={spec with spec_raw_args=Some["a,b";"spec";"quote\"name"]} in
+  let wire=Format.asprintf "%a\nproc scopefn() { ret := undefined; return };" Spec.pp punctuation in
+  let decoded=match Parser.parse_eprog_from_string wire with
+    | Ok p->Option.get (Prog.get_proc_exn p.labeled_prog "scopefn").proc_spec
+    | Error _->Alcotest.fail "quoted raw-input metadata parse" in
+  check(decoded.spec_raw_args=punctuation.spec_raw_args)"quoted comma/keyword/quote slot identity";
+  check(Spec.hash_of_t {spec with spec_raw_args=Some["a,b"]}<>
+    Spec.hash_of_t {spec with spec_raw_args=Some["a";"b"]})"raw slot arity cannot collide in printed hash";
   let restored=List.hd parsed.spec_sspecs in
   check(restored.ss_verifier_scope=case.ss_verifier_scope)"GIL text metadata roundtrip";
   check(List.map fst restored.ss_posts=List.map fst case.ss_posts)"public posts roundtrip";
@@ -590,6 +601,40 @@ let scope_roundtrip () =
     "linked capture retains verifier metadata"
 let scope_defaults_and_rejections () =
   let spec,case=scope_fixture() in
+  let raw={spec with spec_params=["a";"b"];spec_raw_args=Some["a";"b";"raw"]} in
+  Spec.validate_raw_args raw;
+  check(Spec.input_params raw=["a";"b";"raw"])"full vector is matching/proof input";
+  check(Spec.input_params {raw with spec_raw_args=None}=["a";"b"])"legacy formal input";
+  List.iter(fun bad->rejects(fun()->Spec.validate_raw_args bad))[
+    {raw with spec_raw_args=Some["a"]};
+    {raw with spec_raw_args=Some["b";"a";"raw"]};
+    {raw with spec_raw_args=Some["a";"b";"a"]};
+    {raw with spec_raw_args=Some["a";"b";""]};
+    {raw with spec_raw_args=Some["a";"b";"a,b"]};
+    {raw with spec_raw_args=Some["a";"b";"raw\000x"]};
+    {raw with spec_raw_args=Some["a";"b";"#logical"]};
+    {raw with spec_raw_args=Some["a";"b";"$lghost"]};
+    {raw with spec_raw_args=Some["a";"b";Names.return_variable]};
+    {raw with spec_incomplete=true};{raw with spec_to_verify=false};
+    {raw with spec_sspecs=[{case with ss_to_verify=false}]}];
+  let _,p=fixture() in
+  let p={p with proc_name="scopefn";proc_params=["a";"b"];proc_spec=Some raw;
+    proc_body=[|Annot.Basic.make(),None,Cmd.ReturnNormal|]} in
+  let macros=Hashtbl.create 1 in
+  Proc.validate_raw_args ~macros p;
+  let reject_cmd cmd=rejects(fun()->Proc.validate_raw_args ~macros
+    {p with proc_body=[|Annot.Basic.make(),None,cmd|]}) in
+  reject_cmd(Cmd.Assignment("raw",Expr.Lit Literal.Undefined));
+  reject_cmd(Cmd.PhiAssignment["raw",[Expr.Lit Literal.Undefined]]);
+  Hashtbl.add macros "hidden" {Macro.macro_name="hidden";macro_params=[];
+    macro_definition=[LCmd.FreshSVar "raw"]};
+  Hashtbl.add macros "outer" {Macro.macro_name="outer";macro_params=[];
+    macro_definition=[LCmd.Macro("hidden",[])]};
+  reject_cmd(Cmd.Logic(LCmd.Macro("outer",[])));
+  reject_cmd(Cmd.Logic(LCmd.SL(SLCmd.Invariant([Asrt.Emp],["raw"],None))));
+  reject_cmd(Cmd.Logic(LCmd.SL(SLCmd.Fold("P",[],Some("D",["#w",Expr.PVar "raw"])))));
+  reject_cmd(Cmd.Call({Cmd.var_name="r";fun_name=Expr.Lit(Literal.String "callee");args=[];
+    bindings=Some("D",["#w",Expr.PVar "raw"])},None));
   let absent={case with ss_verifier_scope=None} in
   let legacy=Spec.{spec with spec_sspecs=[absent]} in
   let wire=Spec.to_yojson legacy in
@@ -745,12 +790,12 @@ let v4_fields () =
     ss_posts=[([],None);([Asrt.Emp],location);(atoms,None)];
     ss_variant=Some(Expr.LVar "#variant");ss_flag=Flag.Bug;ss_to_verify=false;
     ss_label=Some("",["e";"e"])} in
-  let spec=Spec.{spec_name="s\000\255";spec_params=["x";"x"];
+  let spec=Spec.{spec_name="s\000\255";spec_params=["x";"x"];spec_raw_args=Some["x";"x";"raw"];
     spec_sspecs=[case;{case with ss_verifier_scope=None;ss_variant=None;ss_label=None};
       {case with ss_label=Some("",[])}];spec_normalised=true;spec_incomplete=true;
     spec_to_verify=false;spec_location=location} in
   let got=v4_restore F4.take_spec(v4_parts F4.emit_spec spec) in
-  check(K.equal(Spec.to_yojson spec)(Spec.to_yojson got))"all7 spec and7 singleSpec fields";
+  check(K.equal(Spec.to_yojson spec)(Spec.to_yojson got))"all8 spec and7 singleSpec fields";
   List.iter(fun value->
     check(K.equal
       (Spec.to_yojson(match value with Some s->s|None->spec))

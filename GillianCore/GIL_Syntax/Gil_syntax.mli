@@ -905,7 +905,8 @@ module Spec : sig
   (** Full specification *)
   type t = {
     spec_name : string;  (** Procedure/spec name *)
-    spec_params : string list;  (** Procedure/spec parameters *)
+    spec_params : string list;  (** Executable procedure parameters *)
+    spec_raw_args : string list option;  (** Complete checked call vector *)
     spec_sspecs : st list;  (** List of single specifications *)
     spec_normalised : bool;  (** If the spec is already normalised *)
     spec_incomplete : bool;  (** If the spec is incomplete *)
@@ -928,6 +929,7 @@ module Spec : sig
   (** [init spec_name spec_params spec_sspecs spec_normalised spec_to_verify]
       creates a full specification with the given values *)
   val init :
+    ?spec_raw_args:string list ->
     string ->
     string list ->
     st list ->
@@ -942,6 +944,10 @@ module Spec : sig
 
   (** Return the list of parameters of a Spec *)
   val get_params : t -> string list
+  val input_params : t -> string list
+  val validate_raw_args : t -> unit
+  val summary_arity : t -> int
+  val pp_raw_args : Format.formatter -> t -> unit
 
   val map_verifier_scope : (Expr.t -> Expr.t) -> verifier_scope_binding -> verifier_scope_binding
   val validate_verifier_scope : ?exact_target:bool -> st -> unit
@@ -1095,6 +1101,8 @@ module Proc : sig
       can be of any type. Equality of labels is decided by structural equality
   *)
   val indexed_of_labeled : ('annot, string) t -> ('annot, int) t
+
+  val validate_raw_args : macros:(string, Macro.t) Hashtbl.t -> ('annot, 'a) t -> unit
 
   val check_proc_spec_correspondence :
     (string, ('annot, 'a) t) Hashtbl.t -> unit
