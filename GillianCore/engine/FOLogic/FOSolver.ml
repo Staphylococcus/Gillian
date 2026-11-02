@@ -745,6 +745,19 @@ let finite_difference_core formulae gamma goal =
   if not !Config.Verification.total || !Config.under_approximation
      || not (Expr.Set.mem goal formulae) then None
   else match goal with
+  | Expr.UnOp (Not, BinOp
+      (BinOp (BinOp ((LVar base as value), FPlus, Lit (Num 1.)),
+         FMinus, Lit (Num 1.)), Equal, LVar same))
+    when base = same && typed base ->
+      (* Keep only four original atoms from the measured cancellation query.
+         This is no rewrite: native UNSAT remains the sole sufficient result. *)
+      let core = Expr.Set.of_list
+        [goal; Expr.UnOp (IsInt, value);
+         Expr.BinOp (Expr.num 0., FLessThanEqual, value);
+         Expr.BinOp (value, FLessThanEqual, Expr.num 4294967295.)] in
+      if Expr.Set.cardinal core = 4 && Expr.Set.subset core formulae
+         && not (Expr.Set.equal core formulae)
+      then Some core else None
   | Expr.UnOp
       (Not, BinOp (Lit (Num lower), FLessThanEqual,
         BinOp (finish_e, FMinus, (LVar start as start_e))))

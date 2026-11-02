@@ -12548,8 +12548,7 @@ let tests =
     Alcotest.test_case "nested difference sign boundary and fallback models" `Quick
       (with_total index_difference_sign_models);
     Alcotest.test_case "original finite difference cores and endpoint countermodels" `Quick
-      (with_total (fun () -> finite_difference_original_cores ();
-        finite_difference_strict_order_controls ()));
+      (with_total finite_difference_original_cores);
     Alcotest.test_case "direct difference original bounds nonnegativity" `Quick
       (with_total index_difference_direct_bounds);
     Alcotest.test_case "direct difference sign boundary and fallback models" `Quick
@@ -18341,3 +18340,122 @@ let tests = tests @
        [Alcotest.test_case "integer order unrelated cast decline connected cores and complete fallback" `Quick
           (with_total integer_order_connected_premises)]
    | _ -> [])
+
+(* Original query671 from the current normalizer profile: all 16 premises,
+   both Number bindings and the unchanged floating equality are retained. *)
+let measured_cancellation_fixture () =
+  let facts = parse_gil_set
+    ["(#index <= 4294967295.)"; "(0. <= #index)"; "(is_int #index)";
+     "(#limit <= 4294967295.)"; "(0. <= #limit)"; "(is_int #limit)";
+     "(#index < #limit)"; "(is_int (#index + 1.))";
+     "(0i i<= (as_int #index))"; "(0i i<= (as_int (#index + 1.)))";
+     "(0. <= (#index + 1.))"; "((as_int #index) i<= 4294967295i)";
+     "((as_int #limit) i<= 4294967295i)";
+     "((as_int (#index + 1.)) == (1i i+ (as_int #index)))";
+     "((#index + 1.) <= 4294967295.)"; "((#index + 1.) <= #limit)"] in
+  let index = Expr.LVar "#index" in
+  let gamma = index_difference_context ["#index";"#limit"] in
+  let goal = bin Equal (bin FMinus (bin FPlus index (Expr.num 1.)) (Expr.num 1.)) index in
+  let guards = [Expr.UnOp (IsInt,index); bin FLessThanEqual (Expr.num 0.) index;
+    bin FLessThanEqual index (Expr.num 4294967295.)] in
+  index,gamma,facts,goal,guards
+
+let measured_cancellation_native () = with_nonblank_counter_trace (fun () ->
+  let _,gamma,facts,goal,guards = measured_cancellation_fixture () in
+  let full = Expr.Set.add (not_ goal) facts and types = Gamma.as_hashtbl gamma in
+  let core = Expr.Set.of_list (not_ goal :: guards) in
+  Alcotest.(check int) "measured cancellation all original premises" 16 (Expr.Set.cardinal facts);
+  Alcotest.(check bool) "measured cancellation exact original subset" true
+    (match Solver.finite_difference_core full types (not_ goal) with
+     | Some selected -> Expr.Set.equal selected core | None -> false);
+  let before = strict_successor_public "measured-cancellation" true facts goal gamma in
+  let row = nonblank_counter_observe "measured-cancellation" before
+    "optional-entailment-finite-difference-core" "unsat" core types in
+  Alcotest.(check bool) "measured cancellation unchanged optional policy" true
+    (smt_result_field "raw_unknown" row = "true" && smt_result_field "timeout_ms" row = "5000");
+  Alcotest.(check int) "measured cancellation core is load bearing" 1
+    (List.length (symbolic_prefix_new_rows before));
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "measured complete original counterquery independently UNSAT" true
+    (Option.is_none (Smt.exec_sat ~caller_kind:"control-cancellation-original" full types));
+  ignore (nonblank_counter_observe "measured-cancellation-original" before
+    "control-cancellation-original" "unsat" full types);
+  let rename = Expr.map_opt (function
+    | Expr.LVar name -> Some (Expr.LVar ("#renamed" ^ name)),false
+    | e -> Some e,true) None in
+  let renamed e = Option.get (rename e) in
+  let facts = Expr.Set.fold (fun e fs -> Expr.Set.add (renamed e) fs) facts Expr.Set.empty in
+  let goal = renamed goal in
+  let gamma = index_difference_context ["#renamed#index";"#renamed#limit"] in
+  let before = strict_successor_public ~reverse:true "renamed-cancellation" true facts goal gamma in
+  ignore (nonblank_counter_observe "renamed-cancellation" before
+    "optional-entailment-finite-difference-core" "unsat"
+    (Expr.Set.of_list (not_ goal :: List.map renamed guards)) (Gamma.as_hashtbl gamma)))
+
+let measured_cancellation_controls () = with_nonblank_counter_trace (fun () ->
+  let index,gamma,facts,goal,guards = measured_cancellation_fixture () in
+  let types = Gamma.as_hashtbl gamma in
+  let core = Expr.Set.of_list (not_ goal :: guards) in
+  let full = Expr.Set.add (not_ goal) facts in
+  List.iter (fun guard -> Alcotest.(check bool) "missing licensing atom declines" true
+    (Option.is_none (Solver.finite_difference_core (Expr.Set.remove guard full) types (not_ goal)))) guards;
+  Alcotest.(check bool) "identical core declines duplicate work" true
+    (Option.is_none (Solver.finite_difference_core core types (not_ goal)));
+  let missing = Hashtbl.copy types in Hashtbl.remove missing "#index";
+  Alcotest.(check bool) "untyped base declines" true
+    (Option.is_none (Solver.finite_difference_core full missing (not_ goal)));
+  let wrong_type = Hashtbl.copy types in Hashtbl.replace wrong_type "#index" Type.Utf16Type;
+  Alcotest.(check bool) "wrong base type declines" true
+    (Option.is_none (Solver.finite_difference_core full wrong_type (not_ goal)));
+  Alcotest.(check bool) "absent goal declines" true
+    (Option.is_none (Solver.finite_difference_core facts types (not_ goal)));
+  let wrong = bin Equal (bin FMinus (bin FPlus index (Expr.num 1.)) (Expr.num 2.)) index in
+  ignore (strict_successor_public "cancellation-wrong-goal" false facts wrong gamma);
+  (* Each weakened core has an actual native countermodel. These SAT verdicts
+     concern weakened formulas, never the complete original conjunction. *)
+  List.iter (fun (label,guard,value) ->
+    let fs = Expr.Set.remove guard core
+      |> Expr.Set.add (bin ValueEqual index (Expr.num value)) in
+    let before = nonblank_counter_rows () in
+    let model = match Smt.exec_sat ~caller_kind:("control-cancellation-" ^ label) fs types with
+      | Some model -> model | None -> Alcotest.fail (label ^ " missing countermodel") in
+    ignore (nonblank_counter_observe label before ("control-cancellation-" ^ label) "sat" fs types);
+    primary_check_lift label model types ["#index",Literal.Num value];
+    Alcotest.(check bool) (label ^ " actual witness falsifies cancellation") true
+      (slice_bound_truth (Expr.subst_expr_for_expr ~to_subst:index ~subst_with:(Expr.num value) (not_ goal))))
+    ["fractional",List.nth guards 0,0.1;
+     "negative-large",List.nth guards 1,(-9007199254740994.);
+     "positive-large",List.nth guards 2,9007199254740992.];
+  List.iter (fun (label,value) ->
+    let fs = facts |> Expr.Set.add goal |> Expr.Set.add (bin ValueEqual index (Expr.num value)) in
+    let before = nonblank_counter_rows () in
+    let model = match Smt.exec_sat ~caller_kind:("control-cancellation-" ^ label) fs types with
+      | Some model -> model | None -> Alcotest.fail (label ^ " signed zero lost") in
+    ignore (nonblank_counter_observe label before ("control-cancellation-" ^ label) "sat" fs types);
+    primary_check_lift label model types ["#index",Literal.Num value])
+    ["positive-zero",0.;"negative-zero",-0.];
+  let value_identity = bin ValueEqual
+    (bin FMinus (bin FPlus index (Expr.num 1.)) (Expr.num 1.)) index in
+  let fs = facts |> Expr.Set.add (not_ value_identity)
+    |> Expr.Set.add (bin ValueEqual index (Expr.num (-0.))) in
+  Alcotest.(check bool) "ValueEqual identity is not a numeric equality" true
+    (Option.is_none (Solver.finite_difference_core fs types (not_ value_identity)));
+  let before = nonblank_counter_rows () in
+  let model = match Smt.exec_sat ~caller_kind:"control-cancellation-value-equality" fs types with
+    | Some model -> model | None -> Alcotest.fail "ValueEqual lost negative-zero counterexample" in
+  ignore (nonblank_counter_observe "ValueEqual" before
+    "control-cancellation-value-equality" "sat" fs types);
+  primary_check_lift "ValueEqual" model types ["#index",Literal.Num (-0.)])
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None ->
+       [Alcotest.test_case "measured cancellation original subset and complete native query" `Quick
+          (with_total measured_cancellation_native);
+        Alcotest.test_case "measured cancellation false goal missing premises and signed zeros" `Quick
+          (with_total measured_cancellation_controls)]
+   | _ -> [])
+
+let tests = tests @
+  [Alcotest.test_case "finite difference strict order native controls" `Quick
+     (with_total finite_difference_strict_order_controls)]
