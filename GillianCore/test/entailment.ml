@@ -18275,3 +18275,69 @@ let tests = tests @
         Alcotest.test_case "concat complete contradiction invalid count2 and overflow native rejections" `Quick
           (with_total concat_numeric_native_rejections)]
    | _ -> [])
+
+let integer_order_connected_premises () = with_nonblank_counter_trace (fun () ->
+  let check label gamma facts goal expected connected =
+    let full = Expr.Set.add (not_ goal) facts in
+    let types = Gamma.as_hashtbl gamma in
+    let selected = Solver.integer_order_core full types (not_ goal) in
+    Alcotest.(check bool) (label ^ " only a connected optional core is eligible")
+      connected (Option.is_some selected);
+    Option.iter (fun core -> Alcotest.(check bool)
+      (label ^ " eligible core is a proper ORIGINAL subset") true
+      (Expr.Set.mem (not_ goal) core && Expr.Set.subset core full
+        && not (Expr.Set.equal core full))) selected;
+    let pfs = Engine.PFS.of_list (Expr.Set.elements facts) in
+    let original = Engine.PFS.to_list pfs and before_types = nonblank_counter_types types in
+    let before = nonblank_counter_rows () in
+    let _,contexts = pending_context_capture (fun () ->
+      Alcotest.(check bool) (label ^ " actual public entailment") expected
+        (Solver.check_entailment Utils.Containers.SS.empty pfs [goal] gamma);
+      (* A distinct complete query checks the original conjunction even if
+         public reduction already decided it. No simplified core is a model. *)
+      Alcotest.(check bool) (label ^ " native complete counterquery") (not expected)
+        (Option.is_some (Smt.exec_sat ~caller_kind:("control-connected-" ^ label)
+          full types))) in
+    finite_number_bound_complete label before contexts (if expected then "unsat" else "sat");
+    let probes = List.filter (fun c ->
+      pending_context_field "caller" c = `String "optional-entailment-integer-order-core"
+      || pending_context_field "caller" c = `String "optional-entailment-integer-order-projection") contexts in
+    Alcotest.(check bool) (label ^ " connected probes run; unrelated probes do not")
+      connected (probes <> []);
+    ignore (nonblank_counter_observe label before ("control-connected-" ^ label)
+      (if expected then "unsat" else "sat") full types);
+    Alcotest.(check bool) (label ^ " public PFS unchanged") true
+      (List.equal Expr.equal original (Engine.PFS.to_list pfs));
+    nonblank_counter_retained label full types (Expr.Set.elements full) before_types
+  in
+  List.iter (fun (label,zero,wrong) ->
+    let name = String.map (function '-' -> '_' | c -> c) label in
+    let x = Expr.LVar ("#unrelated_" ^ name) and noise = Expr.LVar ("#noise_" ^ name) in
+    let gamma = Gamma.init () in
+    Gamma.update gamma ("#unrelated_" ^ name) Type.NumberType;
+    Gamma.update gamma ("#noise_" ^ name) Type.ListType;
+    let facts = Expr.Set.of_list [Expr.UnOp (IsInt,x);
+      bin Equal x (Expr.num zero); bin FLessThanEqual (Expr.num 0.) x;
+      bin FLessThan x (Expr.num 1.);
+      bin ILessThanEqual (Expr.int 0) (Expr.UnOp (LstLen,noise))] in
+    let goal = bin ILessThan (Expr.UnOp (NumToInt,x)) (Expr.int (if wrong then 0 else 1)) in
+    check label gamma facts goal (not wrong) false)
+    ["positive-zero",0.,false; "negative-zero",-0.,false; "wrong-goal",0.,true];
+  List.iter (fun wrong ->
+    let label = if wrong then "connected-wrong" else "connected-positive" in
+    let name = String.map (function '-' -> '_' | c -> c) label in
+    let n = Expr.LVar ("#" ^ name) and noise = Expr.LVar ("#flag_" ^ name) in
+    let gamma = Gamma.init () in
+    Gamma.update gamma ("#" ^ name) Type.IntType;
+    Gamma.update gamma ("#flag_" ^ name) Type.BooleanType;
+    let facts = Expr.Set.of_list [noise; bin ILessThanEqual (Expr.int 0) n;
+      bin ILessThanEqual n (Expr.int 2)] in
+    check label gamma facts (bin ILessThan n (Expr.int (if wrong then 1 else 3)))
+      (not wrong) true) [false;true])
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None ->
+       [Alcotest.test_case "integer order unrelated cast decline connected cores and complete fallback" `Quick
+          (with_total integer_order_connected_premises)]
+   | _ -> [])

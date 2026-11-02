@@ -444,7 +444,13 @@ let integer_order_core formulae gamma goal =
         then Some core else None
     | _ when order goal ->
         let core = Expr.Set.filter order formulae in
-        if Expr.Set.equal core formulae then None else Some core
+        let variables = Expr.lvars goal in
+        let connected = Expr.Set.exists (fun premise ->
+          not (Expr.equal premise goal)
+          && not (SS.is_empty (SS.inter variables (Expr.lvars premise)))) core in
+        (* Dropped Number facts can be the only useful premises for a cast.
+           Decline an unrelated probe; the complete fallback retains them. *)
+        if not connected || Expr.Set.equal core formulae then None else Some core
     | _ -> None
   else None
 
