@@ -4234,16 +4234,21 @@ let nonblank_counter_model ?(strict_only = false) fs gamma =
        | _ -> ()); super#visit_expr () e
   end in
   Expr.Set.iter (rounded#visit_expr ()) fs;
-  if not !Config.Verification.total || (strict_only && !Config.under_approximation)
-     || SS.cardinal heads <> 1 || SS.cardinal numbers < 3 || rounded#observed
-     || not (SS.is_empty (of_type Type.StringType)) then None else
-  let head = SS.choose heads in
   let empty = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical "")) in
-  let trimmed = Expr.UnOp (Utf16Trim, Expr.LVar head) in
-  let trim_nonblank = Expr.Set.exists (function
-    | Expr.UnOp (Not, Expr.BinOp (left, (Equal | ValueEqual), right)) ->
-        (left = trimmed && right = empty) || (left = empty && right = trimmed)
-    | _ -> false) fs in
+  let nonblank head =
+    let trimmed = Expr.UnOp (Utf16Trim, Expr.LVar head) in
+    Expr.Set.exists (function
+      | Expr.UnOp (Not, Expr.BinOp (left, (Equal | ValueEqual), right)) ->
+          (left = trimmed && right = empty) || (left = empty && right = trimmed)
+      | _ -> false) fs in
+  (* Strict mode binds the unique observed trim role, not every UTF16 variable
+     in the owned frame. Other heads remain in the complete native query. *)
+  let candidates = if strict_only then SS.filter nonblank heads else heads in
+  if not !Config.Verification.total || (strict_only && !Config.under_approximation)
+     || SS.cardinal candidates <> 1 || SS.cardinal numbers < 3 || rounded#observed
+     || not (SS.is_empty (of_type Type.StringType)) then None else
+  let head = SS.choose candidates in
+  let trim_nonblank = nonblank head in
   let bounded_integer x = SS.mem x numbers
     && Expr.Set.mem (Expr.UnOp (IsInt, LVar x)) fs
     && Expr.Set.exists (function

@@ -18771,35 +18771,37 @@ let strict_nonblank_filter_fixture label =
     Hashtbl.iter (fun n typ -> Hashtbl.add renamed (n ^ "_strict_head_" ^ label) typ) gamma;
     fs,renamed
 
+let strict_nonblank_filter_check label fs gamma head status =
+  let before=nonblank_counter_rows () and atoms=Expr.Set.elements fs
+  and types=nonblank_counter_types gamma in
+  let role n = Expr.LVar (if label="saved" then n else n ^ "_strict_head_" ^ label) in
+  let lower=role "#lvar_1429" and upper=role "#n"
+  and position=role "#lvar_1430" and item=role "#dhHead" in
+  let pins head = List.fold_left (fun fs (role,value) -> Expr.Set.add
+    (bin ValueEqual role value) fs) fs
+    [lower,Expr.num 1.;upper,Expr.num 2.;position,Expr.num 0.;
+     item,nonblank_utf16 head] in
+  let model,contexts=pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+  finite_number_bound_complete label before contexts status;
+  ignore (strict_counter_endpoint label before contexts "optional-nonblank-counter"
+    (pins (if status="unsat" then head else "a")) gamma
+    (if head=" a" || status="unsat" then "unsat" else "sat"));
+  if head=" a" then ignore (strict_counter_endpoint label before contexts
+    "optional-nonblank-whitespace-counter" (pins " a") gamma "sat");
+  Alcotest.(check bool) "complete original model status" (status="sat") (Option.is_some model);
+  Option.iter (fun model ->
+    strict_counter_values label model gamma lower upper (Some (1.,2.));
+    let name = function Expr.LVar n -> n | _ -> assert false in
+    primary_check_lift label model gamma [name position,Literal.Num 0.;
+      name item,Literal.Utf16String (Utils.Utf16.of_canonical head)]) model;
+  let old=nonblank_counter_rows () in
+  ignore (Smt.check_sat fs gamma);
+  Alcotest.(check bool) "strict head complete-key cache emits no endpoint" true
+    (old=nonblank_counter_rows ());
+  nonblank_counter_retained label fs gamma atoms types
+
 let strict_nonblank_filter_native () = with_nonblank_counter_trace (fun () ->
-  let check label fs gamma head status =
-    let before=nonblank_counter_rows () and atoms=Expr.Set.elements fs
-    and types=nonblank_counter_types gamma in
-    let role n = Expr.LVar (if label="saved" then n else n ^ "_strict_head_" ^ label) in
-    let lower=role "#lvar_1429" and upper=role "#n"
-    and position=role "#lvar_1430" and item=role "#dhHead" in
-    let pins head = List.fold_left (fun fs (role,value) -> Expr.Set.add
-      (bin ValueEqual role value) fs) fs
-      [lower,Expr.num 1.;upper,Expr.num 2.;position,Expr.num 0.;
-       item,nonblank_utf16 head] in
-    let model,contexts=pending_context_capture (fun () -> Smt.check_sat fs gamma) in
-    finite_number_bound_complete label before contexts status;
-    ignore (strict_counter_endpoint label before contexts "optional-nonblank-counter"
-      (pins (if status="unsat" then head else "a")) gamma
-      (if head=" a" || status="unsat" then "unsat" else "sat"));
-    if head=" a" then ignore (strict_counter_endpoint label before contexts
-      "optional-nonblank-whitespace-counter" (pins " a") gamma "sat");
-    Alcotest.(check bool) "complete original model status" (status="sat") (Option.is_some model);
-    Option.iter (fun model ->
-      strict_counter_values label model gamma lower upper (Some (1.,2.));
-      let name = function Expr.LVar n -> n | _ -> assert false in
-      primary_check_lift label model gamma [name position,Literal.Num 0.;
-        name item,Literal.Utf16String (Utils.Utf16.of_canonical head)]) model;
-    let old=nonblank_counter_rows () in
-    ignore (Smt.check_sat fs gamma);
-    Alcotest.(check bool) "strict head complete-key cache emits no endpoint" true
-      (old=nonblank_counter_rows ());
-    nonblank_counter_retained label fs gamma atoms types in
+  let check = strict_nonblank_filter_check in
   let fs,gamma = strict_nonblank_filter_fixture "saved" in check "saved" fs gamma "a" "sat";
   let fs,gamma = strict_nonblank_filter_fixture "alpha" in check "alpha" fs gamma "a" "sat";
   let fs,gamma = strict_nonblank_filter_fixture "whitespace" in
@@ -18815,4 +18817,64 @@ let tests = tests @
    | Some _, None -> [Alcotest.test_case
        "strict-positive Keep exact full native models and failed-hint fallback" `Quick
        (with_total strict_nonblank_filter_native)]
+   | _ -> [])
+
+(* The same observed state after one owned prefix element is unfolded:
+   five exact formula replacements, not a reduced satisfiability projection. *)
+let expanded_nonblank_filter_fixture () =
+  let fs,gamma = strict_nonblank_filter_fixture "saved" in
+  let removed = parse_gil_set [
+    "(((l-len #dhTailValues) i+ (l-len #loopPrefix)) i<= 4294967294i)";
+    "((as_int #lvar_1429) == (l-len #loopPrefix))";
+    "((as_int #n) == (1i i+ ((l-len #dhTailValues) i+ (l-len #loopPrefix))))";
+    "(-u- (#lvar_1425, #lvar_1426) == -u- (-{ (num_to_utf16 #lvar_1429) }-,\n                                      #dhPrefixKeys, #dhTailKeys))";
+    "(0i i<= (l-len #loopPrefix))";
+  ] and added = parse_gil_set [
+    "(((l-len #dhTailValues) i+ (l-len #lvar_1587)) i<= 4294967293i)";
+    "((as_int #lvar_1429) == (1i i+ (l-len #lvar_1587)))";
+    "((as_int #n) == (2i i+ ((l-len #dhTailValues) i+ (l-len #lvar_1587))))";
+    "((u16-len #lvar_1586) i<= 9007199254740991i)";
+    "(-u- (#lvar_1425, #lvar_1426) == -u- (-{ u16\"0\",\n                                      (num_to_utf16 #lvar_1429) }-,\n                                      #dhTailKeys, #lvar_1588))";
+  ] in
+  Alcotest.(check bool) "all five old prefix assertions actually present" true
+    (Expr.Set.subset removed fs);
+  let fs = Expr.Set.union (Expr.Set.diff fs removed) added in
+  List.iter (fun n -> Alcotest.(check bool) "eliminated prefix name was typed" true
+    (Hashtbl.mem gamma n); Hashtbl.remove gamma n) ["#loopPrefix";"#dhPrefixKeys"];
+  Alcotest.(check int) "complete expanded-prefix FS" 58 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "complete expanded-prefix Gamma" 16 (Hashtbl.length gamma);
+  fs,gamma
+
+let expanded_nonblank_filter_native () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma = expanded_nonblank_filter_fixture () in
+  strict_nonblank_filter_check "saved" fs gamma "a" "sat";
+  let reverse = Expr.Set.add (not_ (bin ValueEqual (nonblank_utf16 "")
+    (Expr.UnOp (Utf16Trim,Expr.LVar "#dhHead")))) fs in
+  strict_nonblank_filter_check "saved" reverse gamma "a" "sat";
+  let sentinel = Utils.Utf16.of_canonical "\t" in
+  let pinned = Expr.Set.add (bin ValueEqual (Expr.LVar "#lvar_1586")
+    (Expr.Lit (Literal.Utf16String sentinel))) fs in
+  strict_nonblank_filter_check "saved" pinned gamma "a" "sat";
+  let model = Option.get (Smt.check_sat pinned gamma) in
+  primary_check_lift "passive prefix element remains original" model gamma
+    ["#lvar_1586",Literal.Utf16String sentinel];
+  let other=Expr.LVar "#lvar_1586" and head=Expr.LVar "#dhHead" in
+  let ambiguous = List.fold_left (fun fs atom -> Expr.Set.add atom fs) fs
+    [not_ (bin Equal (Expr.UnOp (Utf16Trim,other)) (nonblank_utf16 ""));
+     bin ValueEqual other (nonblank_utf16 "a");
+     bin ValueEqual head (nonblank_utf16 "a")] in
+  let before=nonblank_counter_rows () in
+  ignore (strict_counter_run ~hint:(1.,2.,"sat") ~wanted:(1.,2.)
+    "distinct trimmed heads decline strict mode" ambiguous gamma
+    (Expr.LVar "#lvar_1429") (Expr.LVar "#n") "sat");
+  Alcotest.(check bool) "ambiguous head emits no nonblank guess" true
+    (List.for_all (fun row -> not (List.mem (smt_result_field "caller" row)
+      ["optional-nonblank-counter";"optional-nonblank-whitespace-counter"]))
+      (List.filter (fun row -> not (List.mem row before)) (nonblank_counter_rows ()))) )
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None -> [Alcotest.test_case
+       "strict nonblank opened-prefix full model, passive head and ambiguity" `Quick
+       (with_total expanded_nonblank_filter_native)]
    | _ -> [])
