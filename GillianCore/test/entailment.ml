@@ -18858,11 +18858,25 @@ let expanded_nonblank_filter_native () = with_nonblank_counter_trace (fun () ->
   let model = Option.get (Smt.check_sat pinned gamma) in
   primary_check_lift "passive prefix element remains original" model gamma
     ["#lvar_1586",Literal.Utf16String sentinel];
-  let other=Expr.LVar "#lvar_1586" and head=Expr.LVar "#dhHead" in
-  let ambiguous = List.fold_left (fun fs atom -> Expr.Set.add atom fs) fs
-    [not_ (bin Equal (Expr.UnOp (Utf16Trim,other)) (nonblank_utf16 ""));
-     bin ValueEqual other (nonblank_utf16 "a");
-     bin ValueEqual head (nonblank_utf16 "a")] in
+  (* Head-role ambiguity is a separate well-typed guard fixture. Do not make
+     that structural check depend on solving a second synthetic heap state. *)
+  let other=Expr.LVar "#lvar_1586" and head=Expr.LVar "#dhHead"
+  and lower=Expr.LVar "#lvar_1429" and upper=Expr.LVar "#n"
+  and position=Expr.LVar "#lvar_1430" in
+  let gamma=Hashtbl.create 5 in
+  List.iter (fun n -> Hashtbl.add gamma n Type.NumberType)
+    ["#lvar_1429";"#n";"#lvar_1430"];
+  List.iter (fun n -> Hashtbl.add gamma n Type.Utf16Type)
+    ["#dhHead";"#lvar_1586"];
+  let ambiguous=Expr.Set.of_list [Expr.UnOp (IsInt,lower);Expr.UnOp (IsInt,upper);
+    Expr.UnOp (IsInt,position);bin FLessThan (Expr.num 0.) lower;
+    bin FLessThan lower upper;bin FLessThanEqual upper (Expr.num 10.);
+    bin FLessThanEqual (Expr.num 0.) position;bin FLessThanEqual position lower;
+    bin ValueEqual position (Expr.num 0.);
+    not_ (bin Equal (Expr.UnOp (Utf16Trim,head)) (nonblank_utf16 ""));
+    not_ (bin Equal (Expr.UnOp (Utf16Trim,other)) (nonblank_utf16 ""));
+    bin ValueEqual other (nonblank_utf16 "a");
+    bin ValueEqual head (nonblank_utf16 "a")] in
   let before=nonblank_counter_rows () in
   ignore (strict_counter_run ~hint:(1.,2.,"sat") ~wanted:(1.,2.)
     "distinct trimmed heads decline strict mode" ambiguous gamma
