@@ -1382,6 +1382,18 @@ struct
         } =
           eval_state
         in
+        let cutpoint ?(frames = iframes) phase =
+          if Sys.getenv_opt "GILLIAN_LOOP_CUTPOINTS" = Some "1" then
+            let strings xs = `List (List.map (fun x -> `String x) xs) in
+            let event = `Assoc
+              [ ("phase", `String phase);
+                ("procedure", `String (Call_stack.get_cur_proc_id cs));
+                ("header", `Int i);
+                ("previous", strings prev_loop_ids);
+                ("current", strings loop_ids);
+                ("frames", strings (List.map fst frames)) ] in
+            L.normal (fun m -> m "LOOP_CUTPOINT %s" (Yojson.Safe.to_string event))
+        in
         DL.log ~v:true (fun m -> m "LCmd");
         (match (prog.totality, lcmd) with
         | ( Some _,
@@ -1453,9 +1465,11 @@ struct
               | _ -> Totality.unsupported "loop has no captured entry measure."
             in
             let _ =
+              cutpoint "revisit";
               State.match_invariant prog true state a binders ~measure
               |> check_loop_results "invariant preservation" state
             in
+            cutpoint "cut";
             L.verbose (fun fmt -> fmt "Invariant re-established.");
             []
         | SL (Invariant (a, binders, variant)) ->
@@ -1470,12 +1484,14 @@ struct
               | _ -> Totality.unsupported "loop requires a variant."
             in
             let frames_and_states =
+              cutpoint "entry";
               State.match_invariant prog false state a binders ~measure
               |> check_loop_results "invariant establishment" state
             in
             List.map
               (fun (frame, state, rank) ->
                 let iframes = (List.hd loop_ids, { frame; rank }) :: iframes in
+                cutpoint ~frames:iframes "established";
                 make_confcont ~state ~callstack:cs ~invariant_frames:iframes
                   ~prev_idx:i ~loop_ids ~next_idx:(i + 1)
                   ~branch_count:b_counter ())
