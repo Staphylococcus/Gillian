@@ -18080,3 +18080,198 @@ let tests = tests @
         Alcotest.test_case "passive UTF16 upper lengths complete rejections and old zero priority" `Quick
           (with_total passive_length_rejections_zero)]
    | _ -> [])
+
+(* Complete retained concat q1579: one used Number, not the two-role push
+   frame above. Unused Gamma entries and untyped aliases remain original. *)
+let concat_numeric_frame label =
+  let name x = if label = "saved" then x else if label = "collision" then
+      if x = "#nodeN" then "#a_concat_count" else if x = "#nodeMax" then "#nodeN"
+      else x ^ "_concat_collision" else x ^ "_concat_" ^ label in
+  let rename = object inherit [_] Visitors.endo
+    method! visit_LVar () _ x = if x = "#loc_372" then Expr.ALoc x else Expr.LVar (name x)
+  end in
+  let one text = let parsed = parse_gil_set [text] in
+    Alcotest.(check int) "concat one original AST atom" 1 (Expr.Set.cardinal parsed);
+    rename#visit_expr () (Expr.Set.choose parsed) in
+  let fs = Expr.Set.of_list (List.map one [
+    "(! (#nodeB == #loc_372))"; "(! (#loc_372 == #nodeB))"; "(is_int #nodeN)";
+    "(0i i<= (l-len #lvar_1372))"; "(0i i<= (l-len #lvar_1373))";
+    "(0i i<= (l-len #nodeValues))"; "(0i i<= (l-len #pcSuffix))";
+    "(0i i<= (as_int #nodeN))"; "(0i i<= (-2i i+ (as_int #nodeN)))";
+    "(0. <= #nodeN)"; "(2. < #nodeN)";
+    "(#lvar_1674 v== {{ #lvar_1729 }})"; "(#lvar_1675 v== -{ u16\"1\" }-)";
+    "(#lvar_1730 v== {{  }})"; "(#lvar_1731 v== -{  }-)";
+    "(#lvar_1791 v== u16\"$.payload\")"; "(#lvar_1792 v== 3.)";
+    "(#nodeN == #nodeN)"; "(#nodeN <= 4294967295.)";
+    "((u16-len #lvar_1673) i<= 9007199254740991i)";
+    "((u16-len #lvar_1729) i<= 9007199254740991i)";
+    "((u16-len #pcCurrent) i<= 9007199254740991i)"]) in
+  let gamma = Hashtbl.create 19 in
+  List.iter (fun (x,typ) -> Hashtbl.add gamma (name x) typ)
+    ["#lvar_1370",Type.SetType;"#nodeKeys",Type.SetType;"#lvar_1673",Type.Utf16Type;
+     "#lvar_1372",Type.ListType;"#lvar_1369",Type.SetType;"#lvar_1373",Type.ListType;
+     "#nodeMax",Type.NumberType;"#nodeSafe",Type.NumberType;"#nodeMin",Type.NumberType;
+     "#nodeB",Type.ObjectType;"#pcSuffix",Type.ListType;"#nodeN",Type.NumberType;
+     "#pcBeforeKeys",Type.SetType;"#pcAfterKeys",Type.SetType;"#nodeEps",Type.NumberType;
+     "#lvar_1729",Type.Utf16Type;"#pcCurrent",Type.Utf16Type;"#lvar_1371",Type.SetType;
+     "#nodeValues",Type.ListType];
+  Alcotest.(check int) "exact complete concat FS22" 22 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "exact complete concat Gamma19" 19 (Hashtbl.length gamma);
+  Alcotest.(check bool) "concat actual ALoc preserved without an invented Gamma type" true
+    (not (Hashtbl.mem gamma "#loc_372")
+     && Expr.Set.exists (fun e -> Utils.Containers.SS.mem "#loc_372" (Expr.alocs e)) fs
+     && not (Expr.Set.exists (fun e -> Utils.Containers.SS.mem "#loc_372" (Expr.lvars e)) fs));
+  fs,gamma,Expr.LVar (name "#nodeN"),one
+
+let concat_numeric_names fs gamma =
+  Expr.Set.fold (fun e acc -> Utils.Containers.SS.union (Expr.lvars e) acc) fs
+    Utils.Containers.SS.empty
+  |> Utils.Containers.SS.filter (fun x -> Hashtbl.find_opt gamma x = Some Type.NumberType)
+
+let concat_numeric_values label fs gamma model =
+  let names = concat_numeric_names fs gamma and values = Hashtbl.create 2 in
+  if not (Utils.Containers.SS.is_empty names) then
+    Smt.lift_model model gamma (Hashtbl.add values)
+      (Expr.Set.of_list (List.map (fun x -> Expr.LVar x) (Utils.Containers.SS.elements names)));
+  Alcotest.(check int) (label ^ " every used Number lifted from the actual native model")
+    (Utils.Containers.SS.cardinal names) (Hashtbl.length values);
+  Utils.Containers.SS.iter (fun x -> match Hashtbl.find_opt values x with
+    | Some (Expr.Lit (Num value)) when Float.is_finite value -> ()
+    | _ -> Alcotest.fail (label ^ " missing finite native Number " ^ x)) names;
+  Expr.Set.iter (fun atom ->
+    let used = Expr.lvars atom in
+    if not (Utils.Containers.SS.is_empty used) && Utils.Containers.SS.subset used names then (
+      let concrete = Hashtbl.fold (fun x value atom ->
+        Expr.subst_expr_for_expr ~to_subst:(Expr.LVar x) ~subst_with:value atom) values atom in
+      Alcotest.(check bool) (label ^ " every retained Number-only atom concretely replayed")
+        true (slice_bound_truth concrete))) fs;
+  values
+
+let concat_numeric_run ?(candidate = Some 3.) ?(extra = []) ?(status = "sat") label fs gamma n =
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () and full = "control-concat-numeric-full-contradiction" in
+  let model,contexts = pending_context_capture (fun () ->
+    let model = Smt.check_sat fs gamma in
+    if status = "unsat" then (
+      Alcotest.(check bool) (label ^ " complete original contradiction rejected") true (Option.is_none model);
+      Alcotest.(check bool) (label ^ " distinct complete original native UNSAT") true
+        (Option.is_none (Smt.exec_sat ~caller_kind:full fs gamma)));
+    model) in
+  finite_number_bound_complete label before contexts status;
+  List.iter (fun context -> Alcotest.(check bool) (label ^ " native complete model validation") true
+    (pending_context_field "model_validate" (pending_context_field "initial_options" context)
+     = `String "true")) contexts;
+  (match candidate with
+   | Some value ->
+       let expected = List.fold_left (fun acc (x,value) ->
+         Expr.Set.add (bin ValueEqual x (Expr.num value)) acc)
+         (Expr.Set.add (bin ValueEqual n (Expr.num value)) fs) extra in
+       let query = zero_inclusive_list_context label contexts "optional-seeded-model" expected gamma in
+       ignore (nonblank_counter_observe label before "optional-seeded-model" "sat" expected gamma);
+       Alcotest.(check bool) (label ^ " complete candidate returns without required fallback") true
+         (not (List.exists (fun c -> pending_context_field "caller" c = `String "required-complete") contexts));
+       let selected = List.find (fun c -> pending_context_field "query" c = `String query) contexts in
+       Alcotest.(check bool) (label ^ " actual ALoc retains its original Int encoding") true
+         (match pending_context_field "encoded_assertions" selected with
+          | `List xs -> List.mem (`String "(declare-const $$loc_372 Int)") xs | _ -> false)
+   | None ->
+       (* Endpoint absence is an eligibility decline, not a native rejection. *)
+       Alcotest.(check bool) (label ^ " numeric eligibility decline emits no seed query") true
+         (not (List.exists (fun c -> pending_context_field "caller" c = `String "optional-seeded-model") contexts));
+       let caller = if status = "unsat" then full else "required-complete" in
+       ignore (zero_inclusive_list_context label contexts caller fs gamma);
+       ignore (nonblank_counter_observe label before caller status fs gamma));
+  Alcotest.(check bool) (label ^ " actual complete model status") (status = "sat") (Option.is_some model);
+  Option.iter (fun model ->
+    let values = concat_numeric_values label fs gamma model in
+    List.iter (fun (x,wanted) -> match x with
+      | Expr.LVar name -> Alcotest.(check bool) (label ^ " actual candidate binary64 " ^ name) true
+          (match Hashtbl.find_opt values name with
+           | Some (Expr.Lit (Num value)) -> Int64.bits_of_float value = Int64.bits_of_float wanted
+           | _ -> false)
+      | _ -> assert false)
+      (match candidate with None -> [] | Some value -> (n,value)::extra)) model;
+  nonblank_counter_retained label fs gamma original types;
+  model
+
+let concat_numeric_original_cache () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,n,one = concat_numeric_frame "saved" in
+  Alcotest.(check int) "concat exactly one used Number despite original unused Gamma" 1
+    (Utils.Containers.SS.cardinal (concat_numeric_names fs gamma));
+  ignore (concat_numeric_run "concat-original22" fs gamma n);
+  let log = nonblank_counter_read "file.log" and dumps = List.sort String.compare (nonblank_counter_files ())
+  and contexts = Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare in
+  let cached = Smt.check_sat fs gamma in
+  Alcotest.(check bool) "concat original-key cache emits no endpoint" true
+    (log = nonblank_counter_read "file.log" && dumps = List.sort String.compare (nonblank_counter_files ())
+     && contexts = (Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare));
+  let cached_values = concat_numeric_values "concat-cached" fs gamma (Option.get cached) in
+  (match n with
+   | Expr.LVar name -> Alcotest.(check bool) "concat cache retains actual count3 model" true
+       (Hashtbl.find_opt cached_values name = Some (Expr.num 3.))
+   | _ -> assert false);
+  let changed = Hashtbl.copy gamma in Hashtbl.add changed "#unused_concat_object" Type.ObjectType;
+  ignore (concat_numeric_run "concat-unused-Gamma-cache-miss" fs changed n);
+  let current = one "#pcCurrent" in
+  let literal = Literal.Utf16String (Utils.Utf16.of_canonical
+    (Utils.Utf16.of_code_units [0x41;0xd800;0;0xdc00])) in
+  let model = concat_numeric_run "concat-keeps-nonempty-UTF16"
+    (Expr.Set.add (bin ValueEqual current (Expr.Lit literal)) fs) gamma n |> Option.get in
+  match current with
+  | Expr.LVar name -> primary_check_lift "concat actual nonempty UTF16 unchanged" model gamma [name,literal]
+  | _ -> assert false)
+
+let concat_numeric_names_and_two_roles () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun label -> let fs,gamma,n,_ = concat_numeric_frame label in
+    ignore (concat_numeric_run label fs gamma n)) ["alpha";"collision"];
+  let fs,gamma,n,_ = concat_numeric_frame "two_roles" in
+  let i = Expr.LVar "#independent_concat_zero" in
+  Hashtbl.add gamma "#independent_concat_zero" Type.NumberType;
+  let fs = Expr.Set.add (bin Equal i (Expr.num 0.)) fs in
+  Alcotest.(check int) "concat old wrapper has its independent second used Number" 2
+    (Utils.Containers.SS.cardinal (concat_numeric_names fs gamma));
+  ignore (concat_numeric_run ~extra:[i,0.] "concat-old-two-role-route" fs gamma n))
+
+let concat_numeric_declines () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,n,_ = concat_numeric_frame "zero_used" in
+  let instantiated = Expr.Set.fold (fun atom acc -> Expr.Set.add
+    (Expr.subst_expr_for_expr ~to_subst:n ~subst_with:(Expr.num 3.) atom) acc) fs Expr.Set.empty in
+  Alcotest.(check int) "concat full instantiation has zero used Number variables" 0
+    (Utils.Containers.SS.cardinal (concat_numeric_names instantiated gamma));
+  ignore (concat_numeric_run ~candidate:None "concat-zero-used-static-eligibility-decline"
+    instantiated gamma n);
+  let fs,gamma,n,one = concat_numeric_frame "no_positive_root" in
+  ignore (concat_numeric_run ~candidate:None "concat-no-positive-direct-root-full-fallback"
+    (Expr.Set.remove (one "(2. < #nodeN)") fs) gamma n);
+  let fs,gamma,n,one = concat_numeric_frame "content" in
+  ignore (concat_numeric_run ~candidate:None "concat-content-observation-full-fallback"
+    (Expr.Set.add (one "((u16-trim #pcCurrent) == u16\"\")") fs) gamma n))
+
+let concat_numeric_native_rejections () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,n,_ = concat_numeric_frame "rejections" in
+  ignore (concat_numeric_run ~candidate:None ~status:"unsat" "concat-whole-frame-contradiction"
+    (Expr.Set.add (bin FLessThanEqual n (Expr.num 2.)) fs) gamma n);
+  List.iter (fun (label,value) ->
+    let caller = "control-concat-numeric-" ^ label in
+    let expected = Expr.Set.add (bin ValueEqual n (Expr.num value)) fs in
+    let before = nonblank_counter_rows () in
+    let rejected,contexts = pending_context_capture (fun () ->
+      Option.is_none (Smt.exec_sat ~caller_kind:caller expected gamma)) in
+    Alcotest.(check bool) (label ^ " actual complete invalid candidate UNSAT") true rejected;
+    finite_number_bound_complete label before contexts "unsat";
+    ignore (zero_inclusive_list_context label contexts caller expected gamma);
+    ignore (nonblank_counter_observe label before caller "unsat" expected gamma))
+    ["count2",2.;"count-overflow",4294967296.])
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None ->
+       [Alcotest.test_case "concat one Number complete original model cache and untouched UTF16" `Quick
+          (with_total concat_numeric_original_cache);
+        Alcotest.test_case "concat one Number alpha collision and old independent second role" `Quick
+          (with_total concat_numeric_names_and_two_roles);
+        Alcotest.test_case "concat zero used Number no positive root and content full fallback" `Quick
+          (with_total concat_numeric_declines);
+        Alcotest.test_case "concat complete contradiction invalid count2 and overflow native rejections" `Quick
+          (with_total concat_numeric_native_rejections)]
+   | _ -> [])

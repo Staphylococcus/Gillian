@@ -2908,6 +2908,122 @@ let seeded_model fs gamma =
   let count_type typ =
     SS.cardinal (SS.filter (fun x -> Hashtbl.find_opt gamma x = Some typ) vars)
   in
+  let try_seed query =
+    (* Reject only new finite Number guesses contradicted by an original
+       direct literal constraint. This is candidate pruning, never an UNSAT
+       decision about fs. Numeric comparison deliberately identifies +/-0;
+       unsupported expressions and nonfinite literals remain unanalysed. *)
+    let violates left (op : BinOp.t) right = match op with
+      | FLessThan -> not (left < right)
+      | FLessThanEqual -> not (left <= right)
+      | Equal | ValueEqual -> left <> right
+      | _ -> false in
+    let conflicting = Expr.Set.exists (function
+      | Expr.BinOp (LVar name, (Equal | ValueEqual), Lit (Num value))
+      | Expr.BinOp (Lit (Num value), (Equal | ValueEqual), LVar name)
+        when Hashtbl.find_opt gamma name = Some Type.NumberType
+          && Float.is_finite value ->
+          Expr.Set.exists (function
+            | Expr.BinOp (LVar x, op, Lit (Num bound))
+              when x = name && Float.is_finite bound ->
+                violates value op bound
+            | Expr.BinOp (Lit (Num bound), op, LVar x)
+              when x = name && Float.is_finite bound ->
+                violates bound op value
+            | _ -> false) fs
+      | _ -> false) (Expr.Set.diff query fs) in
+    if conflicting then None else try
+      run_sat ~caller_kind:"optional-seeded-model" ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+        ~raw_unknown:true query gamma
+    with SMT_unknown -> None
+  in
+  let literal_candidate () =
+    (* This existing numeric search does not require a second counter or a
+       UTF16 loop. Keep the content/rounded-length guard and passive raw upper
+       bounds unchanged. One complete candidate may succeed only through native
+       validated SAT; guesses never become state facts. *)
+    let contents =
+      object
+        inherit [_] Visitors.iter as super
+        val mutable seen = false
+        method seen = seen
+        method! visit_expr () e =
+          (match e with
+          | BinOp (_, (Utf16Nth | Utf16CodeUnit | Utf16Cat | Utf16Less
+                      | StrNth | StrCat | StrLess), _)
+          | UnOp ((Utf16Len | Utf16Trim | Utf16ToNumber | NumberToUtf16
+                  | StrLen | ToNumberOp | ToStringOp | StrToBytes), _) ->
+              seen <- true
+          | _ -> ());
+          super#visit_expr () e
+      end
+    in
+    Expr.Set.iter (function
+      | Expr.BinOp (UnOp (Utf16Len, LVar string), ILessThanEqual,
+          Lit (Int bound))
+        when Hashtbl.find_opt gamma string = Some Type.Utf16Type
+          && Z.sign bound >= 0 -> ()
+      | expression -> contents#visit_expr () expression) fs;
+    if contents#seen then None else
+    let number x = Hashtbl.find_opt gamma x = Some Type.NumberType in
+    let literal_values = Expr.Set.fold (fun e acc -> match e with
+      | BinOp (LVar x, (Equal | ValueEqual), Lit (Num value))
+      | BinOp (Lit (Num value), (Equal | ValueEqual), LVar x)
+        when number x && not (List.mem_assoc x acc) -> (x,value)::acc
+      | _ -> acc) fs [] in
+    let root_guess x = Expr.Set.fold (fun e value ->
+      let bound lower strict =
+        if lower >= 0. && lower < 8. then
+          max value (if strict then floor lower +. 1. else ceil lower)
+        else value in
+      match e with
+      | BinOp (Lit (Num lower), FLessThan, LVar name) when name = x ->
+          bound lower true
+      | BinOp (Lit (Num lower), FLessThanEqual, LVar name)
+      | UnOp (Not, BinOp (LVar name, FLessThan, Lit (Num lower)))
+        when name = x -> bound lower false
+      | _ -> value) fs 0. in
+    let initial = SS.fold (fun x acc ->
+      let guess = root_guess x in
+      if number x && guess > 1. && not (List.mem_assoc x acc)
+      then (x,guess)::acc else acc) vars literal_values in
+    if List.length initial = List.length literal_values then None else
+    let value guesses = function
+      | Expr.LVar x -> List.assoc_opt x guesses
+      | Lit (Num n) -> Some n
+      | BinOp (LVar x, (FPlus | FMinus as op), Lit (Num 1.)) ->
+          Option.map (fun n -> if op = FPlus then n +. 1. else n -. 1.)
+            (List.assoc_opt x guesses)
+      | _ -> None in
+    let assign grow x guess acc =
+      if not (number x) || List.mem_assoc x literal_values then acc
+      else match List.assoc_opt x acc with
+      | None -> (x,guess)::acc
+      | Some old when grow && guess > old ->
+          List.map (fun (name,n) -> name,(if name = x then guess else n)) acc
+      | _ -> acc in
+    let step guesses = Expr.Set.fold (fun e acc ->
+      let equal left right acc = match left,value acc right with
+        | Expr.LVar x,Some n -> assign false x n acc | _ -> acc in
+      match e with
+      | BinOp (left,(Equal | ValueEqual),right) ->
+          equal right left (equal left right acc)
+      | BinOp (lower,(FLessThan | FLessThanEqual as op),LVar upper) ->
+          (match value acc lower with
+          | Some n -> assign true upper
+              (if op = FLessThan then floor n +. 1. else n) acc
+          | None -> acc)
+      | _ -> acc) fs guesses in
+    (* Fixed rounds bound cyclic inequalities deterministically. No fixed
+       point, feasibility result, or arithmetic law is assumed. *)
+    let rec propagate remaining guesses =
+      if remaining = 0 then guesses
+      else propagate (remaining-1) (step guesses) in
+    let guesses = propagate (SS.cardinal vars) initial in
+    let query = List.fold_left (fun acc (x,n) -> Expr.Set.add
+      (Expr.BinOp (LVar x,ValueEqual,Expr.num n)) acc) fs guesses in
+    try_seed query
+  in
   let length_pair number string =
     (* Entailment may leave the linked Number wrapped rather than retaining
        a gamma entry. The original equality still stays in the complete query;
@@ -2949,12 +3065,10 @@ let seeded_model fs gamma =
         | _ -> SS.union (compared_strings assertion) acc)
       fs SS.empty
   in
-  if
-    not
-      (!Config.Verification.total
-      && ((count_type Type.Utf16Type >= 2 && count_type Type.NumberType >= 2)
-         || not (SS.is_empty length_strings)))
-  then None
+  if not !Config.Verification.total then None
+  else if not ((count_type Type.Utf16Type >= 2 && count_type Type.NumberType >= 2)
+               || not (SS.is_empty length_strings))
+  then literal_candidate ()
   else
     let seeded =
       SS.fold
@@ -2972,35 +3086,6 @@ let seeded_model fs gamma =
           | Some value ->
               Expr.Set.add (Expr.BinOp (Expr.LVar x, Equal, value)) acc)
         vars fs
-    in
-    let try_seed query =
-      (* Reject only new finite Number guesses contradicted by an original
-         direct literal constraint. This is candidate pruning, never an UNSAT
-         decision about fs. Numeric comparison deliberately identifies +/-0;
-         unsupported expressions and nonfinite literals remain unanalysed. *)
-      let violates left (op : BinOp.t) right = match op with
-        | FLessThan -> not (left < right)
-        | FLessThanEqual -> not (left <= right)
-        | Equal | ValueEqual -> left <> right
-        | _ -> false in
-      let conflicting = Expr.Set.exists (function
-        | Expr.BinOp (LVar name, (Equal | ValueEqual), Lit (Num value))
-        | Expr.BinOp (Lit (Num value), (Equal | ValueEqual), LVar name)
-          when Hashtbl.find_opt gamma name = Some Type.NumberType
-            && Float.is_finite value ->
-            Expr.Set.exists (function
-              | Expr.BinOp (LVar x, op, Lit (Num bound))
-                when x = name && Float.is_finite bound ->
-                  violates value op bound
-              | Expr.BinOp (Lit (Num bound), op, LVar x)
-                when x = name && Float.is_finite bound ->
-                  violates bound op value
-              | _ -> false) fs
-        | _ -> false) (Expr.Set.diff query fs) in
-      if conflicting then None else try
-        run_sat ~caller_kind:"optional-seeded-model" ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
-          ~raw_unknown:true query gamma
-      with SMT_unknown -> None
     in
     match try_seed seeded with
     | Some _ as witness -> witness
@@ -3354,92 +3439,7 @@ let seeded_model fs gamma =
            attempt preserves the full query and only a validated SAT model
            succeeds. *)
         | None -> List.find_map (fun n -> try_seed (with_length n)) [ 0; 1; 2 ])
-    | None ->
-        (* No rounded-length/content search is added here. For a pure/list
-           query, original small literal lower bounds may guide one complete
-           candidate after the unchanged all-zero attempt has failed. Guesses
-           never become state facts; only a native validated SAT model wins. *)
-        let contents =
-          object
-            inherit [_] Visitors.iter as super
-            val mutable seen = false
-            method seen = seen
-            method! visit_expr () e =
-              (match e with
-              | BinOp (_, (Utf16Nth | Utf16CodeUnit | Utf16Cat | Utf16Less
-                          | StrNth | StrCat | StrLess), _)
-              | UnOp ((Utf16Len | Utf16Trim | Utf16ToNumber | NumberToUtf16
-                      | StrLen | ToNumberOp | ToStringOp | StrToBytes), _) ->
-                  seen <- true
-              | _ -> ());
-              super#visit_expr () e
-          end
-        in
-        Expr.Set.iter (function
-          | Expr.BinOp (UnOp (Utf16Len, LVar string), ILessThanEqual,
-              Lit (Int bound))
-            when Hashtbl.find_opt gamma string = Some Type.Utf16Type
-              && Z.sign bound >= 0 -> ()
-          | expression -> contents#visit_expr () expression) fs;
-        if contents#seen then None else
-        let number x = Hashtbl.find_opt gamma x = Some Type.NumberType in
-        let literal_values = Expr.Set.fold (fun e acc -> match e with
-          | BinOp (LVar x, (Equal | ValueEqual), Lit (Num value))
-          | BinOp (Lit (Num value), (Equal | ValueEqual), LVar x)
-            when number x && not (List.mem_assoc x acc) -> (x,value)::acc
-          | _ -> acc) fs [] in
-        let root_guess x = Expr.Set.fold (fun e value ->
-          let bound lower strict =
-            if lower >= 0. && lower < 8. then
-              max value (if strict then floor lower +. 1. else ceil lower)
-            else value in
-          match e with
-          | BinOp (Lit (Num lower), FLessThan, LVar name) when name = x ->
-              bound lower true
-          | BinOp (Lit (Num lower), FLessThanEqual, LVar name)
-          | UnOp (Not, BinOp (LVar name, FLessThan, Lit (Num lower)))
-            when name = x -> bound lower false
-          | _ -> value) fs 0. in
-        let initial = SS.fold (fun x acc ->
-          let guess = root_guess x in
-          if number x && guess > 1. && not (List.mem_assoc x acc)
-          then (x,guess)::acc else acc) vars literal_values in
-        if List.length initial = List.length literal_values then None else
-        let value guesses = function
-          | Expr.LVar x -> List.assoc_opt x guesses
-          | Lit (Num n) -> Some n
-          | BinOp (LVar x, (FPlus | FMinus as op), Lit (Num 1.)) ->
-              Option.map (fun n -> if op = FPlus then n +. 1. else n -. 1.)
-                (List.assoc_opt x guesses)
-          | _ -> None in
-        let assign grow x guess acc =
-          if not (number x) || List.mem_assoc x literal_values then acc
-          else match List.assoc_opt x acc with
-          | None -> (x,guess)::acc
-          | Some old when grow && guess > old ->
-              List.map (fun (name,n) -> name,(if name = x then guess else n)) acc
-          | _ -> acc in
-        let step guesses = Expr.Set.fold (fun e acc ->
-          let equal left right acc = match left,value acc right with
-            | Expr.LVar x,Some n -> assign false x n acc | _ -> acc in
-          match e with
-          | BinOp (left,(Equal | ValueEqual),right) ->
-              equal right left (equal left right acc)
-          | BinOp (lower,(FLessThan | FLessThanEqual as op),LVar upper) ->
-              (match value acc lower with
-              | Some n -> assign true upper
-                  (if op = FLessThan then floor n +. 1. else n) acc
-              | None -> acc)
-          | _ -> acc) fs guesses in
-        (* Fixed rounds bound cyclic inequalities deterministically. No fixed
-           point, feasibility result, or arithmetic law is assumed. *)
-        let rec propagate remaining guesses =
-          if remaining = 0 then guesses
-          else propagate (remaining-1) (step guesses) in
-        let guesses = propagate (SS.cardinal vars) initial in
-        let query = List.fold_left (fun acc (x,n) -> Expr.Set.add
-          (Expr.BinOp (LVar x,ValueEqual,Expr.num n)) acc) fs guesses in
-        try_seed query
+    | None -> literal_candidate ()
 
 (* Rounded-length upper-bound queries can combine expensive sequence and
    floating-point theories. First prove an exact index identity using original
