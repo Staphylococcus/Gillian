@@ -533,12 +533,14 @@ let translate_single_func_specs
           in
 
           (* Printf.printf "I managed to parse the js assertions\n"; *)
-          let pre_jsil, posts_jsil =
-            JSSpec.js2jsil_st pre_js posts_js cc_tbl vis_tbl fun_tbl fid
+          let pre_jsil, posts_jsil, verifier_scope =
+            JSSpec.js2jsil_st ~verify_final_scope:(ret_flag = Flag.Normal)
+              pre_js posts_js cc_tbl vis_tbl fun_tbl fid
               fun_args
           in
           let new_spec =
-            Spec.s_init ?label:lab_js pre_jsil posts_jsil ret_flag true
+            Spec.s_init ?label:lab_js ?verifier_scope
+              pre_jsil posts_jsil ret_flag true
           in
           new_spec)
         preconditions postconditions
@@ -604,8 +606,8 @@ let translate_only_specs cc_tbl old_fun_tbl fun_tbl vis_tbl js_only_specs =
       let sspecs =
         List.map
           (fun JSSpec.{ pre; post; flag; label } ->
-            let pre, post =
-              JSSpec.js2jsil_st pre post cc_tbl vis_tbl (Hashtbl.create 0) name
+            let pre, post, _ =
+              JSSpec.js2jsil_st ~verify_final_scope:false pre post cc_tbl vis_tbl (Hashtbl.create 0) name
                 params
             in
             Spec.
@@ -613,6 +615,7 @@ let translate_only_specs cc_tbl old_fun_tbl fun_tbl vis_tbl js_only_specs =
                 pre;
                 posts = post;
                 variant = None;
+                verifier_scope = None;
                 flag;
                 to_verify = false;
                 label;

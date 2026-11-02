@@ -160,6 +160,7 @@ module Make (State : SState.S) :
   open Literal
   open Containers
   module L = Logging
+  module Origin = LogicPreprocessing.InadmissibleOrigin
 
   type state_t = State.t [@@deriving yojson]
   type abs_t = string * Expr.t list
@@ -344,6 +345,14 @@ module Make (State : SState.S) :
     let state' = State.set_store astate.state store in
     { astate with state = state' }
 
+  let lifecycle name astate fields =
+    Owned_prefix_lifecycle.event name ~state:astate (fun () ->
+      let tuples = Preds.to_list astate.preds |> List.filter (fun (name,_) ->
+        Owned_prefix_lifecycle.focused name) in
+      `Assoc ["tuples",`List (List.map (fun (name,args) ->
+        `List [`String name;`List (List.map Expr.to_yojson args)]) tuples);
+        "details",fields ()])
+
   let simplify_astate ?(save = false) ?(matching = false) (astate : t) :
       SVal.SESubst.t * t list =
     let { state; preds; wands; pred_defs } = astate in
@@ -507,14 +516,12 @@ module Make (State : SState.S) :
 
     let wrap_strategy f (name, args) =
       let pred = Predicate_selection_strategies.get_pred_def ~pred_defs name in
-      (* Defer fully specified pure relations until they are demanded. Heap
-         predicates and predicates with outputs retain their existing eager
-         behavior; their unfolding can expose resources or output values. *)
-      let defer_relation =
-        auto_level = `Low && pred.pred_nounfold && pred.pred_pure
-        && pred.ins_number = pred.pred_num_params
-      in
-      if pred.pred_abstract || defer_relation then 0 else f (name, args)
+      (* Branch assumptions must not eagerly consume opaque predicates. In
+         particular, a loop condition can mention a spatial segment's bounds
+         without needing its cells. Explicit unfolds and High resource recovery
+         still expose those cells and outputs when they are actually demanded. *)
+      let defer_predicate = auto_level = `Low && pred.pred_nounfold in
+      if pred.pred_abstract || defer_predicate then 0 else f (name, args)
     in
 
     let apply_strategies (strategies : (string * Expr.t list -> int) list) :
@@ -534,7 +541,16 @@ module Make (State : SState.S) :
       | `Low -> [ strategy_1 ~state ~values ~pred_defs; strategy_2 ~pred_defs ]
     in
     let strategies = List.map wrap_strategy strategies in
-    apply_strategies strategies
+    lifecycle "selection-before" astate (fun () ->
+      `String (match auto_level with `Low -> "Low" | `High -> "High"));
+    let selected = apply_strategies strategies in
+    lifecycle "selection-after" astate (fun () -> `Assoc [
+      "level",`String (match auto_level with `Low -> "Low" | `High -> "High");
+      "selected",(match selected with None -> `Null
+        | Some (name,args) when Owned_prefix_lifecycle.focused name ->
+            `List [`String name;`List (List.map Expr.to_yojson args)]
+        | Some (name,_) -> `Assoc ["other_predicate",`String name])]);
+    selected
 
   let select_guarded_predicate_to_fold (astate : t) (values : Expr.t list) :
       abs_t option =
@@ -659,7 +675,11 @@ module Make (State : SState.S) :
         let wands = Wands.copy wands in
         let state = State.copy state in
         Preds.extend ~pure preds (pname, vs);
-        { state; preds; wands; pred_defs }
+        let produced = { state; preds; wands; pred_defs } in
+        if Owned_prefix_lifecycle.focused pname then
+          lifecycle "predicate-produced" produced (fun () ->
+            `List [`String pname;`List (List.map Expr.to_yojson vs)]);
+        produced
     | Wand { lhs = lname, largs; rhs = rname, rargs } ->
         if !Config.under_approximation then
           L.fail "Wand assertions are not supported in under-approximation mode";
@@ -697,7 +717,13 @@ module Make (State : SState.S) :
                 | Some NumberType | None -> false
                 | _ -> true
               in
-              if exact_binding then Res_list.return (update_store astate x v)
+              if exact_binding then (
+                (* Later post assertions use the substitution, and produce_posts
+                   copies it back into the store. Keep the same checked witness
+                   in both places instead of allocating a second return value. *)
+                if !Config.Verification.total then
+                  SVal.SESubst.put subst (PVar x) v;
+                Res_list.return (update_store astate x v))
               else
                 let value = Expr.LVar (LVar.alloc ()) in
                 let updated = update_store astate x value in
@@ -706,7 +732,10 @@ module Make (State : SState.S) :
                     ~production:!Config.delay_entailment updated.state
                     [ BinOp (value, Equal, v) ]
                 with
-                | Some state -> Res_list.return { updated with state }
+                | Some state ->
+                    if !Config.Verification.total then
+                      SVal.SESubst.put subst (PVar x) value;
+                    Res_list.return { updated with state }
                 | None -> []
             else
               other_state_err
@@ -740,6 +769,7 @@ module Make (State : SState.S) :
             Res_list.return { state = state'; preds; wands; pred_defs })
 
   and produce_asrt_list
+      ?diagnostic_origin
       ?(track_infeasible = false)
       (astate : t)
       (subst : SVal.SESubst.t)
@@ -750,6 +780,15 @@ module Make (State : SState.S) :
       track_infeasible && !Config.Verification.total
       && not !Config.under_approximation
     in
+    let diagnostic_enabled =
+      Sys.getenv_opt "GILLIAN_DIAGNOSTIC_INADMISSIBLE_PRODUCTION" = Some "1"
+    in
+    let diagnostic_initial =
+      if diagnostic_enabled then
+        try Some (State.copy astate.state, SVal.SESubst.copy subst)
+        with _ -> None
+      else None
+    in
     let () =
       SVal.SESubst.iter subst (fun v value ->
           SVal.SESubst.put subst v (State.simplify_val astate.state value))
@@ -758,6 +797,27 @@ module Make (State : SState.S) :
       List.fold_left
         (fun intermediate_states asrt ->
           let** intermediate_state = intermediate_states in
+          (* Only a known type conflict on an atomic value classifies an empty
+             Types production as infeasible. Reverse typing can also fail for
+             unsupported expressions; those must retain the state-loss guard. *)
+          let type_conflict =
+            match asrt with
+            | Asrt.Types bindings when track_infeasible ->
+                List.find_map
+                  (fun (expression, required) ->
+                    let value = subst_in_expr subst expression in
+                    match value with
+                    | Expr.LVar _ | Expr.ALoc _ | Expr.Lit _ -> (
+                        match State.get_type intermediate_state.state value with
+                        | Some known when not (Type.equal known required) ->
+                            Some
+                              (Fmt.str "explicit unfold type conflict: %a is %a, requested %a"
+                                 Expr.pp value Type.pp known Type.pp required)
+                        | _ -> None)
+                    | _ -> None)
+                  bindings
+            | _ -> None
+          in
           let outcomes =
             try produce_assertion intermediate_state subst asrt with
             | err when track_infeasible -> raise err
@@ -774,12 +834,21 @@ module Make (State : SState.S) :
                   other_state_err "Production Exception")
                 else raise e
           in
-          guard_unclassified_loss track_infeasible
-            "explicit unfold assertion production" outcomes)
+          match (outcomes, type_conflict) with
+          | [], Some reason ->
+              Res_list.error_with (StateErr.EInfeasibleUnfold reason)
+          | _ ->
+              guard_unclassified_loss track_infeasible
+                "explicit unfold assertion production" outcomes)
         (Res_list.return astate) sas
     in
     let state, preds, wands =
       (State.copy state, Preds.copy preds, Wands.copy wands)
+    in
+    let diagnostic_before =
+      if diagnostic_enabled then
+        try Some (State.copy state) with _ -> None
+      else None
     in
     let admissible =
       L.verbose (fun fmt -> fmt "Produce: final check");
@@ -794,6 +863,68 @@ module Make (State : SState.S) :
     match admissible with
     | None ->
         L.normal (fun fmt -> fmt "final state non admissible");
+        if Origin.enabled then
+          ignore (Origin.emit "rejected-production" (fun () ->
+            ["origin", (match diagnostic_origin with None -> `Null | Some f -> f ());
+             "ordered_sas", Asrt.to_yojson sas;
+             "total", `Bool !Config.Verification.total;
+             "under_approximation", `Bool !Config.under_approximation;
+             "track_infeasible", `Bool track_infeasible]));
+        if diagnostic_enabled then (
+          try
+            match (diagnostic_initial, diagnostic_before) with
+            | Some (initial, initial_subst), Some before ->
+                let rejected = State.copy state in
+                let render pp value =
+                  let limit = 262144 in
+                  let buffer = Buffer.create 4096 in
+                  let truncated = ref false in
+                  let formatter =
+                    Format.make_formatter
+                      (fun text offset length ->
+                        let count = min length (limit - Buffer.length buffer) in
+                        if count > 0 then
+                          Buffer.add_substring buffer text offset count;
+                        if count < length then truncated := true)
+                      (fun () -> ())
+                  in
+                  pp formatter value;
+                  Format.pp_print_flush formatter ();
+                  (Buffer.contents buffer, !truncated)
+                in
+                let sas_text, sas_cut = render Asrt.pp sas in
+                let initial_subst_text, initial_subst_cut =
+                  render SVal.SESubst.pp initial_subst
+                in
+                let subst_text, subst_cut = render SVal.SESubst.pp subst in
+                let initial_text, initial_cut = render State.pp initial in
+                let before_text, before_cut = render State.pp before in
+                let rejected_text, rejected_cut = render State.pp rejected in
+                L.normal (fun fmt ->
+                    fmt
+                      "INADMISSIBLE_PRODUCTION_DIAGNOSTIC_BEGIN@\n\
+                       total=%b under_approximation=%b track_infeasible=%b field_limit_bytes=262144@\n\
+                       SAS truncated=%b:@\n%s@\n\
+                       INITIAL_SUBSTITUTION truncated=%b:@\n%s@\n\
+                       SUBSTITUTION truncated=%b:@\n%s@\n\
+                       INITIAL_STATE truncated=%b:@\n%s@\n\
+                       PRE_FINAL_STATE truncated=%b:@\n%s@\n\
+                       REJECTED_STATE truncated=%b:@\n%s@\n\
+                       INADMISSIBLE_PRODUCTION_DIAGNOSTIC_END"
+                      !Config.Verification.total !Config.under_approximation
+                      track_infeasible sas_cut sas_text initial_subst_cut
+                      initial_subst_text subst_cut subst_text initial_cut
+                      initial_text before_cut before_text rejected_cut
+                      rejected_text)
+            | _ ->
+                L.normal (fun fmt ->
+                    fmt
+                      "INADMISSIBLE_PRODUCTION_DIAGNOSTIC_BEGIN@\n\
+                       snapshot_unavailable=true total=%b under_approximation=%b track_infeasible=%b@\n\
+                       INADMISSIBLE_PRODUCTION_DIAGNOSTIC_END"
+                      !Config.Verification.total !Config.under_approximation
+                      track_infeasible)
+          with _ -> ());
         if track_infeasible then
           Res_list.error_with
             (StateErr.EInfeasibleUnfold
@@ -801,7 +932,8 @@ module Make (State : SState.S) :
         else Res_list.vanish
     | Some state -> Res_list.return { state; preds; pred_defs; wands }
 
-  let produce
+  let produce_with_diagnostic
+      ?diagnostic_origin
       ?(track_infeasible = false)
       (astate : t)
       (subst : SVal.SESubst.t)
@@ -826,7 +958,52 @@ module Make (State : SState.S) :
         ~assume:(fun st es -> State.assume_a st es)
         (State.copy astate.state) original);
     let sas = MP.simplify_asrts a in
-    produce_asrt_list ~track_infeasible astate subst sas
+    (* Metadata is persistent in the JS memory model. Re-producing fields at
+       an existential metadata location first would allocate a distinct ALoc
+       before the known object's metadata can identify that witness. Establish
+       those existing identity links before field production; the assertion
+       set, substitutions and final admissibility check are unchanged. Resolve
+       already-assumed logical aliases using the same location lookup as the
+       memory model; a reducible expression alone can miss those aliases. *)
+    let known_metadata = function
+      | Asrt.CorePred ("Metadata", [ loc ], [ _ ]) -> (
+          Option.is_some
+            (FOSolver.resolve_loc_name ~pfs:(State.get_pfs astate.state)
+               ~gamma:(State.get_typ_env astate.state)
+               (subst_in_expr subst loc)))
+      | _ -> false
+    in
+    let rec preserve_types = function
+      | (Asrt.Types _ as a) :: rest ->
+          let prefix, remaining = preserve_types rest in
+          (a :: prefix, remaining)
+      | remaining -> ([], remaining)
+    in
+    let types, remaining = preserve_types sas in
+    (* Pure post equalities also identify closure/environment witnesses before
+       their cells can be materialised at fresh locations. Definedness has
+       already been checked independently above; retain its original position. *)
+    let facts, remaining =
+      List.partition
+        (function
+          | Asrt.Pure _ as a -> Option.is_none (Asrt.as_definedness a)
+          | _ -> false)
+        remaining
+    in
+    let metadata, remaining = List.partition known_metadata remaining in
+    let ordered_sas = types @ facts @ metadata @ remaining in
+    let diagnostic_origin =
+      if not Origin.enabled then None else
+      let selection = diagnostic_origin in
+      Some (fun () -> `Assoc [
+        "selection", (match selection with None -> `Null | Some f -> f ());
+        "raw_before_simplify", Asrt.to_yojson a;
+        "mp_simplified_sas", Asrt.to_yojson sas])
+    in
+    produce_asrt_list ?diagnostic_origin ~track_infeasible astate subst ordered_sas
+
+  let produce ?track_infeasible astate subst a =
+    produce_with_diagnostic ?track_infeasible astate subst a
 
   let produce_posts (state : t) (subst : SVal.SESubst.t) (asrts : Asrt.t list) :
       t list =
@@ -945,9 +1122,43 @@ module Make (State : SState.S) :
       List.to_seq additional_bindings |> Seq.map fst |> SS.of_seq
     in
     let () = extend_subst_with_bindings state subst_i additional_bindings in
-    let definitions =
-      List.map (fun (_, def) -> def) pred.pred.pred_definitions
+    let produce_definition ordinal (lab, definition) astate subst =
+      Owned_prefix_lifecycle.scope_if (Owned_prefix_lifecycle.focused pname)
+        "unfold-alternative" ~state:astate (fun () ->
+        `Assoc ["predicate",`String pname;"ordinal",`Int ordinal;
+          "label",(match lab with None -> `Null | Some (name,_) -> `String name);
+          "substitution",SVal.SESubst.to_yojson subst]) @@ fun () ->
+      let diagnostic_origin =
+        if not Origin.enabled then None else
+        try
+          let initial_subst = SVal.SESubst.copy subst in
+          let selection_parent = L.Parent.get () in
+          let selection_command_parent =
+            Option.map (fun (id, _, _) -> id) (L.Parent.get_snapshot ()) in
+          let source_event = Origin.final_event pname in
+          Some (fun () ->
+            if Option.is_none selection_parent ||
+               Option.is_none selection_command_parent then (
+              Origin.unavailable "runtime-command-parent";
+              failwith "diagnostic runtime command parent unavailable");
+            `Assoc [
+            "predicate", `String pname; "ordinal", `Int ordinal;
+            "label", Origin.label lab;
+            "arguments", `List (List.map Expr.to_yojson args);
+            "starting_substitution", SVal.SESubst.to_yojson initial_subst;
+            "raw_selected", Asrt.to_yojson definition;
+            "selection_parent", (match selection_parent with
+              | None -> `Null | Some id -> L.Report_id.to_yojson id);
+            "selection_command_parent", (match selection_command_parent with
+              | None -> `Null | Some id -> L.Report_id.to_yojson id);
+            "source_final_event", (match source_event with
+              | None -> `Null | Some id -> `Int id);
+            "lineage_available", `Bool (Option.is_some source_event)])
+        with _ -> Origin.unavailable "runtime-selection-snapshot"; None
+      in
+      produce_with_diagnostic ?diagnostic_origin ~track_infeasible astate subst definition
     in
+    let definitions = pred.pred.pred_definitions in
     let open Syntaxes.List in
     let rets =
       match definitions with
@@ -963,21 +1174,25 @@ module Make (State : SState.S) :
                 (List.length (first_def :: rest_defs))
                 SVal.SESubst.pp subst_i);
           L.tmi (fun m ->
-              m "%a" Fmt.(list ~sep:(any "\n;\n") Asrt.pp) definitions);
+              m "%a"
+                Fmt.(list ~sep:(any "\n;\n") (fun fmt (_, a) -> Asrt.pp fmt a))
+                definitions);
           let state' = State.add_spec_vars state new_spec_vars in
           let astate = { state = state'; preds; wands; pred_defs } in
+          let diagnostic_ordinal = if Origin.enabled then Some (ref 1) else None in
           let rest_results =
             let* def = rest_defs in
+            let ordinal = match diagnostic_ordinal with
+              | None -> 0 | Some n -> let i = !n in incr n; i in
             let outcomes =
-              produce ~track_infeasible (copy_astate astate)
+              produce_definition ordinal def (copy_astate astate)
                 (SVal.SESubst.copy subst_i)
-                def
             in
             guard_unclassified_loss track_infeasible
               "explicit unfold predicate alternative" outcomes
           in
           let first_results =
-            produce ~track_infeasible astate subst_i first_def
+            produce_definition 0 first_def astate subst_i
           in
           let first_results =
             guard_unclassified_loss track_infeasible
@@ -1152,67 +1367,88 @@ module Make (State : SState.S) :
     let pred = MP.get_pred_def pred_defs pname in
     let pred_def = pred.pred in
     let pred_pure = pred_def.pred_pure in
-    (* we attempt to consume the pred as-is from our state. *)
-    match
-      Preds.consume_pred ~maintain:pred_pure preds pname vs
-        (Containers.SI.of_list (Pred.ins_indexes pred_def))
-        (State.equals state)
-    with
-    | Some (_, vs) -> (
-        (* It was in our set of preds! *)
-        L.verbose (fun m ->
-            m "Returning the following vs: @[<h>%a@]"
-              Fmt.(list ~sep:comma Expr.pp)
-              vs);
-        let vs = Pred.out_args pred_def vs in
+    let resource_fail () =
+      let values = List.filter_map Fun.id vs in
+      (* True permits the existing fixing mechanism; no ownership is invented. *)
+      Res_list.error_with (StateErr.EAsrt (values, Expr.true_))
+    in
+    let arity = List.length pred_def.pred_params in
+    let call_ins =
+      if List.length vs <> arity then None
+      else
         match fold_outs_info with
-        | None -> Res_list.return (astate, vs)
-        | Some (subst, step, les_outs) -> (
+        | None -> Some pred_def.ins_number
+        | Some (_, (Asrt.CorePred (cp_name, ins, outs), _), les_outs)
+          when Asrt.as_user_pred_name cp_name = Some pname
+               && List.length ins + List.length outs = arity
+               && List.equal Expr.equal outs les_outs ->
+            Some (List.length ins)
+        | Some _ -> None
+    in
+    match call_ins with
+    | None -> resource_fail ()
+    | Some ins_number -> (
+        (* CorePred parameters remain in their original full tuple order. Use
+           the same explicit call split for selection and returned values;
+           other consumers retain the predicate declaration's split. *)
+        let ins_indexes =
+          Containers.SI.of_list (List.init ins_number Fun.id)
+        in
+        let out_args = List.filteri (fun i _ -> i >= ins_number) in
+        if Owned_prefix_lifecycle.focused pname then
+          lifecycle "direct-consume-before" astate (fun () -> `Assoc [
+            "name",`String pname;"input_count",`Int ins_number;
+            "target",`List (List.map (function None -> `Null | Some x -> Expr.to_yojson x) vs)]);
+        let selected = Preds.consume_pred ~maintain:pred_pure preds pname vs ins_indexes
+            (State.equals state) in
+        if Owned_prefix_lifecycle.focused pname then
+          lifecycle "direct-consume-after" astate (fun () -> `Assoc [
+            "name",`String pname;"input_count",`Int ins_number;
+            "selected",(match selected with None -> `Null | Some (name,args) ->
+              `List [`String name;`List (List.map Expr.to_yojson args)])]);
+        match selected with
+        | Some (_, vs) -> (
             L.verbose (fun m ->
-                m
-                  "learned the outs of a predicate. going to match (@[<h>%a@]) \
-                   against (@[<h>%a@])!!!@\n"
-                  Fmt.(list ~sep:comma Expr.pp)
-                  vs
-                  Fmt.(list ~sep:comma Expr.pp)
-                  les_outs);
-            match match_ins_outs_lists state subst step vs les_outs with
-            | Success new_state ->
-                Res_list.return
-                  ({ state = new_state; wands; preds; pred_defs }, vs)
-            | Abort fail_pf ->
-                (* TODO: why is this not EPure (fail_pf) ? *)
-                let error = StateErr.EAsrt ([], fail_pf) in
-                Res_list.error_with error
-            | Vanish -> Res_list.vanish))
-    | None
-      when (not !Config.manual_proof)
-           && (not pred_def.pred_abstract)
-           && not no_auto_fold ->
-        (* Recursive Case - Folding required *)
-        (* The predicate will be folded (if possible) and then removed from the state.
-           Interestingly, if the predicate has a guard, this will produce it but not remove it. *)
-        let () =
-          L.verbose (fun fmt ->
-              fmt "Auto-folding predicate: %s\n" pred.pred.pred_name)
-        in
-        L.verbose (fun m -> m "Recursive case - attempting to fold.");
-
-        let open Res_list.Syntax in
-        let vs_ins = Pred.in_args pred.pred vs in
-        let vs_ins = List.map Option.get vs_ins in
-        let** folded =
-          fold ~in_matching:true ~state:astate ~match_kind:(Fold pname) pred
-            vs_ins
-        in
-        (* Supposedly, we don't need a guard to make sure we're not looping indefinitely:
-           if the fold worked, then consume_pred should not take this branch on the next try.
-           We should still be keeping an eye on this in case something loops indefinitely. *)
-        consume_pred ~no_auto_fold ?fold_outs_info ~in_matching folded pname vs
-    | _ ->
-        let values = List.filter_map Fun.id vs in
-        (* The `True` as second parameter is required for the fixing mechanism to trigger *)
-        Res_list.error_with (StateErr.EAsrt (values, Expr.true_))
+                m "Returning the following vs: @[<h>%a@]"
+                  Fmt.(list ~sep:comma Expr.pp) vs);
+            let vs = out_args vs in
+            match fold_outs_info with
+            | None -> Res_list.return (astate, vs)
+            | Some (subst, step, les_outs) -> (
+                L.verbose (fun m ->
+                    m
+                      "learned the outs of a predicate. going to match (@[<h>%a@]) against (@[<h>%a@])!!!@\n"
+                      Fmt.(list ~sep:comma Expr.pp) vs
+                      Fmt.(list ~sep:comma Expr.pp) les_outs);
+                match match_ins_outs_lists state subst step vs les_outs with
+                | Success new_state ->
+                    Res_list.return
+                      ({ state = new_state; wands; preds; pred_defs }, vs)
+                | Abort fail_pf ->
+                    let error = StateErr.EAsrt ([], fail_pf) in
+                    Res_list.error_with error
+                | Vanish -> Res_list.vanish))
+        | None
+          when (not !Config.manual_proof)
+               && (not pred_def.pred_abstract)
+               && not no_auto_fold ->
+            (* An output-mode call may retrieve an owned instance, but it may
+               not manufacture missing declaration inputs for auto-fold. *)
+            L.verbose (fun fmt ->
+                fmt "Auto-folding predicate: %s\n" pred.pred.pred_name);
+            L.verbose (fun m -> m "Recursive case - attempting to fold.");
+            let declared_ins = Pred.in_args pred_def vs in
+            if List.exists Option.is_none declared_ins then resource_fail ()
+            else
+              let open Res_list.Syntax in
+              let vs_ins = List.map Option.get declared_ins in
+              let** folded =
+                fold ~in_matching:true ~state:astate ~match_kind:(Fold pname)
+                  pred vs_ins
+              in
+              consume_pred ~no_auto_fold ?fold_outs_info ~in_matching folded
+                pname vs
+        | _ -> resource_fail ())
 
   and match_ins_outs_lists
       (state : State.t)
@@ -1308,6 +1544,12 @@ module Make (State : SState.S) :
       (astate : t)
       (subst : SVal.SESubst.t)
       (step : MP.step) : (t, err_t) Res_list.t * L.Report_id.t option =
+    let capture_step = match fst step with
+      | Asrt.CorePred (name,_,_) -> Option.fold ~none:false
+          ~some:Owned_prefix_lifecycle.focused (Asrt.as_user_pred_name name)
+      | _ -> false in
+    Owned_prefix_lifecycle.scope_if capture_step "assertion" ~state:astate (fun () ->
+      `Assoc ["step",MP.step_to_yojson step;"substitution",SVal.SESubst.to_yojson subst]) @@ fun () ->
     let open Syntaxes.Option in
     (* Auxiliary function for actions and predicates, with indexed outs *)
     let { state; wands; preds; pred_defs } = astate in
@@ -1473,9 +1715,15 @@ module Make (State : SState.S) :
                          its retained expressions must still be defined; no
                          assumption is obtained from the proposal itself. *)
                       if !Config.Verification.total then
-                        State.eval_expr state out
-                      else out
+                        try Ok (State.eval_expr state out)
+                        with State.Internal_State_Error _ -> Error ()
+                      else Ok out
                     in
+                    (* A speculative witness can be partial on an inapplicable
+                       predicate alternative (e.g. an Array-only list field on
+                       an Object). Reject that matching alternative without
+                       asserting the witness or losing the caller state. *)
+                    let* out = out in
                     (* Special case: learning len x when we know x *)
                     let discharges =
                       match u with
@@ -1502,15 +1750,9 @@ module Make (State : SState.S) :
                         Ok (new_discharge :: discharges))
                   (Ok []) outs
               in
-              let discharges =
-                match discharges with
-                | Error () ->
-                    Fmt.failwith
-                      "INTERNAL ERROR: Matching failure: do not know all ins \
-                       for %a"
-                      Expr.pp f
-                | Ok discharges -> discharges
-              in
+              match discharges with
+              | Error () -> resource_fail
+              | Ok discharges ->
               (* To match a pure formula we must know all ins *)
               let opf = SVal.SESubst.subst_in_expr_opt subst f in
               match opf with
@@ -1762,11 +2004,24 @@ module Make (State : SState.S) :
       (mp : MP.t)
       (match_kind : match_kind) :
       (t * SVal.SESubst.t * post_res, err_t) Res_list.t =
+    Owned_prefix_lifecycle.scope "match" ~state:astate (fun () ->
+      `Assoc ["kind",match_kind_to_yojson match_kind;
+        "substitution",SVal.SESubst.to_yojson subst]) @@ fun () ->
     let astate_i = copy_astate astate in
     let subst_i = SVal.SESubst.copy subst in
-    let can_fix errs = List.exists State.can_fix errs in
+    let can_fix recovery_state errs =
+      List.exists
+        (fun err ->
+          State.can_fix err
+          && (match err with
+             | StateErr.EAsrt (_, pf) ->
+                 (* Unfolding cannot make a state-proved false claim true. *)
+                 not (State.assert_a recovery_state.state [ Expr.UnOp (Not, pf) ])
+             | _ -> true))
+        errs
+    in
 
-    let rec handle_ret ?prev_id ~fuel ret =
+    let rec handle_ret ?prev_id ~fuel ~recovery_state ret =
       L.set_previous ~force_none:true prev_id;
       match ret with
       | Ok successes ->
@@ -1775,11 +2030,11 @@ module Make (State : SState.S) :
       | Error errs
         when fuel > 0 && !Config.unfolding
              && Exec_mode.is_verification_exec !Config.current_exec_mode
-             && (not in_matching) && can_fix errs -> (
+             && (not in_matching) && can_fix recovery_state errs -> (
           L.verbose (fun fmt -> fmt "Matcher.match_: Failure");
           if !Config.under_approximation then
             L.fail "MATCHING ABORTED IN UX MODE???";
-          let { state; _ } = astate_i in
+          let { state; _ } = recovery_state in
           let tactics = State.get_recovery_tactic state errs in
           L.verbose (fun m ->
               m
@@ -1788,7 +2043,7 @@ module Make (State : SState.S) :
                  %a"
                 (Recovery_tactic.pp Expr.pp)
                 tactics);
-          match try_recovering astate_i tactics with
+          match try_recovering (copy_astate recovery_state) tactics with
           | Error msg ->
               L.normal (fun m -> m "Match. Recovery tactic failed: %s" msg);
               Res_list.just_errors errs
@@ -1817,13 +2072,15 @@ module Make (State : SState.S) :
                   in
                   Res_list.error_with error
               | Some (_, astate) ->
-                  (* let subst'' = compose_substs (Subst.to_list subst_i) subst (Subst.init []) in *)
+                  (* Matching consumes resources. Keep the fully recovered frame
+                     for the next retry, rather than the original snapshot. *)
+                  let recovery_state = copy_astate astate in
                   let subst'' = SVal.SESubst.copy subst_i in
                   let prev_id = recovery_report_id () in
                   let new_ret =
                     match_mp ?prev_id ([ (astate, subst'', mp) ], [])
                   in
-                  handle_ret ?prev_id ~fuel:(fuel - 1) new_ret))
+                  handle_ret ?prev_id ~fuel:(fuel - 1) ~recovery_state new_ret))
       | Error errors ->
           L.verbose (fun fmt -> fmt "Matcher.match: Failure");
           Res_list.just_errors errors
@@ -1832,7 +2089,7 @@ module Make (State : SState.S) :
       { astate = AstateRec.from astate; subst; mp; match_kind }
       (fun _ ->
         let ret = match_mp ([ (astate, subst, mp) ], []) in
-        handle_ret ~fuel:10 ret)
+        handle_ret ~fuel:10 ~recovery_state:astate_i ret)
 
   and fold
       ?(in_matching = false)
@@ -1841,6 +2098,10 @@ module Make (State : SState.S) :
       ~(state : t)
       (pred : MP.pred)
       (args : Expr.t list) : (t, err_t) Res_list.t =
+    Owned_prefix_lifecycle.scope_if (Owned_prefix_lifecycle.focused pred.pred.pred_name)
+      "fold" ~state (fun () -> `Assoc [
+      "predicate",`String pred.pred.pred_name;"kind",match_kind_to_yojson match_kind;
+      "arguments",`List (List.map Expr.to_yojson args)]) @@ fun () ->
     let pred_name = pred.pred.pred_name in
     if
       !Config.Verification.total
@@ -1890,6 +2151,8 @@ module Make (State : SState.S) :
     in
     (* We extend the list of predicates with our newly folded predicate. *)
     Preds.extend ~pure:pred.pred.pred_pure preds' (pred_name, arg_vs);
+    if Owned_prefix_lifecycle.focused pred_name then
+      lifecycle "fold-produced" astate' (fun () -> `List (List.map Expr.to_yojson arg_vs));
     (* If the predicate has a guard, we also produce it in our state,
        otherwise we return the just current state *)
     match pred.pred.pred_guard with
@@ -1909,7 +2172,10 @@ module Make (State : SState.S) :
       (* Find a predicate with only concrete args
          and without a guard. *)
       let pred = MP.get_pred_def pred_defs pname in
-      Option.is_none pred.pred.pred_guard
+      (* Opaque resources remain owned across summary application. Explicit
+         unfolds and High recovery still expose their complete alternatives. *)
+      (not pred.pred.pred_nounfold)
+      && Option.is_none pred.pred.pred_guard
       && Pred.in_args pred.pred vs
          |> List.for_all (fun in_arg ->
                 match Expr.to_literal in_arg with
@@ -1953,6 +2219,8 @@ module Make (State : SState.S) :
 
   and try_recovering (astate : t) (tactic : Expr.t Recovery_tactic.t) :
       (t list * recovery_tactic, string) result =
+    Owned_prefix_lifecycle.scope "recovery" ~state:astate
+      (fun () -> `Null) @@ fun () ->
     let open Syntaxes.Result in
     if !Config.under_approximation then
       L.fail "Recovery tactics not handled in UX mode";

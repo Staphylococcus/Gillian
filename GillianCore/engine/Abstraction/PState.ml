@@ -154,6 +154,14 @@ module Make (State : SState.S) :
   let make_s ~init_data:_ ~store:_ ~pfs:_ ~gamma:_ ~spec_vars:_ : t =
     failwith "Calling make_s on a PState"
 
+  let lifecycle name astate fields =
+    Owned_prefix_lifecycle.event name ~state:astate (fun () ->
+      let tuples = Preds.to_list astate.preds |> List.filter (fun (name,_) ->
+        Owned_prefix_lifecycle.focused name) in
+      `Assoc ["tuples",`List (List.map (fun (name,args) ->
+        `List [`String name;`List (List.map Expr.to_yojson args)]) tuples);
+        "details",fields ()])
+
   let simplify
       ?(save = false)
       ?(kill_new_lvars : bool option)
@@ -370,6 +378,8 @@ module Make (State : SState.S) :
 
     (* OK FOR DELAY ENTAILMENT *)
     let* final_state = SMatcher.produce_posts frame_state subst posts in
+    if name = "S05CopyAppendCell" then
+      lifecycle "apply-post-produced" final_state (fun () -> SVal.SESubst.to_yojson subst);
 
     let final_store = get_store final_state in
     let v_ret = SStore.get final_store Names.return_variable in
@@ -379,8 +389,12 @@ module Make (State : SState.S) :
     let _, final_states = simplify ~matching:true final_state in
     final_states
     |> List.filter_map @@ fun final_state ->
+       if name = "S05CopyAppendCell" then
+         lifecycle "apply-post-simplified" final_state (fun () -> `Null);
        match SMatcher.unfold_concrete_preds final_state with
        | Some (_, with_unfolded_concrete) ->
+           if name = "S05CopyAppendCell" then
+             lifecycle "apply-post-concrete-unfold" with_unfolded_concrete (fun () -> `Null);
            Some (Ok (with_unfolded_concrete, fl))
        | None ->
            L.verbose (fun m -> m "WARNING: late unsat");
@@ -934,6 +948,8 @@ module Make (State : SState.S) :
       @return List of states/predicate sets resulting from the evaluation *)
   let evaluate_slcmd (prog : 'a MP.prog) (lcmd : SLCmd.t) (astate : t) :
       (t, err_t) Res_list.t =
+    Owned_prefix_lifecycle.scope "logic-command" ~state:astate
+      (fun () -> Cmd.to_yojson (fun (_ : unit) -> `Null) (Cmd.Logic (LCmd.SL lcmd))) @@ fun () ->
     let eval_expr e =
       try State.eval_expr astate.state e
       with State.Internal_State_Error (errs, _) ->
@@ -1308,12 +1324,16 @@ module Make (State : SState.S) :
           in
           let astate = add_spec_vars astate (Var.Set.of_list binders) in
           let _, astates = simplify ~matching:true astate in
+          if lname = "S05CopyAppendCell" && Owned_prefix_lifecycle.active () then List.iter (fun state ->
+            lifecycle "apply-return" state (fun () -> `Null)) astates;
           Res_list.just_oks astates
       | Invariant _ ->
           raise
             (Failure "Invariant must be treated by the match_invariant function")
     in
     let _, astates = simplify resulting_astate in
+    if Owned_prefix_lifecycle.active () then
+      List.iter (fun state -> lifecycle "logic-return" state (fun () -> `Null)) astates;
     Res_list.just_oks astates
 
   let run_spec

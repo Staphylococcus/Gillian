@@ -160,6 +160,7 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
   | LstLen ->
       let ll = as_list lit in
       Int (Z.of_int (List.length ll))
+  | LstAllUtf16 -> Bool (List.for_all (function Literal.Utf16String _ -> true | _ -> false) (as_list lit))
   | LstRev ->
       let ll = as_list lit in
       LList (List.rev ll)
@@ -172,6 +173,9 @@ let evaluate_unop (op : UnOp.t) (lit : CVal.M.t) : CVal.M.t =
       let s = as_str lit in
       Num (float_of_int (String.length s))
   | Utf16Len -> Int (Z.of_int (Utf16.length (as_utf16 lit)))
+  | Utf16Trim ->
+      Utf16String
+        (Utf16.of_canonical (Utf16.trim (Utf16.to_canonical (as_utf16 lit))))
   | M_isNaN ->
       let x = as_num lit in
       Bool (x <> x)
@@ -230,12 +234,23 @@ let rec evaluate_binop
           | LList _, LList _ -> Bool (Literal.same_value lit1 lit2)
           | Nono, Nono -> Bool true
           | _, _ -> Bool false)
+      | KeyInsertIndex ->
+          let names = List.map (function Literal.Utf16String s -> Some (Utf16.to_canonical s) | _ -> None) (as_list lit1) in
+          Int (Property_index.insertion_position (Utf16.to_canonical (as_utf16 lit2)) names)
+      | LstContains ->
+          Bool (List.exists (fun value -> Literal.same_value value lit2)
+                  (as_list ~msg:"LstContains" lit1))
       | LstNth -> (
           let list = as_list ~msg:"LstNth" lit1 in
+          let nth n =
+            if Z.sign n < 0 || Z.geq n (Z.of_int (List.length list)) then
+              evalerr "List index out of bounds"
+            else List.nth list (Z.to_int n)
+          in
           match lit2 with
-          | Int n -> List.nth list (Z.to_int n)
-          | Num n when is_int n -> List.nth list (int_of_float n)
-          | Num -0. -> List.nth list 0
+          | Int n -> nth n
+          | Num n when is_int n -> nth (Z.of_float n)
+          | Num -0. -> nth Z.zero
           | _ -> typeerr ~msg:"LstNth" "integer or number" lit2)
       | LstRepeat ->
           let n = as_int ~msg:"LstRepeat" lit2 in
@@ -317,6 +332,30 @@ let rec evaluate_binop
 and evaluate_nop (nop : NOp.t) (ll : Literal.t list) : CVal.M.t =
   match nop with
   | LstCat -> LList (List.concat_map (as_list ~msg:"LstCat") ll)
+  | LstInsert -> (match ll with
+      | [ xs; i; v ] ->
+          let i = as_int i in
+          if Z.sign i < 0 then evalerr "Negative insertion index";
+          let rec insert n = function
+            | xs when Z.equal n Z.zero -> v :: xs
+            | x :: xs -> x :: insert (Z.pred n) xs
+            | [] -> evalerr "Insertion index out of bounds"
+          in LList (insert i (as_list xs))
+      | _ -> evalerr "List insertion requires exactly three arguments")
+  | Utf16Sub -> (match ll with
+      | [ text; start; count ] ->
+          let units = Utf16.code_units (Utf16.to_canonical (as_utf16 text)) in
+          let start = as_int start and count = as_int count in
+          let length = Z.of_int (List.length units) in
+          if Z.sign start < 0 || Z.sign count < 0
+             || Z.gt (Z.add start count) length
+          then evalerr "UTF-16 slice bounds out of range";
+          (* Checked against the concrete list length before either host cast. *)
+          let units = List_utils.list_sub units (Z.to_int start) (Z.to_int count) in
+          (match units with
+          | Some units -> Utf16String (Utf16.of_canonical (Utf16.of_code_units units))
+          | None -> evalerr "UTF-16 slice bounds out of range")
+      | _ -> evalerr "UTF-16 slice requires exactly three arguments")
   | SetInter | SetUnion ->
       raise (Exceptions.Unsupported "Concrete evaluate_nop: set operators")
 

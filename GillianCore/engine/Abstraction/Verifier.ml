@@ -49,6 +49,8 @@ module type S = sig
   val postprocess_files : SourceFiles.t option -> unit
 
   module Debug : sig
+    val prepare_tests_for_prog : init_data:SPState.init_data -> prog_t -> int * int
+
     val get_tests_for_prog : init_data:SPState.init_data -> prog_t -> proc_tests
 
     val analyse_result :
@@ -105,6 +107,7 @@ struct
     params : string list;
     pre_state : SPState.t;
     post_mp : MP.t;
+    verifier_scope : Spec.verifier_scope_binding option;
     post_loc : Location.t option;
     flag : Flag.t option;
     entry_rank : Expr.t option;
@@ -128,6 +131,8 @@ struct
     SAInterpreter.reset_call_graph ()
 
   let testify
+      ?preparation_origin
+      ?verifier_scope
       ?entry_rank
       ~(init_data : SPState.init_data)
       (func_or_lemma_name : string)
@@ -141,7 +146,8 @@ struct
       (flag : Flag.t option)
       (label : (string * SS.t) option)
       (to_verify : bool) :
-      (t option * (Asrt.t located * Asrt.t located list) option) list =
+      (t option * (Asrt.t located * Asrt.t located list
+        * Spec.verifier_scope_binding option) option) list =
     let test_of_normalised_state id' (ss_pre, subst) =
       (* Freeze the entry measure using the same normalization as the
          precondition, before clearing the lemma's parameter store. *)
@@ -176,6 +182,37 @@ struct
           Expr.Set.empty
       in
       let spec_vars = Expr.Set.union (Expr.Set.diff lvars subst_dom) alocs in
+      (if Preparation_provenance.field_framed () then
+        Preparation_provenance.snapshot_fields preparation_origin ~id:(id,id')
+          ~phase:"normalized-state"
+          ~prepare:(fun()->
+            ignore(Linked_program_capture.Codec.inspect subst);
+            let bindings=SSubst.to_list subst in
+            List.iter(fun(key,value)->ignore(Preparation_provenance.expr key);
+              ignore(Preparation_provenance.expr value))bindings)
+          ["pre",(fun()->Preparation_provenance.located pre);
+           "state",(fun()->Preparation_provenance.guarded_state
+             ~projection:(ss_pre.SPState.state,ss_pre.preds,ss_pre.wands)
+             ~assertions:(fun()->SPState.to_assertions ss_pre)
+             ~to_json:(fun()->SPState.to_yojson ss_pre));
+           "substitution",(fun()->SSubst.to_yojson subst);
+           "posts",(fun()->Preparation_provenance.posts posts)]
+      else Preparation_provenance.snapshot preparation_origin ~id:(id, id')
+        ~phase:"normalized-state" (fun () ->
+          ignore (Linked_program_capture.Codec.inspect subst);
+          let bindings = SSubst.to_list subst in
+          List.iter (fun (key, value) ->
+            ignore (Preparation_provenance.expr key);
+            ignore (Preparation_provenance.expr value)) bindings;
+          `Assoc [
+            "pre", Preparation_provenance.located pre;
+            "state", Preparation_provenance.guarded_state
+              ~projection:(ss_pre.SPState.state, ss_pre.preds, ss_pre.wands)
+              ~assertions:(fun () -> SPState.to_assertions ss_pre)
+              ~to_json:(fun () -> SPState.to_yojson ss_pre);
+            "substitution", SSubst.to_yojson subst;
+            "posts", Preparation_provenance.posts posts;
+          ]));
       (* Step 3 - postconditions to symbolic states *)
       L.verbose (fun m ->
           m
@@ -215,9 +252,28 @@ struct
             else None)
           posts
       in
+      (* Both views use the identical normalization substitution. Only the
+         verifier receives the checked local equality; saved posts stay public. *)
+      let verifier_scope =
+        Option.map
+          (Spec.map_verifier_scope (SSubst.subst_in_expr subst ~partial:true))
+          verifier_scope
+      in
+      let verification_posts =
+        match verifier_scope with
+        | None -> posts
+        | Some _ ->
+            Spec.verifier_posts
+              (Spec.s_init ?ss_verifier_scope:verifier_scope pre posts None
+                 (Option.get flag) to_verify)
+      in
       if not to_verify then
-        let pre' = SPState.to_assertions ss_pre in
-        (None, Some ((pre', snd pre), posts))
+        let pre' =
+          MP.retain_precondition_guards ~original:(fst pre)
+            ~bindings:(SSubst.to_list subst)
+            (SPState.to_assertions ss_pre)
+        in
+        (None, Some ((pre', snd pre), posts, verifier_scope))
       else
         (* Step 4 - create a matching plan for the postconditions and s_test *)
         let () =
@@ -232,6 +288,11 @@ struct
           Expr.Set.add (PVar Names.return_variable)
             (Expr.Set.union pvar_params spec_vars)
         in
+        let known_matchables =
+          match Spec.verifier_scope_source verifier_scope with
+          | None -> known_matchables
+          | Some source -> Expr.Set.add (PVar source) known_matchables
+        in
         let existentials =
           Option.fold ~none:Expr.Set.empty
             ~some:(fun (_, exs) ->
@@ -242,7 +303,7 @@ struct
         in
         let known_matchables = Expr.Set.union known_matchables existentials in
         let simple_posts =
-          List.map (fun (post, _) -> (post, (label, None))) posts
+          List.map (fun (post, _) -> (post, (label, None))) verification_posts
         in
         let post_mp =
           MP.init known_matchables Expr.Set.empty pred_ins simple_posts
@@ -269,7 +330,11 @@ struct
             in
             raise exc
         | Ok post_mp ->
-            let pre' = SPState.to_assertions ss_pre in
+            let pre' =
+              MP.retain_precondition_guards ~original:(fst pre)
+                ~bindings:(SSubst.to_list subst)
+                (SPState.to_assertions ss_pre)
+            in
             let ss_pre =
               match flag with
               (* Lemmas should not have stores when being proven *)
@@ -294,13 +359,35 @@ struct
                 params;
                 pre_state = ss_pre;
                 post_mp;
+                verifier_scope;
                 flag;
                 entry_rank;
                 spec_vars;
                 post_loc;
               }
             in
-            (Some test, Some ((pre', snd pre), posts))
+            (if Preparation_provenance.field_framed () then
+              Preparation_provenance.snapshot_fields preparation_origin ~id:test.id
+                ~phase:"test-created" ~prepare:(fun()->())
+                ["state",(fun()->Preparation_provenance.guarded_state
+                   ~projection:(ss_pre.SPState.state,ss_pre.preds,ss_pre.wands)
+                   ~assertions:(fun()->SPState.to_assertions ss_pre)
+                   ~to_json:(fun()->SPState.to_yojson ss_pre));
+                 "posts",(fun()->Preparation_provenance.posts posts);
+                 "verification_posts",(fun()->Preparation_provenance.posts verification_posts);
+                 "entry_rank",(fun()->Preparation_provenance.optional_expr entry_rank)]
+            else Preparation_provenance.snapshot preparation_origin ~id:test.id
+              ~phase:"test-created" (fun () ->
+                `Assoc [
+                  "state", Preparation_provenance.guarded_state
+                    ~projection:(ss_pre.SPState.state, ss_pre.preds, ss_pre.wands)
+                    ~assertions:(fun () -> SPState.to_assertions ss_pre)
+                    ~to_json:(fun () -> SPState.to_yojson ss_pre);
+                  "posts", Preparation_provenance.posts posts;
+                  "verification_posts", Preparation_provenance.posts verification_posts;
+                  "entry_rank", Preparation_provenance.optional_expr entry_rank;
+                ]));
+            (Some test, Some ((pre', snd pre), posts, verifier_scope))
     in
     Gillian_result.with_target func_or_lemma_name @@ fun () ->
     try
@@ -310,14 +397,20 @@ struct
           ~pvars:(SS.of_list params) (fst pre)
       with
       | Error _ when !Config.Verification.total ->
+          Preparation_provenance.normalised preparation_origin ~to_verify (fun () -> 0) "error";
           Totality.unsupported
             (name
            ^ " precondition could not be normalized; proof coverage is \
               incomplete.")
-      | Error _ -> [ (None, None) ]
+      | Error _ ->
+          Preparation_provenance.normalised preparation_origin ~to_verify (fun () -> 0) "error";
+          [ (None, None) ]
       | Ok [] when !Config.Verification.total ->
+          Preparation_provenance.normalised preparation_origin ~to_verify (fun () -> 0) "empty";
           Totality.unsupported (name ^ " has no normalized precondition cases.")
       | Ok normalised_assertions ->
+          Preparation_provenance.normalised preparation_origin ~to_verify
+            (fun () -> List.length normalised_assertions) "ok";
           let result =
             List.mapi test_of_normalised_state normalised_assertions
           in
@@ -344,6 +437,8 @@ struct
     let ( let+ ) x f = List.map f x in
     let+ stest, sspec' =
       testify
+        ?preparation_origin:(Preparation_provenance.origin "procedure" name sspec)
+        ?verifier_scope:sspec.ss_verifier_scope
         ?entry_rank:
           (if !Config.Verification.total then sspec.ss_variant else None)
         ~init_data spec_name preds pred_ins name params id sspec.ss_pre
@@ -353,7 +448,8 @@ struct
     in
     let sspec' =
       Option.map
-        (fun (pre, posts) -> { sspec with ss_pre = pre; ss_posts = posts })
+        (fun (pre, posts, ss_verifier_scope) ->
+          { sspec with ss_pre = pre; ss_posts = posts; ss_verifier_scope })
         sspec'
     in
     (stest, sspec')
@@ -364,6 +460,13 @@ struct
       (preds : MP.preds_tbl_t)
       (pred_ins : (string, int list) Hashtbl.t)
       (spec : Spec.t) : t list * Spec.t =
+    List.iter
+      (fun (s : Spec.st) ->
+        Spec.validate_verifier_scope s;
+        if Option.is_some s.ss_verifier_scope &&
+           (not spec.spec_to_verify || spec.spec_name = !Config.entry_point) then
+          invalid_arg "Verifier scope metadata requires a verified non-main body")
+      spec.spec_sspecs;
     if not spec.spec_to_verify then ([], spec)
     else
       let () =
@@ -427,9 +530,11 @@ struct
         (lemma.lemma_name ^ " requires a nonempty checked lemma proof.");
     let tests_and_specs =
       List.concat_map
-        (fun Lemma.{ lemma_hyp; lemma_concs; lemma_spec_variant = _ } ->
+        (fun (Lemma.{ lemma_hyp; lemma_concs; lemma_spec_variant = _ } as spec) ->
           let to_verify = Option.is_some lemma.lemma_proof in
-          testify ?entry_rank ~init_data lemma.lemma_name preds pred_ins
+          testify
+            ?preparation_origin:(Preparation_provenance.origin "lemma" lemma.lemma_name spec)
+            ?entry_rank ~init_data lemma.lemma_name preds pred_ins
             lemma.lemma_name lemma.lemma_params 0 lemma_hyp lemma_concs None
             None to_verify)
         lemma.lemma_specs
@@ -444,7 +549,7 @@ struct
           in
           let spec_acc =
             match spec_opt with
-            | Some (lemma_hyp, lemma_concs) ->
+            | Some (lemma_hyp, lemma_concs, _) ->
                 Lemma.
                   {
                     lemma_hyp;
@@ -523,6 +628,17 @@ struct
 
   let analyse_final_state test final_state :
       (unit, Gillian_result.Error.analysis_failure) result =
+    (* Never seed an absent final-store PVar or let this check vanish in the
+       ordinary simplification/matching None path. Defined undefined is present. *)
+    let bindings = SStore.bindings (SPState.get_store final_state) in
+    match Spec.require_verifier_scope_source test.verifier_scope
+            ~mem:(fun source -> List.mem_assoc source bindings) with
+    | Error msg ->
+        VerificationResults.set_result global_results test.name test.id false;
+        L.normal (fun m -> m "VERIFICATION FAILURE: %s" msg);
+        Fmt.pr "f @?";
+        Error (Gillian_result.Error.make_analysis_failure ?loc:test.post_loc msg)
+    | Ok () ->
     let subst = make_post_subst test final_state in
     match analyse_result subst test final_state with
     | None ->
@@ -559,9 +675,45 @@ struct
         in
         Error e
 
+  (* Passive early diagnostics: bounded formatting, no error-state dump and
+     no changes to interpreter results. Eight reports per native process. *)
+  let execution_failure_diagnostic_count = ref 0
+
+  let log_execution_failure name (case_index, case_part) proc proc_idx loc errors =
+    if !execution_failure_diagnostic_count < 8 then (
+      incr execution_failure_diagnostic_count;
+      let buffer = Buffer.create 256 in
+      let remaining = ref 2048 in
+      let exception Diagnostic_full in
+      let write text offset length =
+        let amount = min length !remaining in
+        Buffer.add_substring buffer text offset amount;
+        remaining := !remaining - amount;
+        if amount < length then raise Diagnostic_full
+      in
+      let formatter = Format.make_formatter write (fun () -> ()) in
+      let truncated =
+        try
+          Fmt.(list ~sep:(any "; ") SAInterpreter.Logging.pp_err)
+            formatter errors;
+          Format.pp_print_flush formatter ();
+          false
+        with
+        | Diagnostic_full -> true
+        | _ -> Buffer.clear buffer;
+            Buffer.add_string buffer "diagnostic formatting unavailable";
+            true
+      in
+      L.normal (fun m ->
+          m "NATIVE_EXECUTION_FAILURE spec=%s id=(%d,%d) proc=%s command=%d%a report=%d/8 errors=%d truncated=%b further_reports_suppressed_after_limit=true: %s"
+            name case_index case_part proc proc_idx Location.pp_full loc
+            !execution_failure_diagnostic_count
+            (List.length errors) truncated (Buffer.contents buffer)))
+
   let analyse_proc_result test flag ?parent_id result : unit Gillian_result.t =
     match (result : SAInterpreter.result_t) with
     | Exec_res.RFail { proc; proc_idx; error_state; errors; loc } ->
+        log_execution_failure test.name test.id proc proc_idx loc errors;
         L.verbose (fun m ->
             m
               "VERIFICATION FAILURE: Procedure %s, Command %d\n\
@@ -608,9 +760,12 @@ struct
                 parent_id);
           L.Parent.with_id parent_id @@ fun () ->
           let store = SPState.get_store final_state in
+          let scope_source = Spec.verifier_scope_source test.verifier_scope in
           let () =
             SStore.filter_map_inplace store (fun x v ->
-                if x = Names.return_variable then Some v else None)
+                if x = Names.return_variable || Some x = scope_source
+                   || List.mem x test.params then Some v
+                else None)
           in
           match analyse_final_state test final_state with
           | Ok () -> Ok ()
@@ -677,6 +832,8 @@ struct
 
   let verify (prog : annot MP.prog) (test : t) : unit Gillian_result.t =
     Gillian_result.with_target test.name @@ fun () ->
+    Owned_prefix_lifecycle.with_root ~target:test.name ~case_id:test.id
+      ~state:test.pre_state @@ fun () ->
     let state = test.pre_state in
 
     (* Printf.printf "Inside verify with a test for %s\n" test.name; *)
@@ -715,9 +872,10 @@ struct
                   ^ " entry variant is not a natural integer"))
         in
         let rets =
+          Verify_body_stack.with_body ~target:test.name ~case_id:test.id (fun () ->
           SAInterpreter.evaluate_proc
             (fun x -> x)
-            prog test.name test.params state
+            prog test.name test.params state)
         in
         L.verbose (fun m ->
             m "Verification: Concluded evaluation: %d obtained results.%a@\n"
@@ -882,6 +1040,8 @@ struct
       (prog : prog_t)
       (pnames_to_verify : SS.t)
       (lnames_to_verify : SS.t) : annot MP.prog * t list * t list =
+    Preparation_provenance.preparing ~procedures:pnames_to_verify
+      ~lemmas:lnames_to_verify @@ fun () ->
     let ipreds = MP.init_preds prog.preds in
     match ipreds with
     | Error (e, loc) ->
@@ -982,23 +1142,12 @@ struct
         Hashtbl.iter
           (fun pred_name _ -> record_preds_used_by_pred pred_name prog')
           prog'.preds;
+        if Preparation_provenance.enabled () then
+          Preparation_provenance.finish ~procedure_tests:(List.length tests)
+            ~lemma_tests:(List.length tests');
         (prog', tests', tests)
 
-  let verify_procs_in_scope
-      ~(init_data : SPState.init_data)
-      ?(prev_results : VerificationResults.t option)
-      (prog : prog_t)
-      (pnames_to_verify : SS.t)
-      (lnames_to_verify : SS.t) : unit Gillian_result.t =
-    if !Config.Verification.closed_entry then (
-      if
-        (not !Config.Verification.total)
-        || SS.cardinal pnames_to_verify <> 1
-        || not (SS.is_empty lnames_to_verify)
-      then
-        Totality.unsupported
-          "closed entry requires --total and exactly one procedure, no lemmas.";
-      let proc = Prog.get_proc_exn prog (SS.choose pnames_to_verify) in
+  let check_closed_entry_shape (prog : prog_t) proc =
       let spec = Totality.spec proc in
       (* Concrete fresh names are an implementation detail, represented by
          abstract fresh identities in this execution. Neither the program nor
@@ -1026,7 +1175,24 @@ struct
       | _ ->
           Totality.unsupported
             "closed entry requires no parameters and one normal emp \
-             specification.");
+             specification."
+
+  let verify_procs_in_scope
+      ~(init_data : SPState.init_data)
+      ?(prev_results : VerificationResults.t option)
+      (prog : prog_t)
+      (pnames_to_verify : SS.t)
+      (lnames_to_verify : SS.t) : unit Gillian_result.t =
+    if !Config.Verification.closed_entry then (
+      if (not !Config.Verification.total) || SS.cardinal pnames_to_verify <> 1
+         || not (SS.is_empty lnames_to_verify) then
+        Totality.unsupported "closed entry requires --total and exactly one procedure, no lemmas.";
+      check_closed_entry_shape prog (Prog.get_proc_exn prog (SS.choose pnames_to_verify)));
+    SS.iter (fun name ->
+      if not (SS.mem name pnames_to_verify) then
+        Totality.unsupported (name ^ " closed initializer must be selected and proved in this run.");
+      check_closed_entry_shape prog (Prog.get_proc_exn prog name))
+      !Config.Verification.closed_initializers;
     let total_order =
       if !Config.Verification.total then
         Some
@@ -1037,6 +1203,9 @@ struct
     let prog', tests', tests =
       get_tests_to_verify ~init_data prog pnames_to_verify lnames_to_verify
     in
+    if Reduction.preparation_profile_enabled then (
+      Reduction.preparation_profile_dump ~final:true ();
+      Stdlib.exit 86);
     (* STEP 6: Run the symbolic tests *)
     let cur_time = Unix.gettimeofday () in
     Printf.printf "Running symbolic tests: %f\n" (cur_time -. !start_time);
@@ -1071,7 +1240,12 @@ struct
               List.fold_left
                 (fun acc test ->
                   if Gillian_result.should_continue acc then
-                    Gillian_result.merge acc (verify prog test)
+                    Gillian_result.merge acc
+                      (if SS.mem test.name !Config.Verification.closed_initializers then
+                         Config.Verification.with_closed_initializer (fun () ->
+                           Config.Verification.with_fresh_closed_entry_heap_phase
+                             (fun () -> verify { prog with MP.proved_total_procs = SS.empty; proved_lemmas = SS.empty } test))
+                       else verify prog test)
                   else acc)
                 (Ok ()) group
             in
@@ -1125,19 +1299,7 @@ struct
           lnames_to_verify)
 
   let select_procs_and_lemmas ~procs_to_verify ~lemmas_to_verify =
-    let module C = Config.Verification in
-    let ps, ls =
-      match !C.things_to_verify with
-      | All -> (procs_to_verify, lemmas_to_verify)
-      | ProcsOnly -> (procs_to_verify, SS.empty)
-      | LemmasOnly -> (SS.empty, lemmas_to_verify)
-      | Specific ->
-          ( SS.inter procs_to_verify (SS.of_list !C.procs_to_verify),
-            SS.inter lemmas_to_verify (SS.of_list !C.lemmas_to_verify) )
-    in
-    let ps = SS.diff ps !C.things_to_exclude in
-    let ls = SS.diff ls !C.things_to_exclude in
-    (ps, ls)
+    Preparation_provenance.select_procs_and_lemmas ~procs_to_verify ~lemmas_to_verify
 
   let init_proc ~(init_data : SPState.init_data) (prog : prog_t) proc_name :
       SAInterpreter.result_t SAInterpreter.cont_func list =
@@ -1250,10 +1412,24 @@ struct
         if not !Config.Verification.closed_entry then
           write_verif_results cur_source_files call_graph ~diff:""
             global_results
+        else
+          write_closed_entry_observation
+            ~closed_entry:!Config.Verification.closed_entry
+            ~path:(Sys.getenv_opt "GILLIAN_CLOSED_ENTRY_RESULTS_PATH")
+            global_results
       in
       r
 
   module Debug = struct
+    let prepare_tests_for_prog ~init_data (prog : prog_t) =
+      let procedures = SS.of_list (Prog.get_noninternal_proc_names prog) in
+      let lemmas = SS.of_list (Prog.get_noninternal_lemma_names prog) in
+      let procedures, lemmas = select_procs_and_lemmas
+        ~procs_to_verify:procedures ~lemmas_to_verify:lemmas in
+      let _, lemma_tests, procedure_tests =
+        get_tests_to_verify ~init_data prog procedures lemmas in
+      List.length procedure_tests, List.length lemma_tests
+
     let get_tests_for_prog ~init_data (prog : prog_t) =
       let open Syntaxes.Option in
       let ipreds = MP.init_preds prog.preds in

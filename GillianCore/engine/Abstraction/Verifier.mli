@@ -45,6 +45,10 @@ module type S = sig
   val postprocess_files : SourceFiles.t option -> unit
 
   module Debug : sig
+    (** Passive complete preparation entrypoint for source-owned capture
+        controls. Returns procedure/lemma counts; never enters proof bodies. *)
+    val prepare_tests_for_prog : init_data:SPState.init_data -> prog_t -> int * int
+
     val get_tests_for_prog : init_data:SPState.init_data -> prog_t -> proc_tests
 
     val analyse_result :

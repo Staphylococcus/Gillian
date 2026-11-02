@@ -44,6 +44,7 @@ type t = TypeDef__.unop =
   | Car  (** Head of a list *)
   | Cdr  (** Tail of a list *)
   | LstLen  (** List length *)
+  | LstAllUtf16
   | LstRev  (** List reverse *)
   | SetToList  (** From set to list *)
   (* Strings *)
@@ -51,6 +52,7 @@ type t = TypeDef__.unop =
   | NumberToUtf16
   | Utf16ToNumber
   | Utf16Len  (** Mathematical UTF-16 code-unit length *)
+  | Utf16Trim  (** Exact leading/trailing ECMAScript whitespace removal *)
   | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
   (* Integer vs Number *)
   | NumToInt  (** Number to Integer - actual cast *)
@@ -89,11 +91,13 @@ let str = function
   | Car -> "car"
   | Cdr -> "cdr"
   | LstLen -> "l-len"
+  | LstAllUtf16 -> "l-all-u16"
   | LstRev -> "l-rev"
   | StrLen -> "s-len"
   | NumberToUtf16 -> "num_to_utf16"
   | Utf16ToNumber -> "utf16_to_num"
   | Utf16Len -> "u16-len"
+  | Utf16Trim -> "u16-trim"
   | StrToBytes -> "s-bytes"
   | SetToList -> "set_to_list"
   | IsInt -> "is_int"

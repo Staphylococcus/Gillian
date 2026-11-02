@@ -506,10 +506,10 @@ let composition_models () =
   | None -> ()
   | Some path -> Yojson.Safe.to_file path (`List models)
 
-(* Use the standard false-first heuristic to expose a known invalid-model
-   case on Z3 4.13.3. Only this test changes the search policy; production keeps
-   the default. The mixed-theory query is feasible, but the returned empty
-   string witness violates its inside guard and must never escape the solver. *)
+(* Keep the original false-first mixed-theory query on Z3 4.13.3. A returned
+   inside witness must satisfy every original assertion under concrete replay;
+   a recognized invalid-model error is a different observed outcome. Neither
+   feasible-branch loss nor UNKNOWN/unexpected errors are accepted. *)
 let length_model_validation () =
   let index = Expr.LVar "#length_index" in
   let gamma = gamma () in
@@ -522,47 +522,147 @@ let length_model_validation () =
      the syntactic +0 before choosing the conversion encoding. *)
   let general_length = bin IPlus (length a) (Expr.int 0) in
   let outside = bin FLessThanEqual (Expr.UnOp (IntToNum, general_length)) pos in
+  let observe =
+    Sys.getenv_opt "GILLIAN_UTF16_LENGTH_VALIDATION_TRACE" = Some "1"
+  in
+  let stage name f =
+    if not observe then f ()
+    else (
+      Format.printf "UTF16_LENGTH_VALIDATION_TRACE stage=%s event=BEGIN@." name;
+      let result =
+        Smt.with_native_smt_context
+          (fun () ->
+            `Assoc
+              [ ("operation", `String "utf16-length-model-validation");
+                ("stage", `String name) ])
+          f
+      in
+      Format.printf "UTF16_LENGTH_VALIDATION_TRACE stage=%s event=RETURNED@." name;
+      result)
+  in
+  let breadcrumbs =
+    Sys.getenv_opt "GILLIAN_MODEL_CHECK_BREADCRUMBS" = Some "1"
+  in
+  let observed_stage = stage in
+  let stage name f =
+    if not breadcrumbs then observed_stage name f
+    else (
+      let emit event =
+        try
+          Format.eprintf "MODEL_CHECK_BREADCRUMB stage=%s event=%s@." name event
+        with _ -> ()
+      in
+      emit "BEGIN";
+      match observed_stage name f with
+      | result ->
+          emit "RETURN";
+          result
+      | exception error ->
+          let backtrace = Printexc.get_raw_backtrace () in
+          emit "RAISE";
+          Printexc.raise_with_backtrace error backtrace)
+  in
+  let with_capture f =
+    if not observe then f ()
+    else
+      let module L = Logging in
+      let saved_dump = !Gillian.Utils.Config.dump_smt in
+      let primary_failure = ref None in
+      try
+        Fun.protect
+          ~finally:(fun () ->
+            Gillian.Utils.Config.dump_smt := saved_dump;
+            Fun.protect
+              ~finally:(fun () ->
+                Fun.protect
+                  ~finally:(fun () -> L.Mode.set_mode (Enabled Verbose))
+                  (fun () -> L.initialize []))
+              (fun () -> L.wrap_up ()))
+          (fun () ->
+            try
+              Gillian.Utils.Config.dump_smt := true;
+              L.Mode.set_mode (Enabled Normal);
+              L.initialize [ L.file_reporter ];
+              f ()
+            with error ->
+              let backtrace = Printexc.get_raw_backtrace () in
+              primary_failure := Some (error, backtrace);
+              Printexc.raise_with_backtrace error backtrace)
+      with error ->
+        let backtrace = Printexc.get_raw_backtrace () in
+        match !primary_failure with
+        | None -> Printexc.raise_with_backtrace error backtrace
+        | Some (original_error, original_backtrace) ->
+            if error != original_error then
+              (try
+                 Format.eprintf "UTF16_LENGTH_VALIDATION_OBSERVER_CLEANUP_FAILED@."
+               with _ -> ());
+            Printexc.raise_with_backtrace original_error original_backtrace
+  in
   let run () =
     let model =
       match
-        Smt.exec_sat ~phase_selection:0
-          (Expr.Set.of_list [ nonnegative; outside ])
-          gamma
+        stage "outside-primary" (fun () ->
+          Smt.exec_sat ~phase_selection:0
+            (Expr.Set.of_list [ nonnegative; outside ])
+            gamma)
       with
       | Some model -> model
       | None -> Alcotest.fail "Lost the feasible outside branch"
     in
-    let witness = replay_length_model gamma [ nonnegative; outside ] model in
-    let rejected =
-      try
-        ignore
-          (Smt.exec_sat ~phase_selection:0
-             (Expr.Set.of_list [ nonnegative; not_ outside ])
-             gamma);
-        false
-      with
-      | Gillian.Utils.Gillian_result.Exc.Gillian_internal_error { msg; _ } -> (
-        let contains = Str.regexp_string "an invalid model was generated" in
-        try
-          ignore (Str.search_forward contains msg 0);
-          true
-        with Not_found -> false)
+    let witness =
+      stage "outside-replay" (fun () ->
+        replay_length_model gamma [ nonnegative; outside ] model)
     in
-    Alcotest.(check bool) "invalid inside model is rejected" true rejected;
-    (* The heartbeat replaces the faulty solver before propagating failure. *)
-    check "solver remains usable after rejected model" true
-      [ eq a (value [ 65 ]) ];
+    let inside_constraints = [ nonnegative; not_ outside ] in
+    let inside_result =
+      try
+        Ok
+          (stage "inside-primary" (fun () ->
+             Smt.exec_sat ~phase_selection:0
+               (Expr.Set.of_list inside_constraints) gamma))
+      with
+      | Gillian.Utils.Gillian_result.Exc.Gillian_internal_error { msg; _ } as error ->
+          let contains = Str.regexp_string "an invalid model was generated" in
+          let recognized =
+            try
+              ignore (Str.search_forward contains msg 0);
+              true
+            with Not_found -> false
+          in
+          if recognized then Error msg else raise error
+    in
+    let inside_outcome, rejected, inside_witness =
+      match inside_result with
+      | Ok (Some inside_model) ->
+          let replay =
+            stage "inside-replay" (fun () ->
+              replay_length_model gamma inside_constraints inside_model)
+          in
+          ("valid-model", false, `Assoc (("id", `String "inside") :: replay))
+      | Ok None -> Alcotest.fail "Lost the feasible inside branch"
+      | Error _ -> ("invalid-model-rejected", true, `Null)
+    in
+    Format.printf "UTF16_LENGTH_MODEL_VALIDATION_INSIDE_OUTCOME=%s@." inside_outcome;
+    if rejected then
+      Alcotest.(check bool) "invalid inside model is rejected" true rejected;
+    (* Both outcomes retain the original post-check solver-usability query. *)
+    stage "usability" (fun () ->
+      check "solver remains usable after rejected model" true
+        [ eq a (value [ 65 ]) ]);
     let evidence =
       `Assoc
         (("id", `String "outside")
         :: ("invalidInsideModelRejected", `Bool rejected)
+        :: ("insideOutcome", `String inside_outcome)
+        :: ("insideWitness", inside_witness)
         :: witness)
     in
     match Sys.getenv_opt "GILLIAN_UTF16_LENGTH_MODELS" with
     | None -> ()
     | Some path -> Yojson.Safe.to_file path evidence
   in
-  run ()
+  with_capture run
 
 let wrapped_values () =
   check ~types:Gamma.init "untyped values acquire the same unit view" false
@@ -677,8 +777,8 @@ let numeric_producers () =
       (match Reduction.reduce_lexpr term with
       | Expr.Lit actual -> Literal.same_value expected actual
       | _ -> false);
-    (* As for bytes, symbolic formatting of finite nonzero numbers is an
-       over-approximation; its literal output is fixed by concrete reduction. *)
+    (* Formatting outside the exact integral Uint32 interval remains an
+       over-approximation; concrete reduction still fixes literal results. *)
     if exact_smt then
       check "typed numeric conversion SMT agrees" false
         [ not_ (bin ValueEqual term (Expr.Lit expected)) ]
@@ -694,7 +794,8 @@ let numeric_producers () =
         | _ -> assert false
       in
       check_term
-        ~exact_smt:(number = 0. || not (Float.is_finite number))
+        ~exact_smt:(not (Float.is_finite number)
+          || (number >= 0. && number <= 4294967295. && Float.is_integer number))
         (Expr.UnOp (NumberToUtf16, Expr.num number))
         (Literal.Utf16String (Codec.of_canonical bytes)))
     [
@@ -752,6 +853,274 @@ let numeric_producers () =
     [ eq formatted (value [ 112; 117; 115; 104 ]) ];
   check ~types "native set keys retain the parser fact" false
     [ bin SetMem formatted (Expr.ESet [ value [ 112; 117; 115; 104 ] ]) ]
+
+let uint32_formatter_literals () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let cases = [ -0.; 0.; 4294967294.; 4294967295. ]
+      @ List.concat_map (fun power ->
+          let n = 10. ** float_of_int power in [ n -. 1.; n; n +. 1. ])
+          (List.init 9 (fun i -> i + 1)) in
+  List.iter (fun number ->
+      let term = Expr.UnOp (NumberToUtf16, Expr.num number) in
+      let expected = Expr.Lit (Literal.Utf16String
+          (Codec.of_canonical (Printf.sprintf "%.0f" (number +. 0.)))) in
+      Alcotest.(check bool) "concrete formatter agrees with decimal integer"
+        true (Literal.equal (Engine.CExprEval.evaluate_expr store term)
+          (match expected with Expr.Lit l -> l | _ -> assert false));
+      check "direct decimal encoding agrees with concrete formatter" false
+        [ not_ (eq term expected) ]) cases
+
+let uint32_formatter_indices_checks () =
+  let number = Expr.LVar "#decimal_number" in
+  let types () =
+    let g = Gamma.init () in Gamma.update g "#decimal_number" NumberType; g in
+  let formatted = Expr.UnOp (NumberToUtf16, number) in
+  let position keys = bin KeyInsertIndex (Expr.EList keys) formatted in
+  let text s = Expr.Lit (Literal.Utf16String (Codec.of_canonical s)) in
+  let interval = [ Expr.UnOp (IsInt, number);
+      bin FLessThanEqual (Expr.num 0.) number;
+      bin FLessThan number (Expr.num 4294967295.) ] in
+  check ~types "every Uint32 array index precedes ordinary names" false
+    (interval @ [ not_ (eq (position [ text "length" ]) (Expr.int 0)) ]);
+  check ~types "the excluded Uint32 boundary is an ordinary name" false
+    [ eq number (Expr.num 4294967295.);
+      not_ (eq (position [ text "length" ]) (Expr.int 1)) ];
+  check ~types "a decimal key cannot acquire a leading zero" false
+    [ eq number (Expr.num 1.); eq formatted (text "01") ];
+  check ~types "a false position claim has a real counterexample" true
+    [ eq number (Expr.num 1.);
+      not_ (eq (position [ text "length" ]) (Expr.int 1)) ];
+  check ~types "both signed zeros give the index zero" false
+    [ bin ValueEqual number (Expr.num (-0.));
+      not_ (eq formatted (text "0")) ]
+
+let uint32_formatter_indices () =
+  let saved = !Gillian.Utils.Config.dump_smt in
+  Gillian.Utils.Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Gillian.Utils.Config.dump_smt := saved)
+    uint32_formatter_indices_checks
+
+let uint32_formatter_fallback () =
+  let term number = Expr.UnOp (NumberToUtf16, Expr.num number) in
+  let text s = Expr.Lit (Literal.Utf16String (Codec.of_canonical s)) in
+  (* These noncanonical spellings deliberately remain admitted by the opaque
+     fallback. They would be ruled out by extending the exact branch past its
+     proved integral range, or by truncating an arbitrary Number to Uint32. *)
+  List.iter (fun (number, spelling) ->
+      Alcotest.(check bool)
+        "outside Uint32 the direct SMT formatter remains an over-approximation"
+        true (Smt.is_sat (Expr.Set.singleton (eq (term number) (text spelling)))
+          (Gamma.as_hashtbl (Gamma.init ()))))
+    [ (1.5, "01.5"); (-1., "-01"); (4294967296., "04294967296") ]
+
+let insertion_terminal_bound () =
+  let keys = Expr.LVar "#terminal_keys" in
+  let number = Expr.LVar "#terminal_number" in
+  let types () =
+    let g = Gamma.init () in
+    Gamma.update g "#terminal_keys" ListType;
+    Gamma.update g "#terminal_name" Utf16Type;
+    Gamma.update g "#terminal_position" IntType;
+    Gamma.update g "#terminal_number" NumberType; g in
+  let text s = Expr.Lit (Literal.Utf16String (Codec.of_canonical s)) in
+  let len = Expr.UnOp (LstLen, keys) in
+  let last = bin LstNth keys (bin IMinus len (Expr.int 1)) in
+  let nonempty = bin ILessThanEqual (Expr.int 1) len in
+  let position key = bin KeyInsertIndex keys key in
+  let before key = bin ILessThan (position key) len in
+  let interval = [ Expr.UnOp (IsInt, number);
+      bin FLessThanEqual (Expr.num 0.) number;
+      bin FLessThan number (Expr.num 4294967295.) ] in
+  let checks () =
+    let arbitrary_position = position (Expr.LVar "#terminal_name") in
+    check ~types "all insertion scans retain a nonnegative position" false
+      [ not_ (bin ILessThanEqual (Expr.int 0) arbitrary_position) ];
+    check ~types "all insertion scans retain a position at most list length"
+      false [ not_ (bin ILessThanEqual arbitrary_position len) ];
+    let p = Expr.LVar "#terminal_position" in
+    let inserted = Expr.NOp (LstInsert, [ keys; p; Expr.EList [] ]) in
+    check ~types "insertion before the end preserves an arbitrary final element"
+      false [ bin ILessThanEqual (Expr.int 0) p; bin ILessThan p len;
+        not_ (bin ValueEqual (bin LstNth inserted len) last) ];
+    List.iter (fun (label, list, position) ->
+        let inserted = Expr.NOp (LstInsert, [ keys; Expr.int position; Expr.EList [] ]) in
+        check ~types label true [ bin ValueEqual keys (Expr.EList list);
+          bin ValueEqual (bin LstNth inserted len) (Expr.EList []) ])
+      [ "append leaves the new element last", [text "length"], 1;
+        "insertion into empty leaves the new element last", [], 0 ];
+    check ~types "every allowed index stops before an arbitrary final length cell"
+      false (interval @ [ nonempty; bin ValueEqual last (text "length");
+        not_ (before (Expr.UnOp (NumberToUtf16, number))) ]);
+    check ~types "a larger final index also stops the finite scan" false
+      [ nonempty; bin ValueEqual last (text "3"); not_ (before (text "2")) ];
+    check ~types "a non-UTF16 final element stops without inventing its type"
+      false [ nonempty; bin ValueEqual last (Expr.num 7.);
+        not_ (before (text "0")) ];
+    (* Each disabled guard has an actual position == length witness. A
+       blanket strict bound would erase these SAT models. *)
+    List.iter (fun (label, list, key) ->
+        check ~types label true [ bin ValueEqual keys (Expr.EList list);
+          eq (position key) len ])
+      [ "empty list retains the append position", [], text "0";
+        "ordinary inserted names retain append", [ text "length" ], text "z";
+        "the excluded Uint32 boundary retains append", [ text "length" ],
+          text "4294967295";
+        "a smaller terminal index retains append", [ text "1" ], text "2";
+        "an equal terminal index retains append", [ text "2" ], text "2" ];
+    let store = Engine.CExprEval.CStore.init [] in
+    List.iter (fun (list, key, expected) ->
+        let term = bin KeyInsertIndex (Expr.EList list) key in
+        Alcotest.(check bool) "terminal bound agrees with concrete insertion" true
+          (Literal.equal (Engine.CExprEval.evaluate_expr store term)
+             (Literal.Int (Z.of_int expected))))
+      [ [text "0"; text "length"], text "2", 1;
+        [text "3"; text "length"], text "2", 0;
+        [text "0"; Expr.num 7.], text "2", 1 ]
+  in
+  let saved = !Gillian.Utils.Config.dump_smt in
+  Gillian.Utils.Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Gillian.Utils.Config.dump_smt := saved) checks
+
+let insertion_array_width () =
+  let xs = Expr.LVar "#width_list" and p = Expr.LVar "#width_position" in
+  let types () =
+    let g = Gamma.init () in
+    Gamma.update g "#width_list" ListType;
+    Gamma.update g "#width_position" IntType; g in
+  let len = Expr.UnOp (LstLen, xs) in
+  let inserted = Expr.NOp (LstInsert, [ xs; p; Expr.EList [] ]) in
+  let after = Expr.UnOp (LstLen, inserted) in
+  let bounds = [ bin ILessThanEqual (Expr.int 0) p;
+      bin ILessThanEqual p len ] in
+  let context assumptions =
+    let pfs = Gillian.Symbolic.Pure_context.init () in
+    List.iter (Gillian.Symbolic.Pure_context.extend pfs) assumptions; pfs in
+  let reduced assumptions = Reduction.reduce_lexpr ~gamma:(types ())
+      ~pfs:(context assumptions) after in
+  let successor = Reduction.reduce_lexpr ~gamma:(types ())
+      (bin IPlus len (Expr.int 1)) in
+  let unchanged = reduced [] in
+  Alcotest.(check bool) "proved insertion bounds canonicalize its length" true
+    (Expr.equal (reduced bounds) successor);
+  Alcotest.(check bool) "unknown bounds cannot authorize the successor" false
+    (Expr.equal unchanged successor);
+  List.iter (fun assumptions ->
+      Alcotest.(check bool) "missing insertion bound preserves the operation"
+        true (Expr.equal (reduced assumptions) unchanged))
+    [ []; [ List.hd bounds ]; [ List.nth bounds 1 ] ];
+  let position = bin KeyInsertIndex xs (value [ 48 ]) in
+  let scan_insert = Expr.UnOp (LstLen, Expr.NOp (LstInsert,
+      [ xs; position; Expr.EList [] ])) in
+  Alcotest.(check bool) "typed scan bounds canonicalize insertion length" true
+    (Expr.equal (Reduction.reduce_lexpr ~gamma:(types ()) scan_insert)
+      successor);
+  Alcotest.(check bool) "missing list type cannot authorize length reduction"
+    false (try Expr.equal (Reduction.reduce_lexpr scan_insert)
+      successor
+      with Reduction.ReductionException _ -> false);
+  check ~types "in-range insertion preserves the complete array-width bound"
+    false (bounds @ [ bin ILessThanEqual len (Expr.int 4294967295);
+      bin ILessThan (Expr.int 4294967296) after ]);
+  check ~types "the maximum footprint retains its exact successor"
+    false (bounds @ [ eq len (Expr.int 4294967295);
+      eq p len; not_ (eq after (Expr.int 4294967296)) ]);
+  List.iter (fun (count, position) ->
+      let list = Expr.EList (List.init count (fun _ -> Expr.bool true)) in
+      let term = Expr.NOp (LstInsert, [ list; Expr.int position; Expr.EList [] ]) in
+      let expected = Literal.Int (Z.of_int (count + 1)) in
+      Alcotest.(check bool) "endpoint/interior lengths agree with concrete insertion"
+        true (Literal.equal expected
+          (Engine.CExprEval.evaluate_expr (Engine.CExprEval.CStore.init [])
+            (Expr.UnOp (LstLen, term)))))
+    [ 0, 0; 1, 0; 1, 1; 2, 1; 2, 2 ];
+  (* Outside the GIL operation's domain, only inspect the SMT encoding. The
+     ordinary reducer must keep rejecting this invalid insertion. *)
+  Alcotest.(check bool) "negative indices do not acquire an unguarded length identity"
+    true (Smt.is_sat (Expr.Set.of_list
+      [ eq xs (Expr.EList [ Expr.bool true; Expr.bool false ]);
+        eq p (Expr.int (-1)); not_ (eq after (bin IPlus len (Expr.int 1))) ])
+      (Gamma.as_hashtbl (types ())));
+  check ~types "a false insertion length has a genuine countermodel" true
+    [ eq xs (Expr.EList []); eq p (Expr.int 0);
+      not_ (eq after (Expr.int 2)) ]
+
+let insertion_terminal_reduction () =
+  let keys = Expr.LVar "#transfer_keys" and values = Expr.LVar "#transfer_values" in
+  let key = Expr.LVar "#transfer_key" and old = Expr.LVar "#transfer_old" in
+  let types () =
+    let g = Gamma.init () in
+    List.iter (fun name -> Gamma.update g name ListType)
+      [ "#transfer_keys"; "#transfer_values" ];
+    Gamma.update g "#transfer_key" Utf16Type;
+    Gamma.update g "#transfer_old" NumberType; g in
+  let len = Expr.UnOp (LstLen, keys) in
+  let last_index = bin IPlus (Expr.int (-1)) len in
+  let old_descriptor = bin LstNth values last_index in
+  let text s = Expr.Lit (Literal.Utf16String (Codec.of_canonical s)) in
+  let descriptor = Expr.EList [ text "d"; old; Expr.bool true;
+    Expr.bool false; Expr.bool false ] in
+  let number = Expr.UnOp (Utf16ToNumber, key) in
+  let position = bin KeyInsertIndex keys key in
+  let inserted = Expr.NOp (LstInsert, [ values; position; Expr.EList [] ]) in
+  let read = bin LstNth (bin LstNth inserted len) (Expr.int 1) in
+  let assumptions = [
+    bin ILessThanEqual (Expr.int 1) len;
+    eq (bin LstNth keys last_index) (text "length");
+    eq key (Expr.UnOp (NumberToUtf16, number));
+    Expr.UnOp (IsInt, number);
+    bin FLessThanEqual (Expr.num 0.) number;
+    bin FLessThan number (Expr.num 4294967295.);
+    eq len (Expr.UnOp (LstLen, values));
+    bin ValueEqual old_descriptor descriptor ] in
+  let context assumptions =
+    let pfs = Gillian.Symbolic.Pure_context.init () in
+    List.iter (Gillian.Symbolic.Pure_context.extend pfs) assumptions; pfs in
+  let reduce ?(gamma = types ()) assumptions e =
+    Reduction.reduce_lexpr ~gamma ~pfs:(context assumptions) e in
+  Alcotest.(check bool) "key/descriptor length alias preserves the old Number witness"
+    true (Expr.equal (reduce assumptions read) old);
+  Alcotest.(check bool) "preserved descriptor type is proved structurally"
+    true (Expr.equal (reduce assumptions
+      (eq (Expr.UnOp (TypeOf, read)) (Expr.Lit (Literal.Type NumberType)))) Expr.true_);
+  List.iteri (fun omitted _ ->
+    let fewer = List.filteri (fun i _ -> i <> omitted) assumptions in
+    Alcotest.(check bool) "every terminal transfer premise is required" false
+      (try Expr.equal (reduce fewer read) old
+       with Reduction.ReductionException _ -> false)) assumptions;
+  List.iter (fun name ->
+    let g = types () in Gamma.remove g name;
+    Alcotest.(check bool) "missing input type cannot authorize terminal transfer"
+      false (try Expr.equal (reduce ~gamma:g assumptions read) old
+        with Reduction.ReductionException _ -> false))
+    [ "#transfer_keys"; "#transfer_values"; "#transfer_key" ];
+  let p = Expr.LVar "#transfer_position" in
+  let len_values = Expr.UnOp (LstLen, values) in
+  let end_read = bin LstNth
+    (Expr.NOp (LstInsert, [ values; p; Expr.bool false ])) len_values in
+  let before = [ bin ILessThanEqual (Expr.int 0) p;
+    bin ILessThan p len_values ] in
+  let g = types () in Gamma.update g "#transfer_position" IntType;
+  let expected = bin LstNth values (bin IPlus (Expr.int (-1)) len_values) in
+  Alcotest.(check bool) "explicit strict insertion bounds transfer the final element"
+    true (Expr.equal (reduce ~gamma:g before end_read) expected);
+  List.iter (fun bounds ->
+    Alcotest.(check bool) "missing or append bound cannot transfer the old last value"
+      false (Expr.equal (reduce ~gamma:g bounds end_read) expected))
+    [ []; [ List.hd before ]; [ List.nth before 1 ];
+      [ List.hd before; bin ILessThanEqual p len_values ] ];
+  let zero_descriptor = Expr.EList [ Expr.num (-0.) ] in
+  Alcotest.(check bool) "value identity retains the sign of a fixed component"
+    true (Expr.equal (reduce [ bin ValueEqual old_descriptor zero_descriptor ]
+      (bin LstNth old_descriptor (Expr.int 0))) (Expr.num (-0.)));
+  let saved = !Gillian.Utils.Config.Verification.total in
+  Gillian.Utils.Config.Verification.total := true;
+  Fun.protect ~finally:(fun () -> Gillian.Utils.Config.Verification.total := saved)
+    (fun () ->
+      let invalid = bin LstNth (Expr.EList []) (Expr.int 0) in
+      Alcotest.(check bool) "terminal transfer cannot erase a failing insertion value"
+        true (try ignore (reduce assumptions (bin LstNth
+          (Expr.NOp (LstInsert, [ values; position; invalid ])) len)); false
+          with Reduction.ReductionException _ -> true))
 
 let concrete_legacy_operations () =
   let store = Engine.CExprEval.CStore.init [] in
@@ -1242,6 +1611,809 @@ let code_unit_models () =
           | None -> ()
           | Some path -> Yojson.Safe.to_file path (`List models)))
 
+let uint32_integer_successor_checks () =
+  with_total (fun () ->
+    let number = Expr.LVar "#uint32_successor" in
+    let types () =
+      let g = Gamma.init () in
+      Gamma.update g "#uint32_successor" Type.NumberType;
+      g in
+    let integer e = Expr.UnOp (NumToInt, e) in
+    let successor = bin FPlus number (Expr.num 1.) in
+    let identity = eq (integer successor)
+      (bin IPlus (integer number) (Expr.int 1)) in
+    check ~types "full Uint32 natural successor preserves exact integer count"
+      false [ Expr.UnOp (IsInt, number);
+        bin FLessThanEqual (Expr.num 0.) number;
+        bin FLessThan number (Expr.num 4294967295.);
+        not_ identity ];
+    check ~types "without integrality rounding has a real counterexample" true
+      [ eq number (Expr.num (Float.pred 1.)); not_ identity ];
+    check ~types "without the bound a large integer cannot advance" true
+      [ eq number (Expr.num 9007199254740992.); not_ identity ];
+    let store = Engine.CExprEval.CStore.init [] in
+    List.iter (fun n ->
+      let term = integer (Expr.num n) in
+      let expected = Expr.Lit (Literal.Int (Z.of_float n)) in
+      Alcotest.(check bool) "concrete truncation agrees at all branch boundaries"
+        true (Literal.equal
+          (Engine.CExprEval.evaluate_expr store term)
+          (match expected with Expr.Lit l -> l | _ -> assert false));
+      check "guarded native truncation keeps fallback and fractional values"
+        false [ not_ (eq term expected) ])
+      [ -65536.5; -0.; 0.; 65535.5; 65536.; 65536.5;
+        4294967294.; 4294967295.; 4294967295.5;
+        4294967296.; 4294967296.5; 9007199254740992. ])
+
+let uint32_integer_successor () =
+  let saved = !Gillian.Utils.Config.dump_smt in
+  Gillian.Utils.Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Gillian.Utils.Config.dump_smt := saved)
+    uint32_integer_successor_checks
+
+let dense_index_step () =
+  with_total (fun () ->
+    let head = Expr.LVar "#dense_head" and target = Expr.LVar "#dense_target" in
+    let tail = Expr.LVar "#dense_tail" in
+    let types () =
+      let g = Gamma.init () in
+      Gamma.update g "#dense_head" NumberType;
+      Gamma.update g "#dense_target" NumberType;
+      Gamma.update g "#dense_tail" ListType; g in
+    let text s = Expr.Lit (Literal.Utf16String (Codec.of_canonical s)) in
+    let format n = Expr.UnOp (NumberToUtf16, n) in
+    let suffix = Expr.NOp (LstCat, [ tail; Expr.EList [text "length"] ]) in
+    let keys = Expr.NOp (LstCat,
+      [Expr.EList [format head]; tail; Expr.EList [text "length"]]) in
+    let position = bin KeyInsertIndex keys (format target) in
+    let expected = bin IPlus (Expr.int 1)
+      (bin KeyInsertIndex suffix (format target)) in
+    let premises = [ Expr.UnOp (IsInt, head); Expr.UnOp (IsInt, target);
+      bin FLessThanEqual (Expr.num 0.) head;
+      bin FLessThan head target;
+      bin FLessThan target (Expr.num 4294967295.) ] in
+    let context facts =
+      let pfs = Gillian.Symbolic.Pure_context.init () in
+      List.iter (Gillian.Symbolic.Pure_context.extend pfs) facts; pfs in
+    let reduce ?(gamma = types ()) facts e =
+      Reduction.reduce_lexpr ~gamma ~pfs:(context facts) e in
+    let authorizes ?(gamma = types ()) facts =
+      try
+        let actual = reduce ~gamma:(Gamma.copy gamma) facts position in
+        let wanted = reduce ~gamma:(Gamma.copy gamma) facts expected in
+        Expr.equal actual wanted
+      with Reduction.ReductionException _ -> false in
+    Alcotest.(check bool) "canonical smaller head advances exactly one scan step"
+      true (authorizes premises);
+    Alcotest.(check bool) "an equal canonical head also advances one step" true
+      (authorizes [ Expr.UnOp (IsInt, head); Expr.UnOp (IsInt, target);
+        bin FLessThanEqual (Expr.num 0.) head;
+        bin FLessThanEqual head target;
+        bin FLessThan target (Expr.num 4294967295.) ]);
+    let next = bin FPlus head (Expr.num 1.) in
+    let two_heads = bin KeyInsertIndex (Expr.NOp (LstCat,
+      [Expr.EList [format head; format next]; tail; Expr.EList [text "length"]]))
+      (format target) in
+    let next_facts = [Expr.UnOp (IsInt, next);
+      bin FLessThanEqual (Expr.num 0.) next; bin FLessThan next target] in
+    let two_expected = bin IPlus (Expr.int 2)
+      (bin KeyInsertIndex suffix (format target)) in
+    let two_actual = reduce (premises @ next_facts) two_heads in
+    Alcotest.(check bool) "checked numeric successor heads advance two scan steps"
+      true (Expr.equal two_actual (reduce (premises @ next_facts) two_expected));
+    let unknown = Expr.LVar "#unknown_suffix_number" in
+    let unsafe_suffix = bin KeyInsertIndex (Expr.NOp (LstCat,
+      [Expr.EList [format head; format unknown]; tail])) (format target) in
+    Alcotest.(check bool) "a formatted suffix needs its original Number type"
+      true (try
+        let result = reduce premises unsafe_suffix in
+        let visitor = object
+          inherit [_] Visitors.iter as super
+          val mutable found = false
+          method found = found
+          method! visit_expr () e =
+            (match e with Expr.BinOp (_, KeyInsertIndex, _) -> found <- true
+             | _ -> ()); super#visit_expr () e
+        end in
+        visitor#visit_expr () result; visitor#found
+        with Reduction.ReductionException _ -> true);
+    List.iteri (fun omitted _ ->
+      Alcotest.(check bool) "each range/integrality/order premise is required"
+        false (authorizes (List.filteri (fun i _ -> i <> omitted) premises))) premises;
+    List.iter (fun name ->
+      let g = types () in Gamma.remove g name;
+      Alcotest.(check bool) ("missing input type cannot authorize a scan step: " ^ name)
+        false (authorizes ~gamma:g premises))
+      [ "#dense_head"; "#dense_target"; "#dense_tail" ];
+    let stop = bin KeyInsertIndex (Expr.EList [text "length"])
+      (format target) in
+    let range = [ Expr.UnOp (IsInt, target);
+      bin FLessThanEqual (Expr.num 0.) target;
+      bin FLessThan target (Expr.num 4294967295.) ] in
+    Alcotest.(check bool) "ordinary length stops every allowed array index"
+      true (Expr.equal (reduce range stop) (Expr.int 0));
+    Alcotest.(check bool) "nonnegativity follows a typed equal range witness"
+      true (Expr.equal (reduce
+        [ Expr.UnOp (IsInt, target); eq head target;
+          bin FLessThanEqual (Expr.num 0.) head;
+          bin FLessThan target (Expr.num 4294967295.) ] stop) (Expr.int 0));
+    List.iteri (fun omitted _ ->
+      Alcotest.(check bool) "ordinary-key stop requires each range premise"
+        false (try Expr.equal (reduce
+          (List.filteri (fun i _ -> i <> omitted) range) stop) (Expr.int 0)
+          with Reduction.ReductionException _ -> false)) range;
+    let shadowed binder_type =
+      Expr.ForAll (["#dense_target", binder_type],
+        List.fold_right (fun fact body -> bin Impl fact body) range
+          (eq stop (Expr.int 0))) in
+    Alcotest.(check bool) "shadowed input cannot borrow the outer Number type"
+        true (try
+          let result = reduce [] (shadowed None) in
+          let retained = ref false in
+          let visitor = object
+            inherit [_] Visitors.iter as super
+            method! visit_expr () e =
+              (match e with Expr.BinOp (_, KeyInsertIndex, _) -> retained := true
+               | _ -> ());
+              super#visit_expr () e
+          end in
+          visitor#visit_expr () result;
+          !retained
+          with Reduction.ReductionException _ -> true);
+    Alcotest.(check bool) "declared binder Number type authorizes the guarded step"
+      true (Expr.equal (reduce [] (shadowed (Some NumberType))) Expr.true_);
+    let failing_tail = Expr.LstSub (tail, Expr.int (-1), Expr.int 1) in
+    let failing = bin KeyInsertIndex
+      (Expr.NOp (LstCat, [Expr.EList [text "length"]; failing_tail]))
+      (format target) in
+    Alcotest.(check bool) "an ordinary-key stop cannot erase a failing slice"
+      true (try
+        let result = reduce range failing in
+        let retained = ref false in
+        let visitor = object
+          inherit [_] Visitors.iter as super
+          method! visit_expr () e =
+            if Expr.equal e failing_tail then retained := true;
+            super#visit_expr () e
+        end in
+        visitor#visit_expr () result;
+        !retained && not (Expr.equal result (Expr.int 0))
+        with Reduction.ReductionException _ -> true);
+    let store = Engine.CExprEval.CStore.init [] in
+    List.iter (fun (n, m, expected) ->
+      let term = bin KeyInsertIndex
+        (Expr.EList [ format (Expr.num n); text "length" ])
+        (format (Expr.num m)) in
+      Alcotest.(check bool) "boundary/fallback positions agree with concrete semantics"
+        true (Literal.equal (Engine.CExprEval.evaluate_expr store term)
+          (Literal.Int (Z.of_int expected))))
+      [ -0., 0., 1; 0., -0., 1; 1., 2., 1; 9., 10., 1;
+        65535., 65536., 1; 4294967293., 4294967294., 1;
+        4294967294., 4294967294., 1; 2., 1., 0;
+        0., 4294967295., 2; 1.5, 2., 0; -1., 0., 0 ])
+
+let uint32_count_bounds_checks () =
+  with_total (fun () ->
+    let number = Expr.LVar "#uint32_count" in
+    let types () =
+      let g = Gamma.init () in
+      Gamma.update g "#uint32_count" Type.NumberType; g in
+    let integer = Expr.UnOp (NumToInt, number) in
+    let range = [Expr.UnOp (IsInt, number);
+      bin FLessThanEqual (Expr.num 0.) number;
+      bin FLessThan number (Expr.num 4294967295.)] in
+    check ~types "every dense Array length converts to a nonnegative count"
+      false (bin ILessThan integer (Expr.int 0) :: range);
+    check ~types "every appendable Array length is below the final count"
+      false (bin ILessThan (Expr.int 4294967294) integer :: range);
+    check ~types "without nonnegativity a negative count is possible"
+      true [eq number (Expr.num (-1.)); bin ILessThan integer (Expr.int 0)];
+    check ~types "without the upper bound final length cannot be appended"
+      true [eq number (Expr.num 4294967295.);
+        bin ILessThan (Expr.int 4294967294) integer];
+    let store = Engine.CExprEval.CStore.init [] in
+    List.iter (fun n ->
+      let term = Expr.UnOp (NumToInt, Expr.num n) in
+      let expected = Expr.Lit (Literal.Int (Z.of_float n)) in
+      Alcotest.(check bool) "UInt32 encoding and fallback match concrete truncation"
+        true (Literal.equal (Engine.CExprEval.evaluate_expr store term)
+          (match expected with Expr.Lit l -> l | _ -> assert false));
+      check "literal truncation cannot be replaced by a constant or modular wrap"
+        false [not_ (eq term expected)])
+      [-1.; -0.5; -0.; 0.; 0.5; 65535.5; 65536.; 65536.5;
+       4294967294.; 4294967295.; 4294967295.5;
+       4294967296.; 4294967296.5; 9007199254740992.])
+
+let uint32_count_bounds () =
+  let saved = !Gillian.Utils.Config.dump_smt in
+  Gillian.Utils.Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Gillian.Utils.Config.dump_smt := saved)
+    uint32_count_bounds_checks
+
+let integer_count_alias () =
+  with_total (fun () ->
+    let left = Expr.LVar "#a_count" and right = Expr.LVar "#z_count" in
+    let gamma () =
+      let g = Gamma.init () in
+      Gamma.update g "#a_count" NumberType;
+      Gamma.update g "#z_count" NumberType; g in
+    let premises = [eq left right; Expr.UnOp (IsInt,left); Expr.UnOp (IsInt,right)] in
+    let context facts =
+      let pfs = Gillian.Symbolic.Pure_context.init () in
+      List.iter (Gillian.Symbolic.Pure_context.extend pfs) facts; pfs in
+    let count e = Expr.UnOp (NumToInt, e) in
+    let reduce ?(g = gamma ()) ?(facts = premises) e =
+      Reduction.reduce_lexpr ~pfs:(context facts) ~gamma:g e in
+    Alcotest.(check bool) "equal finite Number atoms share an integer count"
+      true (Expr.equal (reduce (count right)) (count left));
+    List.iter (fun omitted ->
+      let g = gamma () in Gamma.remove g omitted;
+      Alcotest.(check bool) "both original Number types are required"
+        true (Expr.equal (reduce ~g (count right)) (count right)))
+      ["#a_count"; "#z_count"];
+    List.iteri (fun omitted _ ->
+      Alcotest.(check bool) "equality and both finite-domain premises are required"
+        true (Expr.equal (reduce ~facts:(List.filteri (fun i _ -> i<>omitted) premises)
+          (count right)) (count right))) premises;
+    let partial = bin LstNth (Expr.EList []) (Expr.int 0) in
+    let partial_term = count partial in
+    Alcotest.(check bool) "a failing indexed operand is not replaced" true
+      (try ignore (reduce ~facts:[eq partial left] partial_term); false
+       with Reduction.ReductionException _ -> true);
+    Alcotest.(check bool) "a partial equality witness is never selected" true
+      (Expr.equal (reduce ~facts:[eq right partial; Expr.UnOp (IsInt,right)]
+        (count right)) (count right));
+    let scoped binding = Expr.ForAll (["#z_count",binding],
+      List.fold_right (fun p e -> bin Impl p e) premises
+        (eq (count right) (count left))) in
+    Alcotest.(check bool) "an untyped shadow cannot borrow its outer Number type"
+      false (Expr.equal (reduce (scoped None)) Expr.true_);
+    Alcotest.(check bool) "a declared Number binder permits the finite rewrite"
+      true (Expr.equal (reduce (scoped (Some NumberType))) Expr.true_);
+    let visitor = object
+      inherit [_] Visitors.endo
+      method! visit_LVar () _ name = Expr.PVar name
+    end in
+    List.iter (fun (a,b) ->
+      let store=Engine.CExprEval.CStore.init
+        ["#a_count",Literal.Num a; "#z_count",Literal.Num b] in
+      let evaluate e = Engine.CExprEval.evaluate_expr store (visitor#visit_expr () e) in
+      Alcotest.(check bool) "numeric aliases preserve count including signed zeros"
+        true (Literal.equal (evaluate (count right)) (evaluate (reduce (count right)))))
+      [0.,-0.; -0.,0.; 65536.,65536.; 4294967294.,4294967294.;
+       4294967295.,4294967295.; 4294967296.,4294967296.;
+       -1.,-1.; 9007199254740992.,9007199254740992.];
+    List.iter (fun n ->
+      let term=reduce ~facts:[eq left right] (count right) in
+      let store=Engine.CExprEval.CStore.init
+        ["#a_count",Literal.Num n; "#z_count",Literal.Num n] in
+      Alcotest.(check bool) "nonfinite conversion is retained and still rejected"
+        true (Expr.equal term (count right) &&
+          (try ignore (Engine.CExprEval.evaluate_expr store
+            (visitor#visit_expr () term)); false with _ -> true)))
+      [infinity;neg_infinity])
+
+let utf16_list_concatenation () =
+  with_total (fun () ->
+    let names = Expr.LVar "#typed_names" and key = Expr.LVar "#typed_key" in
+    let number = Expr.LVar "#typed_number" in
+    let gamma () =
+      let g = Gamma.init () in
+      Gamma.update g "#typed_names" ListType;
+      Gamma.update g "#typed_key" Utf16Type;
+      Gamma.update g "#typed_number" NumberType; g in
+    let all e = Expr.UnOp (LstAllUtf16,e) in
+    let concat xs = Expr.NOp (LstCat,xs) in
+    let length_key = value [108;101;110;103;116;104] in
+    let old = all (concat [names;Expr.EList [length_key]]) in
+    let grown = all (concat [names;Expr.EList [key;length_key]]) in
+    let reduce ?(g=gamma ()) e = Reduction.reduce_lexpr ~gamma:g e in
+    Alcotest.(check bool) "all typed concatenated keys reduce to the prefix predicate"
+      true (Expr.equal (reduce grown) (all names));
+    Alcotest.(check bool) "original prefix typing has the same normal form"
+      true (Expr.equal (reduce old) (all names));
+    Alcotest.(check bool) "the actual abstract grown-key obligation is UNSAT"
+      false (Solver.check_satisfiability [old;not_ grown] (gamma ()));
+    let formatted = all (concat [names;
+      Expr.EList [Expr.UnOp (NumberToUtf16,number);length_key]]) in
+    Alcotest.(check bool) "total Number formatting preserves UTF16 element typing"
+      true (Expr.equal (reduce formatted) (all names));
+    let retains_concat e =
+      let retained = ref false in
+      let visitor = object
+        inherit [_] Visitors.iter as super
+        method! visit_expr () e =
+          (match e with Expr.UnOp (LstAllUtf16,Expr.NOp (LstCat,_)) -> retained:=true
+           | _ -> ()); super#visit_expr () e
+      end in visitor#visit_expr () e; !retained in
+    List.iter (fun name ->
+      let g=gamma () in Gamma.remove g name;
+      Alcotest.(check bool) "missing original List/value typing blocks the shortcut"
+        true (try retains_concat (reduce ~g grown)
+          with Reduction.ReductionException _ -> true))
+      ["#typed_names";"#typed_key"];
+    let g=gamma () in Gamma.remove g "#typed_number";
+    Alcotest.(check bool) "untyped formatted values cannot borrow inferred types"
+      true (try retains_concat (reduce ~g formatted)
+        with Reduction.ReductionException _ -> true);
+    let bad_prefix = Expr.EList [Expr.num 3.] in
+    let partials = [Expr.LstSub(names,Expr.int (-1),Expr.int 1);
+      Expr.EList [bin LstNth (Expr.EList []) (Expr.int 0)]] in
+    List.iter (fun partial ->
+      let term=all(concat [bad_prefix;partial]) in
+      Alcotest.(check bool) "a false prefix cannot erase a failing later operand"
+        true (try let result=reduce term in
+          retains_concat result && not (Expr.equal result Expr.false_)
+          with Reduction.ReductionException _ -> true)) partials;
+    Alcotest.(check bool) "a complete non-UTF16 list is genuinely false"
+      true (Expr.equal (reduce (all(concat [bad_prefix;Expr.EList [key]]))) Expr.false_);
+    let scoped binding = Expr.ForAll(["#typed_names",binding],
+      eq grown (all names)) in
+    Alcotest.(check bool) "an untyped shadow cannot borrow the outer List type"
+      true (try retains_concat (reduce (scoped None))
+        with Reduction.ReductionException _ -> true);
+    Alcotest.(check bool) "a declared List binder permits the exact split"
+      true (Expr.equal (reduce (scoped (Some ListType))) Expr.true_);
+    let store=Engine.CExprEval.CStore.init [] in
+    List.iter (fun units ->
+      let text=value units in
+      List.iter (fun suffix ->
+        let term=all(concat [Expr.EList [text];Expr.EList suffix]) in
+        let concrete=Engine.CExprEval.evaluate_expr store term in
+        Alcotest.(check bool) "concrete UTF16, lone-surrogate and false lists agree"
+          true (Expr.equal (reduce term) (Expr.Lit concrete)))
+        [[];[text;length_key];[Expr.num (-0.)];[Expr.num 0.];
+         [Expr.Lit Literal.Null];[Expr.true_]]) values;
+    List.iter (fun n ->
+      let term=all(concat [Expr.EList [Expr.UnOp(NumberToUtf16,Expr.num n)];
+        Expr.EList [length_key]]) in
+      Alcotest.(check bool) "formatting is total for both zeros and nonfinite Numbers"
+        true (Expr.equal (reduce term) Expr.true_ &&
+          Literal.equal (Engine.CExprEval.evaluate_expr store term) (Literal.Bool true)))
+      [-0.;0.;nan;infinity;neg_infinity])
+
+let checked_prefix_splice () =
+  with_total (fun () ->
+    let names=Expr.LVar "#splice_names" and payload=Expr.LVar "#splice_values" in
+    let number=Expr.LVar "#splice_number" and item=Expr.LVar "#splice_value" in
+    let gamma () = let g=Gamma.init () in
+      List.iter (fun x -> Gamma.update g x ListType) ["#splice_names";"#splice_values"];
+      Gamma.update g "#splice_number" NumberType;
+      Gamma.update g "#splice_value" BooleanType; g in
+    let len e=Expr.UnOp(LstLen,e) in
+    let concat xs=Expr.NOp(LstCat,xs) in
+    let text s=Expr.Lit(Literal.Utf16String(Codec.of_canonical s)) in
+    let key=Expr.UnOp(NumberToUtf16,number) in
+    let keys=concat [names;Expr.EList [text "length"]] in
+    let position=bin KeyInsertIndex keys key in
+    let descriptor=Expr.EList [text "d";item;Expr.true_;Expr.true_;Expr.true_] in
+    let length_descriptor n=Expr.EList [text "d";n;Expr.true_;Expr.false_;Expr.false_] in
+    let values=concat [payload;Expr.EList [length_descriptor number]] in
+    let insert xs v=Expr.NOp(LstInsert,[xs;position;v]) in
+    let premises=[Expr.UnOp(LstAllUtf16,names);eq position (len names);
+      eq (len names) (len payload)] in
+    let context facts=let pfs=Gillian.Symbolic.Pure_context.init () in
+      List.iter (Gillian.Symbolic.Pure_context.extend pfs) facts;pfs in
+    let reduce ?(g=gamma ()) ?(facts=premises) e =
+      Reduction.reduce_lexpr ~gamma:g ~pfs:(context facts) e in
+    let wanted_keys=concat [names;Expr.EList [key;text "length"]] in
+    let wanted_values=concat [payload;Expr.EList [descriptor;length_descriptor number]] in
+    Alcotest.(check bool) "checked key position inserts before the literal length key"
+      true (Expr.equal (reduce (insert keys key)) (reduce wanted_keys));
+    Alcotest.(check bool) "equal key/descriptor counts preserve their distinct sequences"
+      true (Expr.equal (reduce (insert values descriptor)) (reduce wanted_values));
+    let inserted_keys=insert keys key and inserted_values=insert values descriptor in
+    let next=bin FPlus number (Expr.num 1.) in
+    let after=concat [
+      Expr.LstSub(inserted_values,Expr.int 0,
+        bin IMinus (len inserted_keys) (Expr.int 1));
+      Expr.EList [length_descriptor (bin FPlus next (Expr.num 0.))];
+      Expr.LstSub(inserted_values,len inserted_keys,
+        bin IMinus (len inserted_values) (len inserted_keys))] in
+    let expected=concat[payload;Expr.EList[descriptor;length_descriptor next]] in
+    let range=[Expr.UnOp(IsInt,number);bin FLessThanEqual (Expr.num 0.) number;
+      bin FLessThan number (Expr.num 4294967295.)] in
+    Alcotest.(check bool) "the actual grown writer slices equal the appended payload"
+      false (Solver.check_satisfiability (not_(eq after expected)::premises@range)
+        (gamma ()));
+    let retained e = match reduce e with Expr.NOp(LstInsert,_) -> true | _ -> false in
+    List.iteri (fun omitted _ ->
+      Alcotest.(check bool) "each position/domain/count witness remains load-bearing"
+        true (match reduce ~facts:(List.filteri(fun i _ -> i<>omitted) premises)
+          (insert values descriptor) with Expr.NOp(LstInsert,_) -> true | _ -> false)) premises;
+    List.iter (fun x ->
+      let g=gamma () in Gamma.remove g x;
+      Alcotest.(check bool) "original list/key/value types are required by the splice"
+        true (try match reduce ~g (insert values descriptor) with
+          Expr.NOp(LstInsert,_) -> true | _ -> false
+          with Reduction.ReductionException _ -> true))
+      ["#splice_names";"#splice_values";"#splice_number";"#splice_value"];
+    let partial=bin LstNth (Expr.EList []) (Expr.int 0) in
+    Alcotest.(check bool) "a failing inserted descriptor is not hidden" true
+      (try ignore(reduce (insert values partial));false
+       with Reduction.ReductionException _ -> true);
+    Alcotest.(check bool) "a failing position cannot be replaced by its equal witness" true
+      (try let p=partial in
+        ignore(reduce ~facts:(eq p (len names)::premises)
+          (Expr.NOp(LstInsert,[keys;p;key])));false
+       with Reduction.ReductionException _ -> true);
+    Alcotest.(check bool) "an unrelated insertion position is retained" true
+      (retained (Expr.NOp(LstInsert,[keys;Expr.int 0;key])));
+    let scoped ty=Expr.ForAll(["#splice_values",ty],
+      List.fold_right(fun fact body -> bin Impl fact body) premises
+        (eq (insert values descriptor) wanted_values)) in
+    Alcotest.(check bool) "an untyped shadow cannot inherit the descriptor-list type"
+      false (Expr.equal (reduce (scoped None)) Expr.true_);
+    Alcotest.(check bool) "an explicitly typed list binder preserves the checked splice"
+      true (Expr.equal (reduce (scoped (Some ListType))) Expr.true_);
+    let visitor=object inherit [_] Visitors.endo
+      method! visit_LVar () _ name=Expr.PVar name end in
+    List.iter(fun (ns,vs,n) ->
+      let store=Engine.CExprEval.CStore.init
+        ["#splice_names",Literal.LList(List.map(fun s -> literal s) ns);
+         "#splice_values",Literal.LList(List.map(fun x -> Literal.Num x) vs);
+         "#splice_number",Literal.Num n;"#splice_value",Literal.Bool true] in
+      let evaluate e=Engine.CExprEval.evaluate_expr store(visitor#visit_expr () e) in
+      List.iter(fun term ->
+        Alcotest.(check bool) "concrete checked splices preserve payload identity/order"
+          true (Literal.equal(evaluate term)(evaluate(reduce term))))
+        [insert keys key;insert values descriptor])
+      [[],[],0.; [[48]],[nan],1.; [[48];[49]],[-0.;0.],2.])
+
+let checked_prefix_lookup () =
+  with_total (fun () ->
+    let names=Expr.LVar "#lookup_names" and payload=Expr.LVar "#lookup_values" in
+    let number=Expr.LVar "#lookup_length" in
+    let gamma ()=let g=Gamma.init () in
+      Gamma.update g "#lookup_names" ListType;
+      Gamma.update g "#lookup_values" ListType;
+      Gamma.update g "#lookup_length" NumberType;g in
+    let len e=Expr.UnOp(LstLen,e) in
+    let text s=Expr.Lit(Literal.Utf16String(Codec.of_canonical s)) in
+    let descriptor=Expr.EList[text "d";number;Expr.true_;Expr.false_;Expr.false_] in
+    let whole=Expr.NOp(LstCat,[payload;Expr.EList[descriptor]]) in
+    let index=len names in
+    let term=bin LstNth (bin LstNth whole index) (Expr.int 1) in
+    let fact=eq (len names) (len payload) in
+    let context facts=let p=Gillian.Symbolic.Pure_context.init () in
+      List.iter(Gillian.Symbolic.Pure_context.extend p) facts;p in
+    let reduce ?(g=gamma ()) ?(facts=[fact]) e=
+      Reduction.reduce_lexpr ~gamma:g ~pfs:(context facts) e in
+    Alcotest.(check bool) "checked key count reads the actual terminal length descriptor"
+      true (Expr.equal(reduce term) number);
+    let rounded=bin FPlus (bin FPlus number (Expr.num 0.)) (Expr.num 0.) in
+    let range=[Expr.UnOp(IsInt,number);bin FLessThanEqual (Expr.num 0.) number;
+      bin FLessThan number (Expr.num 4294967295.)] in
+    Alcotest.(check bool) "the original writer length-branch query is UNSAT"
+      false (Solver.check_satisfiability (bin FLessThan rounded term::fact::range)
+        (gamma ()));
+    Alcotest.(check bool) "omitting the separate count equality retains the lookup"
+      false (Expr.equal(reduce ~facts:[] term) number);
+    List.iter(fun x ->let g=gamma () in Gamma.remove g x;
+      Alcotest.(check bool) "boundary lookup requires every original list/value type"
+        true (try not(Expr.equal(reduce ~g term) number)
+          with Reduction.ReductionException _ -> true))
+      ["#lookup_names";"#lookup_values";"#lookup_length"];
+    let tail=Expr.NOp(LstCat,[payload;Expr.EList[Expr.true_;Expr.false_;number]]) in
+    List.iteri(fun offset expected ->
+      Alcotest.(check bool) "each in-range literal tail offset has the exact value"
+        true (Expr.equal(reduce (bin LstNth tail
+          (bin IPlus (Expr.int offset) index))) expected))
+      [Expr.true_;Expr.false_;number];
+    List.iter(fun offset ->
+      Alcotest.(check bool) "negative and out-of-tail offsets cannot read a tail value"
+        true (try not(Expr.equal(reduce (bin LstNth whole
+          (bin IPlus index (Expr.int offset)))) descriptor)
+          with Reduction.ReductionException _ -> true)) [-1;1;2];
+    let failure=bin LstNth (Expr.EList []) (Expr.int 0) in
+    let unsafe=Expr.NOp(LstCat,[payload;Expr.EList[descriptor;failure]]) in
+    Alcotest.(check bool) "a valid selected element cannot conceal a failing later value"
+      true (try ignore(reduce (bin LstNth unsafe index));false
+       with Reduction.ReductionException _ -> true);
+    let store=Engine.CExprEval.CStore.init [] in
+    let nan_value=Expr.num nan in
+    Alcotest.(check bool) "value identity keeps NaN without assuming numeric reflexivity"
+      true (Literal.equal (Engine.CExprEval.evaluate_expr store
+          (bin Equal nan_value nan_value)) (Literal.Bool false) &&
+        Literal.equal (Engine.CExprEval.evaluate_expr store
+          (bin ValueEqual nan_value nan_value)) (Literal.Bool true));
+    let scoped ty=Expr.ForAll(["#lookup_names",ty],bin Impl fact (bin ValueEqual term number)) in
+    Alcotest.(check bool) "an untyped shadow cannot borrow the outer key-count type"
+      false (Expr.equal(reduce (scoped None)) Expr.true_);
+    Alcotest.(check bool) "a declared List binder permits the checked boundary read"
+      true (Expr.equal(reduce (scoped (Some ListType))) Expr.true_);
+    let visitor=object inherit [_] Visitors.endo
+      method! visit_LVar () _ name=Expr.PVar name end in
+    List.iter(fun (ns,vs,n) ->
+      let store=Engine.CExprEval.CStore.init
+        ["#lookup_names",Literal.LList(List.map(fun s -> literal s) ns);
+         "#lookup_values",Literal.LList(List.map(fun x -> Literal.Num x) vs);
+         "#lookup_length",Literal.Num n] in
+      let evaluate e=Engine.CExprEval.evaluate_expr store(visitor#visit_expr () e) in
+      Alcotest.(check bool) "concrete lookup preserves distinct payload and signed zeros"
+        true (Literal.equal(evaluate term)(evaluate(reduce term))))
+      [[],[],0.; [],[],nan; [[48]],[nan],-0.; [[48];[49]],[-0.;0.],2.])
+
+let checked_cons_insertion () =
+  with_total (fun () ->
+    let xs=Expr.LVar "#cons_xs" and head=Expr.LVar "#cons_head" in
+    let tail=Expr.LVar "#cons_tail" and i=Expr.LVar "#cons_index" in
+    let value=Expr.LVar "#cons_value" in
+    let gamma ()=let g=Gamma.init () in
+      List.iter(fun x -> Gamma.update g x ListType)
+        ["#cons_xs";"#cons_head";"#cons_tail";"#cons_value"];
+      Gamma.update g "#cons_index" IntType;g in
+    let cons=Expr.NOp(LstCat,[Expr.EList [head];tail]) in
+    let len e=Expr.UnOp(LstLen,e) in
+    let lower=bin ILessThanEqual (Expr.int 0) i in
+    let nonzero=not_(eq i (Expr.int 0)) in
+    let upper=bin ILessThanEqual i (bin IPlus (Expr.int 1) (len tail)) in
+    let link=eq xs cons in
+    let facts=[link;lower;nonzero;upper] in
+    let context facts=let p=Gillian.Symbolic.Pure_context.init () in
+      List.iter(Gillian.Symbolic.Pure_context.extend p) facts;p in
+    let term=Expr.NOp(LstInsert,[xs;i;value]) in
+    let wanted=Expr.NOp(LstCat,[Expr.EList [head];
+      Expr.NOp(LstInsert,[tail;bin IMinus i (Expr.int 1);value])]) in
+    let reduce ?(g=gamma ()) ?(facts=facts) e=
+      Reduction.reduce_lexpr ~gamma:(Gamma.copy g) ~pfs:(context facts) e in
+    Alcotest.(check bool) "positive integer insertion follows the owned cons witness"
+      true (Expr.equal(reduce term)(reduce wanted));
+    List.iter (fun inserted ->
+      let g=gamma () in
+      Gamma.remove g "#cons_head";
+      Gamma.remove g "#cons_value";
+      Gamma.update g "#cons_head" Utf16Type;
+      Gamma.update g "#cons_value" (Literal.type_of inserted);
+      Alcotest.(check bool) "typed scalar insertion follows a UTF16 cons witness"
+        true (Expr.equal(reduce ~g term)(reduce ~g wanted));
+      let visitor=object inherit [_] Visitors.endo
+        method! visit_LVar () _ name=Expr.PVar name end in
+      List.iter (fun index ->
+        let h=literal [0xd800] and rest=[literal [97];literal [0]] in
+        let store=Engine.CExprEval.CStore.init [
+          "#cons_head",h;"#cons_tail",Literal.LList rest;
+          "#cons_xs",Literal.LList(h::rest);"#cons_index",Literal.Int(Z.of_int index);
+          "#cons_value",inserted] in
+        let eval e=Engine.CExprEval.evaluate_expr store(visitor#visit_expr () e) in
+        Alcotest.(check bool) "unboxed insertion agrees with concrete evaluation"
+          true (Literal.equal(eval term)(eval(reduce ~g term))) ) [1;2;3];
+      Gamma.remove g "#cons_value";
+      Alcotest.(check bool) "an untyped inserted scalar cannot use the shortcut"
+        true (match reduce ~g term with Expr.NOp(LstInsert,_) -> true | _ -> false)
+    ) [literal [0xdc00];Literal.Num(-0.);Literal.Num nan;Literal.Bool false;Literal.Null];
+    List.iter(fun positivity ->
+      let fs=[link;positivity;upper] in
+      Alcotest.(check bool) "either explicit strict-positive integer form is sufficient"
+        true (Expr.equal(reduce ~facts:fs term)(reduce ~facts:fs wanted)))
+      [bin ILessThan (Expr.int 0) i;bin ILessThanEqual (Expr.int 1) i];
+    let original_upper=bin ILessThanEqual i (len xs) in
+    let fs=[link;lower;nonzero;original_upper] in
+    Alcotest.(check bool) "the original list bound is sufficient without a length alias"
+      true (Expr.equal(reduce ~facts:fs term)(reduce ~facts:fs wanted));
+    let other=Expr.LVar "#cons_other" in
+    let g=gamma () in Gamma.update g "#cons_other" ListType;
+    let equal_length=eq (len tail) (len other) in
+    let other_upper=bin ILessThanEqual i (bin IPlus (Expr.int 1) (len other)) in
+    let fs=[link;lower;nonzero;equal_length;other_upper] in
+    Alcotest.(check bool) "an originally typed equal-length list carries the same bound"
+      true (Expr.equal(reduce ~g ~facts:fs term)(reduce ~g ~facts:fs wanted));
+    List.iter (fun omitted ->
+      Alcotest.(check bool) "both the length equality and its upper bound are required"
+        true (match reduce ~g ~facts:(List.filter(fun f -> not(Expr.equal f omitted)) fs) term with
+          Expr.NOp(LstInsert,_) -> true | _ -> false)) [equal_length;other_upper];
+    Gamma.remove g "#cons_other";
+    Alcotest.(check bool) "an equal-length alias cannot borrow a missing original type"
+      true (try not(Expr.equal(reduce ~g ~facts:fs term)(reduce ~g ~facts:fs wanted))
+        with Reduction.ReductionException _ -> true);
+    List.iteri(fun omitted _ ->
+      Alcotest.(check bool) "every cons/positivity/bound premise is required"
+        true (match reduce ~facts:(List.filteri(fun n _ -> n<>omitted) facts) term with
+          Expr.NOp(LstInsert,_) -> true | _ -> false)) facts;
+    List.iter(fun name ->let g=gamma () in Gamma.remove g name;
+      Alcotest.(check bool) "each original list and integer type is required"
+        true (try not(Expr.equal(reduce ~g term)(reduce ~g wanted))
+          with Reduction.ReductionException _ -> true))
+      ["#cons_xs";"#cons_head";"#cons_tail";"#cons_value";"#cons_index"];
+    let partial=bin LstNth (Expr.EList []) (Expr.int 0) in
+    List.iter(fun unsafe ->
+      Alcotest.(check bool) "partial insertion operands still fail before equality erasure"
+        true (try ignore(reduce unsafe);false
+          with Reduction.ReductionException _ -> true))
+      [Expr.NOp(LstInsert,[xs;partial;value]);
+       Expr.NOp(LstInsert,[xs;i;partial]);
+       Expr.NOp(LstInsert,[Expr.NOp(LstCat,[Expr.EList [head];partial]);i;value])];
+    let scoped ty=Expr.ForAll(["#cons_tail",ty],
+      List.fold_right(fun f body ->bin Impl f body) facts (eq term wanted)) in
+    Alcotest.(check bool) "a shadowed untyped list cannot borrow outer typing"
+      false (Expr.equal(reduce(scoped None)) Expr.true_);
+    let visitor=object inherit [_] Visitors.endo
+      method! visit_LVar () _ name=Expr.PVar name end in
+    let atom x=Literal.LList [x] in
+    let atoms=[Literal.Num(-0.);Literal.Num 0.;Literal.Num nan;
+      Literal.Null;literal [0xd800];Literal.Bool true;Literal.LList []] in
+    let checks=ref 0 in
+    List.iter(fun v ->List.iter(fun size ->
+      let values=List.init size(fun n ->atom(List.nth atoms (n mod List.length atoms))) in
+      for index=1 to size+1 do
+        let store=Engine.CExprEval.CStore.init [
+          "#cons_head",atom(Literal.Num(-0.));"#cons_tail",Literal.LList values;
+          "#cons_xs",Literal.LList(atom(Literal.Num(-0.))::values);
+          "#cons_index",Literal.Int(Z.of_int index);"#cons_value",atom v] in
+        let eval e=Engine.CExprEval.evaluate_expr store(visitor#visit_expr () e) in
+        Alcotest.(check bool) "native insertion preserves exact nested values and order"
+          true (Literal.equal(eval term)(eval(reduce term)));incr checks
+      done) [0;1;2;4]) atoms;
+    Alcotest.(check int) "all boundary/value concrete comparisons executed" 77 !checks;
+    let small=List.map(fun fs -> Expr.Set.of_list fs)
+      [[eq i (Expr.int 0)];[eq i (Expr.int (-1))];
+       [eq i (bin IPlus (len tail) (Expr.int 2))]] in
+    List.iter(fun fs ->
+      let cases=Expr.Set.elements fs @ [eq tail (Expr.EList []);link] in
+      Alcotest.(check bool) "omitted positivity or upper bound admits a native countermodel"
+        true (Option.is_some(Smt.check_sat(Expr.Set.of_list cases)(Gamma.as_hashtbl(gamma ()))))
+    ) small;
+    Printf.printf "CHECKED_CONS_INSERTION_CONTROLS_COMPLETE\n%!"
+  )
+
+let utf16_list_insertion () =
+  with_total (fun () ->
+    let xs=Expr.LVar "#insert_keys" and key=Expr.LVar "#insert_key" in
+    let pos=Expr.LVar "#insert_position" in
+    let gamma ()=let g=Gamma.init () in
+      Gamma.update g "#insert_keys" ListType;
+      Gamma.update g "#insert_key" Utf16Type;
+      Gamma.update g "#insert_position" IntType;g in
+    let all e=Expr.UnOp(LstAllUtf16,e) and len e=Expr.UnOp(LstLen,e) in
+    let insert xs p k=Expr.NOp(LstInsert,[xs;p;k]) in
+    let lower=bin ILessThanEqual Expr.zero_i pos in
+    let upper=bin ILessThanEqual pos (len xs) in
+    let facts=[lower;upper] in
+    let context fs=let p=Gillian.Symbolic.Pure_context.init () in
+      List.iter(Gillian.Symbolic.Pure_context.extend p) fs;p in
+    let reduce ?(g=gamma ()) ?(facts=facts) e=
+      Reduction.reduce_lexpr ~gamma:(Gamma.copy g) ~pfs:(context facts) e in
+    let term=all(insert xs pos key) in
+    Alcotest.(check bool) "in-range UTF16 insertion preserves exactly the old predicate"
+      true (Expr.equal(reduce term)(all xs));
+    Alcotest.(check bool) "the abstract insertion typing obligation is UNSAT"
+      false (Solver.check_satisfiability (all xs::not_ term::facts) (gamma ()));
+    List.iter(fun p ->
+      Alcotest.(check bool) "zero and exact list length need no invented bounds"
+        true (Expr.equal(reduce ~facts:[] (all(insert xs p key)))(all xs)))
+      [Expr.zero_i;len xs];
+    let scan=bin KeyInsertIndex xs key in
+    Alcotest.(check bool) "typed key insertion uses its checked total domain"
+      true (Expr.equal(reduce ~facts:[all xs] (all(insert xs scan key)))(all xs));
+    Alcotest.(check bool) "the actual key-scan insertion typing obligation is UNSAT"
+      false (Solver.check_satisfiability [all xs;not_(all(insert xs scan key))]
+        (gamma ()));
+    let retains e=let seen=ref false in
+      let visitor=object inherit [_] Visitors.iter as super
+        method! visit_expr () e=
+          (match e with Expr.UnOp(LstAllUtf16,Expr.NOp(LstInsert,_)) -> seen:=true
+           | _ -> ());super#visit_expr () e end in
+      visitor#visit_expr () e;!seen in
+    List.iteri(fun omitted _ ->
+      Alcotest.(check bool) "each explicit insertion bound is required"
+        true (retains(reduce ~facts:(List.filteri(fun i _ -> i<>omitted) facts) term))) facts;
+    List.iter(fun name ->let g=gamma () in Gamma.remove g name;
+      Alcotest.(check bool) "all original operand types are required"
+        true (try retains(reduce ~g term)
+          with Reduction.ReductionException _ -> true))
+      ["#insert_keys";"#insert_key";"#insert_position"];
+    Alcotest.(check bool) "key scan cannot borrow missing UTF16 list contents"
+      true (retains(reduce ~facts:[] (all(insert xs scan key))));
+    Alcotest.(check bool) "wrong inserted type is retained for ordinary evaluation"
+      true (retains(reduce (all(insert xs pos (Expr.num 1.)))));
+    List.iter(fun p ->
+      Alcotest.(check bool) "negative and oversized literal positions retain rejection"
+        true (retains(reduce ~facts:[] (all(insert xs p key)))))
+      [Expr.int (-1);Expr.int 999];
+    let partial=bin LstNth (Expr.EList []) Expr.zero_i in
+    List.iter(fun e ->
+      Alcotest.(check bool) "partial operands cannot be erased by list typing"
+        true (try ignore(reduce ~facts:[] e);false
+          with Reduction.ReductionException _ -> true))
+      [all(insert partial Expr.zero_i key);all(insert xs partial key);
+       all(insert xs Expr.zero_i partial)];
+    let scoped ty=Expr.ForAll(["#insert_keys",ty],
+      List.fold_right(fun fact body ->bin Impl fact body) facts (eq term (all xs))) in
+    Alcotest.(check bool) "an untyped list shadow cannot borrow the outer type"
+      false (try Expr.equal(reduce(scoped None)) Expr.true_
+        with Reduction.ReductionException _ -> false);
+    let visitor=object inherit [_] Visitors.endo
+      method! visit_LVar () _ name=Expr.PVar name end in
+    let cases=[[];[literal []];[literal [0xd800];literal [65]];
+      [Literal.Num(-0.);literal [0xdfff]];[Literal.Null;Literal.Bool true]] in
+    let checks=ref 0 in
+    List.iter(fun items ->List.iter(fun units ->
+      for position=0 to List.length items do
+        let store=Engine.CExprEval.CStore.init [
+          "#insert_keys",Literal.LList items;"#insert_key",literal units;
+          "#insert_position",Literal.Int(Z.of_int position)] in
+        let eval e=Engine.CExprEval.evaluate_expr store(visitor#visit_expr () e) in
+        Alcotest.(check bool) "native boundary insertion preserves true and false typing"
+          true (Literal.equal(eval term)(eval(reduce term)));incr checks
+      done) values) cases;
+    Alcotest.(check int) "all concrete insertion comparisons executed" 84 !checks;
+    Printf.printf "UTF16_INSERTION_DOMAIN_CONTROLS_COMPLETE\n%!"
+  )
+
+let trim_concrete_domain () =
+  let trim s = Expr.UnOp (Utf16Trim, s) in
+  let store = Engine.CExprEval.CStore.init [] in
+  let eval = Engine.CExprEval.evaluate_expr store in
+  (* Independent singleton oracle: the exact JS whitespace table, not the
+     implementation's trim function. This also covers every lone surrogate. *)
+  let spaces =
+    [ 9; 10; 11; 12; 13; 32; 160; 5760; 8192; 8193; 8194; 8195;
+      8196; 8197; 8198; 8199; 8200; 8201; 8202; 8232; 8233; 8239;
+      8287; 12288; 65279 ]
+  in
+  for unit = 0 to 0xffff do
+    let term = trim (value [ unit ]) in
+    let expected = literal (if List.mem unit spaces then [] else [ unit ]) in
+    Alcotest.(check bool) "all 65536 units agree with the independent table"
+      true (Literal.equal expected (eval term));
+    Alcotest.(check bool) "literal reduction preserves exact trim" true
+      (Expr.equal (Reduction.reduce_lexpr term) (Expr.Lit expected))
+  done;
+  List.iter
+    (fun (input, expected) ->
+      Alcotest.(check bool) "empty, interior and surrogate boundaries" true
+        (Literal.equal (eval (trim (value input))) (literal expected)))
+    [ ([], []); ([ 0xa0; 0xfeff ], []);
+      ([ 0xa0; 65; 32; 66; 0xfeff ], [ 65; 32; 66 ]);
+      ([ 32; 0xd800; 0xdc00; 32 ], [ 0xd800; 0xdc00 ]);
+      ([ 0xfeff; 0xd800; 32; 0xdfff; 0xa0 ], [ 0xd800; 32; 0xdfff ]);
+      ([ 0x200b; 0x180e ], [ 0x200b; 0x180e ]) ];
+  List.iter
+    (fun operand ->
+      Alcotest.(check bool) "non-UTF16 trim is rejected before erasure" true
+        (try ignore (Reduction.reduce_lexpr (trim operand)); false
+         with Reduction.ReductionException _ -> true))
+    [ Expr.num 0.; Expr.string "bytes"; Expr.EList [] ];
+  List.iter
+    (fun operand ->
+      let term = trim operand in
+      Alcotest.(check bool) "trim expression round trips" true
+        (match Parser.parse_expression
+           (Lexing.from_string (Fmt.str "%a" Expr.pp term)) with
+         | Ok parsed -> Expr.equal parsed term
+         | Error _ -> false))
+    [ a; value []; value [ 0xd800; 0xfeff ] ]
+
+let trim_native_models () =
+  let trim s = Expr.UnOp (Utf16Trim, s) in
+  (* The argument remains symbolic when submitted to native SMT. Concrete
+     reduction alone cannot discharge these complete-query controls. *)
+  List.iter
+    (fun (input, expected) ->
+      check "symbolic trim has exact concrete outcome" false
+        [ eq a (value input); not_ (eq (trim a) (value expected)) ])
+    [ ([], []); ([ 0xa0; 0xfeff ], []);
+      ([ 0xa0; 65; 32; 66; 0xfeff ], [ 65; 32; 66 ]);
+      ([ 32; 0xd800; 0xdc00; 32 ], [ 0xd800; 0xdc00 ]);
+      ([ 0x200b; 0x180e ], [ 0x200b; 0x180e ]) ];
+  check "identity is a load-bearing wrong trim" true
+    [ eq a (value [ 0xa0; 65; 0xfeff ]); not_ (eq (trim a) a) ];
+  check "deleting interior whitespace is a load-bearing wrong trim" true
+    [ eq a (value [ 65; 32; 66 ]);
+      not_ (eq (trim a) (value [ 65; 66 ])) ]
+
+let trim_arbitrary_interior () =
+  let trim s = Expr.UnOp (Utf16Trim, s) in
+  (* No length or contents restriction on a: empty, arbitrary interior
+     whitespace, pairs and lone surrogate units are all included. *)
+  let core = cat (value [ 65 ]) (cat a (value [ 66 ])) in
+  check "all interior UTF16 units are preserved at every finite length" false
+    [ not_ (eq (trim core) core) ];
+  let wrapped = cat (value [ 0xa0; 0x2000 ])
+      (cat core (value [ 0x3000; 0xfeff ])) in
+  check "exact whitespace edges around arbitrary interior" false
+    [ not_ (eq (trim wrapped) core) ]
+
 let tests =
   [
     ("numeric code unit models", `Quick, code_unit_models);
@@ -1267,4 +2439,22 @@ let tests =
     ("typed numeric producers", `Quick, numeric_producers);
     ("concrete legacy operations", `Quick, concrete_legacy_operations);
     ("expression transport", `Quick, expression_transport);
+    ("exact Uint32 decimal literals", `Quick, uint32_formatter_literals);
+    ("symbolic Uint32 index spelling", `Quick, uint32_formatter_indices);
+    ("Uint32 formatter fallback guards", `Quick, uint32_formatter_fallback);
+    ("insertion terminal bound", `Quick, insertion_terminal_bound);
+    ("insertion complete array width", `Quick, insertion_array_width);
+    ("guarded insertion terminal reduction", `Quick, insertion_terminal_reduction);
+    ("exact Uint32 integer successor", `Quick, uint32_integer_successor);
+    ("dense canonical index scan step", `Quick, dense_index_step);
+    ("Uint32 count bounds and fallback", `Quick, uint32_count_bounds);
+    ("equal Number integer-count aliases", `Quick, integer_count_alias);
+    ("guarded UTF16 list concatenation", `Quick, utf16_list_concatenation);
+    ("checked prefix insertion splice", `Quick, checked_prefix_splice);
+    ("checked prefix boundary lookup", `Quick, checked_prefix_lookup);
+    ("checked cons insertion", `Quick, checked_cons_insertion);
+    ("guarded UTF16 list insertion", `Quick, utf16_list_insertion);
+    ("trim concrete domain and transport", `Quick, trim_concrete_domain);
+    ("trim native outcomes and countercontrols", `Quick, trim_native_models);
+    ("trim arbitrary interior", `Quick, trim_arbitrary_interior);
   ]

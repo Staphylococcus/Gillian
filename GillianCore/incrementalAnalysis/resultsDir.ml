@@ -122,6 +122,86 @@ let write_verif_results sources call_graph ~diff results =
   write_results_dir sources call_graph ~diff;
   write_json results_json Filenames.verif_results
 
+(* This opt-in observation is deliberately separate from the reusable cache. *)
+let write_closed_entry_observation ~closed_entry ~path results =
+  if closed_entry then
+    match path with
+    | None | Some "" -> ()
+    | Some path ->
+        if Filename.is_relative path then
+          invalid_arg "closed-entry observation path must be absolute";
+        let body =
+          Yojson.Safe.to_string
+            (`Assoc
+              [
+                ("format", `String "gillian-closed-entry-results-v1");
+                ("mode", `String "closed-entry");
+                ("reusable", `Bool false);
+                ("results", VerificationResults.to_yojson results);
+              ])
+          ^ "\n"
+        in
+        if String.length body > 1024 * 1024 then
+          invalid_arg "closed-entry observation exceeds 1 MiB";
+        let canonical_parent path =
+          let parent = Unix.realpath (Filename.dirname path) in
+          if (Unix.stat parent).Unix.st_kind <> Unix.S_DIR then
+            invalid_arg "closed-entry observation parent must be a directory";
+          parent
+        in
+        let basename = Filename.basename path in
+        if basename = "." || basename = ".." then
+          invalid_arg "closed-entry observation path must name a file";
+        let destination = Filename.concat (canonical_parent path) basename in
+        let cache = results_dir () in
+        let cache_exists =
+          try
+            ignore (Unix.lstat cache);
+            true
+          with Unix.Unix_error (Unix.ENOENT, _, _) -> false
+        in
+        let cache =
+          if cache_exists then (
+            let cache = Unix.realpath cache in
+            if (Unix.stat cache).Unix.st_kind <> Unix.S_DIR then
+              invalid_arg "closed-entry reusable cache must be a directory";
+            cache)
+          else Filename.concat (canonical_parent cache) (Filename.basename cache)
+        in
+        let cache_prefix = if cache = "/" then cache else cache ^ "/" in
+        if
+          String.equal destination cache
+          || String.starts_with ~prefix:cache_prefix destination
+        then
+          invalid_arg "closed-entry observation must be outside reusable cache";
+        let fd =
+          Unix.openfile destination
+            [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL; Unix.O_CLOEXEC ]
+            0o600
+        in
+        Fun.protect
+          ~finally:(fun () -> Unix.close fd)
+          (fun () ->
+            Unix.fchmod fd 0o600;
+            let identity = Unix.fstat fd in
+            if
+              identity.Unix.st_kind <> Unix.S_REG
+              || identity.Unix.st_nlink <> 1
+              || identity.Unix.st_perm <> 0o600
+            then failwith "closed-entry observation is not a fresh private file";
+            let rec write_all offset =
+              if offset < String.length body then
+                match
+                  Unix.write_substring fd body offset
+                    (String.length body - offset)
+                with
+                | 0 -> failwith "closed-entry observation write made no progress"
+                | written -> write_all (offset + written)
+                | exception Unix.Unix_error (Unix.EINTR, _, _) -> write_all offset
+            in
+            write_all 0;
+            Unix.fsync fd)
+
 let write_biabduction_results sources call_graph ~diff results =
   let results_json = BiAbductionResults.to_yojson results in
   write_results_dir sources call_graph ~diff;

@@ -206,6 +206,12 @@ val set_previous : ?force_none:bool -> Report_id.t option -> unit
 (** @canonical Gillian.Logging.Parent *)
 module Parent : sig
   val get : unit -> Report_id.t option
+
+  (** Immutable serialized content captured at creation of the exact active
+      command report for the opt-in native-query observer. Missing, failed,
+      oversized or unmatched snapshots return [None]. *)
+  val get_snapshot : unit -> (Report_id.t * string * string) option
+
   val set : Report_id.t -> unit
   val release : Report_id.t option -> unit
   val with_id : Report_id.t option -> (unit -> 'a) -> 'a

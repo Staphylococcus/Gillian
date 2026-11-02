@@ -44,7 +44,11 @@ let log lvl ?title ?severity msgf =
     log_on_all_reporters report
 
 let log_specific lvl ?title ?severity loggable type_ =
-  if Mode.should_log lvl && will_log_on_any_reporter type_ then
+  (* Opted-in commands need real parent reports even when the file reporter
+     filters full states. Default eligibility and reporter output stay exact. *)
+  let direct_command = type_ = Logging_constants.Content_type.cmd
+    && Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" <> None in
+  if Mode.should_log lvl && (will_log_on_any_reporter type_ || direct_command) then
     let report =
       Report_builder.make ?title ~content:loggable ~type_ ?severity ()
     in
@@ -80,6 +84,7 @@ let set_previous = Report_builder.set_previous
 
 module Parent = struct
   let get = Report_builder.get_parent
+  let get_snapshot = Report_builder.get_parent_snapshot
   let set = Report_builder.set_parent
   let release = Report_builder.release_parent
 

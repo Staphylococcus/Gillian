@@ -992,6 +992,18 @@ struct
           let () = Call_graph.add_proc_call call_graph caller pid in
           let args = build_args v_args params in
           let inline = ref false in
+          (if !Config.Verification.total
+              && SS.mem pid !Config.Verification.closed_initializers then (
+             if !Config.Verification.closed_entry then
+               Totality.unsupported "closed entry cannot use an initializer summary.";
+             if not (SS.mem pid prog.proved_total_procs) then
+               Totality.unsupported (pid ^ " closed initializer has not passed its proof in this run.");
+             (* Hidden loop frames own resources too. Looking only at the
+                currently exposed state would admit a fixed-name overwrite. *)
+             let empty state = Totality.heap_free_assertion prog.prog.preds
+                 (State.to_assertions state) in
+             if not (empty state && List.for_all (fun (_, frame) -> empty frame) (frame_states eval_state.iframes)) then
+               Totality.unsupported (pid ^ " initializer requires an empty owned heap, including frames.")));
           (if !Config.Verification.closed_entry then
              (* No entry result is a frameable procedure summary. All callees
                must execute, including calls back into the selected entry. *)
@@ -1028,10 +1040,10 @@ struct
                          natural integer: %a < %a"
                         pid Expr.pp rank Expr.pp entry))
           | Some _ ->
-              if not (SS.mem pid prog.proved_total_procs) then (
+              if !Config.Verification.closed_entry || not (SS.mem pid prog.proved_total_procs) then (
                 let helper =
                   match Prog.get_proc prog.prog pid with
-                  | Some p when Totality.inline_body p -> p
+                  | Some p when !Config.Verification.closed_entry || Totality.inline_body p -> p
                   | _ ->
                       Totality.unsupported
                         (pid
@@ -1665,16 +1677,40 @@ struct
 
       (* Function application *)
       let eval_apply x pid_args j state =
-        let { eval_expr; _ } = state in
+        let { eval_expr; prog; _ } = state in
+        let total = Option.is_some prog.totality in
         DL.log ~v:true (fun m -> m "Apply");
+        (* Evaluate once. The extracted scope, receiver and arguments are values;
+           re-evaluating them would change the ordinary call semantics. *)
         let v_pid_args = eval_expr pid_args in
         let v_pid_args_list = Val.to_list v_pid_args in
         match v_pid_args_list with
-        | Some v_pid_args_list ->
-            let pid = List.hd v_pid_args_list in
-            let v_args = List.tl v_pid_args_list in
+        | Some (pid :: v_args) ->
+            (if total then (
+               let target =
+                 match Val.to_literal pid with
+                 | Some (String target) -> target
+                 | Some (Utf16String target) -> Utf16.to_canonical target
+                 | _ ->
+                     Totality.unsupported
+                       "Apply target is not a resolved procedure identifier."
+               in
+               match Prog.get_proc prog.prog target with
+               | Some body when Array.length body.proc_body > 0 -> ()
+               | _ ->
+                   Totality.unsupported
+                     (target ^ " Apply target has no executable body.")));
+            (* Preserve the original values, error continuation and all common
+               same-run summary/arity/rank and full inline-body checks. *)
             eval_proc_call x pid v_args j None state
+        | Some [] ->
+            if total then
+              Totality.unsupported
+                "Apply requires a nonempty resolved argument list."
+            else raise (Failure "Apply called with an empty list.")
         | None ->
+            if total then
+              Totality.unsupported "Apply argument list is not resolved.";
             raise
               (Failure
                  (Fmt.str "Apply not called with a list: @[<h>%a@]" Val.pp

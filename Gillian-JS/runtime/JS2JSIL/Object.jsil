@@ -118,17 +118,16 @@ proc i__getAllEnumerableFieldsIter (l, props, b) {
 
 			enums := "i__getEnumerableFields" (l);
 
-			len := l-len (enums);
-			n := 0;
-	loop:	goto [n < len] head next;
+	loop:	goto [enums = {{}}] next head;
 
-	head:	hf := hasField (props, l-nth (enums, n));
+	head:	key := car enums;
+			hf := hasField (props, key);
 			goto [hf] inc test;
 	test:	goto [l = b] add bf;
-	bf:		hf := hasField (b, l-nth (enums, n));
+	bf:		hf := hasField (b, key);
 			goto [hf] inc add;
-	add:	[props, l-nth (enums, n)] := l;
-	inc:	n := n + 1;
+	add:	[props, key] := l;
+	inc:	enums := cdr enums;
 			goto loop;
 
 	next:	m := metadata(l);

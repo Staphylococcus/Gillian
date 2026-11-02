@@ -12,6 +12,8 @@ end
 
 (** @canonical Gillian.Utils.Utf16 *)
 module Utf16 = Utf16
+module Property_index = Property_index
+module Owned_prefix_lifecycle = Owned_prefix_lifecycle
 
 (** @canonical Gillian.Utils.Call_graph *)
 module Call_graph = struct

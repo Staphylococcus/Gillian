@@ -6,6 +6,136 @@ exception ReductionException of Expr.t * string
 module L = Logging
 module CStore = Store.Make (CVal.M)
 
+(* Diagnostic process flag, read once. These counters never supply proof facts. *)
+let preparation_profile_enabled =
+  Sys.getenv_opt "GILLIAN_PREPARATION_LOOKUP_PROFILE" = Some "1"
+
+type preparation_profile_counter = {
+  started : int; completed : int; hits : int; size_min : int; size_max : int;
+  samples : int; cpu_sum : float; cpu_max : float; cpu_zero : int;
+}
+
+type preparation_profile_snapshot = {
+  enabled : bool;
+  membership : preparation_profile_counter array array;
+  copies : preparation_profile_counter array;
+  counter_resets : int;
+  periodic_reports : int;
+  final_report_requested : bool;
+  report_payload_bytes : int;
+  incomplete : bool;
+}
+
+type preparation_profile_cell = {
+  mutable calls : int; mutable returns : int; mutable successes : int;
+  mutable smallest : int; mutable largest : int; mutable timed : int;
+  mutable cpu : float; mutable maximum_cpu : float; mutable zeros : int;
+}
+
+let preparation_profile_cell () =
+  { calls = 0; returns = 0; successes = 0; smallest = max_int; largest = 0;
+    timed = 0; cpu = 0.; maximum_cpu = 0.; zeros = 0 }
+
+(* Backends: scan, closed-index. Sites: And not-left/not-right/left/right,
+   Or left/right/not-left/not-right. Copies: input, quantifier, quantifier-input. *)
+let preparation_profile_membership =
+  Array.init 2 (fun _ -> Array.init 8 (fun _ -> preparation_profile_cell ()))
+let preparation_profile_copies = Array.init 3 (fun _ -> preparation_profile_cell ())
+let preparation_profile_resets = ref 0
+let preparation_profile_reports = ref 0
+let preparation_profile_final = ref false
+let preparation_profile_bytes = ref 0
+let preparation_profile_last_report = ref None
+let preparation_profile_incomplete = ref false
+
+let preparation_profile_increment value =
+  if value = max_int then (preparation_profile_incomplete := true; value)
+  else value + 1
+
+let preparation_profile_reset () =
+  let clear cell =
+    cell.calls <- 0; cell.returns <- 0; cell.successes <- 0;
+    cell.smallest <- max_int; cell.largest <- 0; cell.timed <- 0;
+    cell.cpu <- 0.; cell.maximum_cpu <- 0.; cell.zeros <- 0 in
+  Array.iter (Array.iter clear) preparation_profile_membership;
+  Array.iter clear preparation_profile_copies;
+  preparation_profile_resets := preparation_profile_increment !preparation_profile_resets
+
+let preparation_profile_snapshot () =
+  let copy cell : preparation_profile_counter =
+    { started = cell.calls; completed = cell.returns; hits = cell.successes;
+      size_min = (if cell.calls = 0 then 0 else cell.smallest);
+      size_max = cell.largest; samples = cell.timed; cpu_sum = cell.cpu;
+      cpu_max = cell.maximum_cpu; cpu_zero = cell.zeros } in
+  { enabled = preparation_profile_enabled;
+    membership = Array.map (Array.map copy) preparation_profile_membership;
+    copies = Array.map copy preparation_profile_copies;
+    counter_resets = !preparation_profile_resets;
+    periodic_reports = !preparation_profile_reports;
+    final_report_requested = !preparation_profile_final;
+    report_payload_bytes = !preparation_profile_bytes;
+    incomplete = !preparation_profile_incomplete }
+
+let preparation_profile_observe cell size f =
+  cell.calls <- preparation_profile_increment cell.calls;
+  cell.smallest <- min cell.smallest size; cell.largest <- max cell.largest size;
+  let sampled = cell.calls = 1 || cell.calls mod 256 = 0 in
+  let cpu = if sampled then Sys.time () else 0. in
+  let result = f () in
+  cell.returns <- preparation_profile_increment cell.returns;
+  if sampled then (
+    let elapsed = Sys.time () -. cpu in
+    if elapsed < 0. || not (Float.is_finite elapsed) then
+      preparation_profile_incomplete := true
+    else (
+      cell.timed <- preparation_profile_increment cell.timed;
+      cell.cpu <- cell.cpu +. elapsed;
+      cell.maximum_cpu <- max cell.maximum_cpu elapsed;
+      if elapsed = 0. then cell.zeros <- preparation_profile_increment cell.zeros));
+  result
+
+let preparation_profile_copy category gamma =
+  if not preparation_profile_enabled then Type_env.copy gamma
+  else preparation_profile_observe preparation_profile_copies.(category)
+      (Hashtbl.length (Type_env.as_hashtbl gamma)) (fun () -> Type_env.copy gamma)
+
+let preparation_profile_dump ?(final = false) () =
+  if preparation_profile_enabled then (
+    let now = Unix.gettimeofday () in
+    if (final && not !preparation_profile_final)
+       || ((not final) && !preparation_profile_reports < 40
+           && match !preparation_profile_last_report with
+              | None -> true | Some last -> now -. last >= 5.) then (
+      if final then preparation_profile_final := true
+      else preparation_profile_reports := !preparation_profile_reports + 1;
+      preparation_profile_last_report := Some now;
+      let snapshot = preparation_profile_snapshot () in
+      let row (c : preparation_profile_counter) = `Assoc
+        ["started",`Int c.started; "completed",`Int c.completed; "hits",`Int c.hits;
+         "size_min",`Int c.size_min; "size_max",`Int c.size_max;
+         "samples",`Int c.samples; "cpu_sum",`Float c.cpu_sum;
+         "cpu_max",`Float c.cpu_max; "cpu_zero",`Int c.cpu_zero] in
+      let rows cells = `List (Array.to_list (Array.map row cells)) in
+      let payload = Yojson.Safe.to_string (`Assoc
+        ["final",`Bool final; "incomplete",`Bool snapshot.incomplete;
+         "counter_resets",`Int snapshot.counter_resets;
+         "periodic_reports",`Int snapshot.periodic_reports;
+         "prior_payload_bytes",`Int snapshot.report_payload_bytes;
+         "scan",rows snapshot.membership.(0);
+         "closed_index",rows snapshot.membership.(1); "copies",rows snapshot.copies]) in
+      let prefix = "PREPARATION_LOOKUP_PROFILE " in
+      let bytes payload = String.length prefix + String.length payload + 1 in
+      let payload =
+        if bytes payload <= 8192 && !preparation_profile_bytes + bytes payload <= 524288
+        then payload
+        else (
+          preparation_profile_incomplete := true;
+          "{\"incomplete\":true,\"reason\":\"report_bound\"}") in
+      if !preparation_profile_bytes + bytes payload <= 524288 then (
+        preparation_profile_bytes := !preparation_profile_bytes + bytes payload;
+        L.normal (fun m -> m "%s%s" prefix payload))
+      else preparation_profile_incomplete := true))
+
 let _256 = Z.of_int 256
 let _65535 = Z.of_int 65535
 
@@ -14,35 +144,34 @@ let normalise_cat (f : Expr.t -> Expr.t) (les : Expr.t list) : Expr.t =
       fmt "inside normalise cat: %a" Expr.pp (NOp (LstCat, les))); *)
   (* Recursively process each catted list and destroy inner LstCats *)
   let nles =
-    List.concat_map
-      (fun x ->
+    List.fold_left
+      (fun rev x ->
         let fx = f x in
         match fx with
-        | NOp (LstCat, les) -> les
-        | _ -> [ fx ])
-      les
+        | NOp (LstCat, les) -> List.rev_append les rev
+        | _ -> fx :: rev)
+      [] les
+    |> List.rev
   in
   (* L.verbose (fun fmt -> fmt "nles, v1: %a" Expr.pp (NOp (LstCat, nles))); *)
   (* Bring lists of literals together, part 1 *)
-  let lsts, nles =
+  let flush lsts rev =
+    match lsts with [] -> rev | _ -> Expr.EList (List.rev lsts) :: rev
+  in
+  let lsts, rev =
     List.fold_left
-      (fun (lsts, ac) nle ->
+      (fun (lsts, rev) nle ->
         match (nle : Expr.t) with
-        | Lit (LList lst) -> (lsts @ List.map (fun x -> Expr.Lit x) lst, ac)
-        | EList lst -> (lsts @ lst, ac)
-        | _ -> ([], ac @ [ Expr.EList lsts ] @ [ nle ]))
+        | Lit (LList lst) ->
+            (List.fold_left (fun rev lit -> Expr.Lit lit :: rev) lsts lst, rev)
+        | EList lst -> (List.rev_append lst lsts, rev)
+        | _ -> ([], nle :: flush lsts rev))
       ([], []) nles
   in
   (* Bring lists of literals together, part 2 *)
-  let nles = nles @ [ Expr.EList lsts ] in
-  (* Filter out empty lists *)
-  let nles =
-    List.filter
-      (function
-        | Expr.Lit (LList []) | EList [] -> false
-        | _ -> true)
-      nles
-  in
+  (* Empty literal runs are omitted when flushed. Reversed accumulators avoid
+     repeatedly copying the growing literal and completed-segment prefixes. *)
+  let nles = List.rev (flush lsts rev) in
   let result : Expr.t =
     match nles with
     | [] -> EList []
@@ -69,20 +198,32 @@ let rec normalise_list_expressions ?(reduce = Fun.id) (le : Expr.t) : Expr.t =
     (* Literals, variables, alocs *)
     | Lit _ | LVar _ | ALoc _ | PVar _ -> le
     (* Binary Operators **)
-    | NOp (LstCat, les) -> normalise_cat f les
+    | NOp (LstCat, les) ->
+        (* Only this structural pass may skip syntactic Cat wrappers: they
+           perform no reduction callback. The contextual reducer's separate
+           normalise_cat call must still visit every original operand. *)
+        let rec flatten rev = function
+          | [] -> List.rev rev
+          | [] :: pending -> flatten rev pending
+          | (Expr.NOp (LstCat, children) :: rest) :: pending ->
+              flatten rev (children :: rest :: pending)
+          | (leaf :: rest) :: pending ->
+              flatten (leaf :: rev) (rest :: pending)
+        in
+        normalise_cat f (flatten [] [ les ])
     | BinOp (le, LstNth, n) -> (
         match (f le, f n) with
         | EList lst, Lit (Int n) -> (
+            if Z.sign n < 0 || Z.geq n (Z.of_int (List.length lst)) then
+              raise (exn "Invalid List Expression");
             match List.nth_opt lst (Z.to_int n) with
             | Some k -> k
             | None -> raise (exn "Invalid List Expression"))
         | NOp (LstCat, EList lst :: tl), Lit (Int n) -> (
-            let n = Z.to_int n in
-            match List_utils.nth_or_size lst n with
-            | Left k -> (* The element is in the first list *) k
-            | Right sz ->
-                (* The element isn't in the first list, so we cut that part, and we got the size *)
-                BinOp (NOp (LstCat, tl), LstNth, Expr.int (n - sz)))
+            if Z.sign n < 0 then raise (exn "Invalid List Expression");
+            let size = Z.of_int (List.length lst) in
+            if Z.lt n size then List.nth lst (Z.to_int n)
+            else BinOp (NOp (LstCat, tl), LstNth, Lit (Int (Z.sub n size))))
         | NOp (LstCat, LstSub (_lst, _start, len) :: tl), idx
           when Expr.equal len idx -> Expr.list_nth (NOp (LstCat, tl)) 0
         | _, Lit (Num _) -> raise (exn "LstNth with float")
@@ -172,6 +313,25 @@ let rec normalise_list_expressions ?(reduce = Fun.id) (le : Expr.t) : Expr.t =
 *)
 
 let resolve_list (le : Expr.t) (pfs : Expr.t list) : Expr.t =
+  (* ValueEqual fixes the exact finite-list components, without coercing
+     Number equality (NaN and signed zeros included). Only direct acyclic
+     identities are used; unknown lists and variable alias chains stay open. *)
+  let value_list variable =
+    let acyclic list =
+      match variable with
+      | Expr.LVar x -> not (SS.mem x (Expr.lvars list))
+      | Expr.PVar x -> not (SS.mem x (Expr.pvars list))
+      | _ -> false
+    in
+    List.find_map
+      (function
+        | Expr.BinOp (e, ValueEqual, (Expr.EList _ as list))
+          when Expr.equal e variable && acyclic list -> Some list
+        | Expr.BinOp ((Expr.EList _ as list), ValueEqual, e)
+          when Expr.equal e variable && acyclic list -> Some list
+        | _ -> None)
+      pfs
+  in
   let rec search x pfs =
     match (pfs : Expr.t list) with
     | [] -> None
@@ -195,10 +355,13 @@ let resolve_list (le : Expr.t) (pfs : Expr.t list) : Expr.t =
   in
 
   match normalise_list_expressions le with
-  | LVar x -> (
-      match search x pfs with
-      | Some le -> le
-      | None -> LVar x)
+  | (LVar _ | PVar _) as variable -> (
+      match value_list variable with
+      | Some list -> list
+      | None -> (
+          match variable with
+          | LVar x -> Option.value (search x pfs) ~default:variable
+          | _ -> variable))
   | le -> le
 
 (**********************************)
@@ -280,25 +443,25 @@ let rec get_length_of_list (lst : Expr.t) : int option =
   match lst with
   | Lit (LList l) -> Some (List.length l)
   | EList l -> Some (List.length l)
-  | LstSub (_, _, Lit (Int len)) -> Some (Z.to_int len)
+  | LstSub (_, _, Lit (Int len)) when Z.fits_int len -> Some (Z.to_int len)
   | NOp (LstCat, les) -> (
       match List_utils.flaky_map f les with
       | None -> None
       | Some lens ->
-          let lens = List.fold_left Int.add 0 lens in
-          Some lens)
+          let length = List.fold_left (fun n size -> Z.add n (Z.of_int size)) Z.zero lens in
+          if Z.fits_int length then Some (Z.to_int length) else None)
   | _ -> None
 
 (* Finding the nth element of a list *)
-let rec get_nth_of_list (pfs : PFS.t) (lst : Expr.t) (idx : int) : Expr.t option
+let rec get_nth_of_list (pfs : PFS.t) (lst : Expr.t) (idx : Z.t) : Expr.t option
     =
   let f = get_nth_of_list pfs in
 
   (* If we can compute the length of the list, then the index needs to be compatible *)
   (get_length_of_list lst
   |> Option.iter @@ fun len ->
-     if len <= idx then
-       let err_msg = Fmt.str "get_nth_of_list: index %d out of bounds." idx in
+     if Z.sign idx < 0 || Z.leq (Z.of_int len) idx then
+       let err_msg = Fmt.str "get_nth_of_list: index %s out of bounds." (Z.to_string idx) in
        raise (ReductionException (lst, err_msg)));
 
   match lst with
@@ -308,34 +471,35 @@ let rec get_nth_of_list (pfs : PFS.t) (lst : Expr.t) (idx : int) : Expr.t option
       if Expr.equal lst lst' then None else f lst' idx
   (* Base lists of literals and logical expressions *)
   | Lit (LList l) ->
-      assert (idx < List.length l);
-      Some (Lit (List.nth l idx))
+      Some (Lit (List.nth l (Z.to_int idx)))
   | EList l ->
-      assert (idx < List.length l);
-      Some (List.nth l idx)
+      Some (List.nth l (Z.to_int idx))
   | LstSub (lst, Lit (Int start), Lit (Int _)) -> (
       match lst with
-      | EList l -> (
-          match List.nth_opt l (Z.to_int start + idx) with
-          | Some _ as e -> e
-          | None -> raise (ReductionException (lst, "non-existent list-nth")))
-      | Lit (LList l) -> (
-          match List.nth_opt l (Z.to_int start + idx) with
-          | Some e -> Some (Lit e)
-          | None -> raise (ReductionException (lst, "non-existent list-nth")))
+      | EList _ | Lit (LList _) -> f lst (Z.add start idx)
       | LVar x ->
           let eqs = find_equalities pfs (LVar x) in
-          List.find_map (fun e -> f e (Z.to_int start + idx)) eqs
+          List.find_map (fun e -> f e (Z.add start idx)) eqs
       | _ -> None)
   | LstSub _ -> None
   | NOp (LstCat, lel :: ler) ->
       Option.bind (get_length_of_list lel) @@ fun llen ->
       let lst, idx =
-        if idx < llen then (lel, idx) else (NOp (LstCat, ler), idx - llen)
+        if Z.lt idx (Z.of_int llen) then (lel, idx)
+        else (NOp (LstCat, ler), Z.sub idx (Z.of_int llen))
       in
       f lst idx
   | Expr.BinOp (x, LstRepeat, _) -> Some x
-  | _ -> None
+  | _ ->
+      (* A supplied value-identity with a finite list fixes each component,
+         including signed zeros. Do not infer a list or its elements from
+         ordinary scalar equality or an unknown output witness. *)
+      List.find_map (function
+        | Expr.BinOp (e, ValueEqual, EList xs) when Expr.equal e lst ->
+            f (Expr.EList xs) idx
+        | Expr.BinOp (EList xs, ValueEqual, e) when Expr.equal e lst ->
+            f (Expr.EList xs) idx
+        | _ -> None) (PFS.to_list pfs)
 
 (* Finding the nth element of a list *)
 let get_head_and_tail_of_list ~pfs lst =
@@ -820,19 +984,541 @@ let reduce_length_index_comparison gamma left op right =
     Some (Expr.UnOp (Not, BinOp (right, FLessThanEqual, left)))
   else None
 
+(* insertion_position either returns the current prefix length or advances by
+   one into the remaining suffix. Induction on that suffix gives 0 <= p <= len.
+   Restrict this shortcut to typed atomic inputs: it must not erase a partial
+   computation embedded in the list/key, or infer an input's missing type. *)
+let reduce_key_insert_bound pfs gamma left op right =
+  let typed_variable e t =
+    match e with
+    | Expr.LVar x -> Type_env.get gamma x = Some t
+    | _ -> false
+  in
+  let typed_key = function
+    | Expr.Lit (Utf16String _) -> true
+    | e -> typed_variable e Type.Utf16Type
+  in
+  let position = function
+    | Expr.BinOp (keys, KeyInsertIndex, key)
+      when typed_variable keys Type.ListType && typed_key key -> Some keys
+    | _ -> None
+  in
+  (* A canonical array index must stop before a known final ordinary length
+     key. Keep every premise explicit; missing type, spelling, range or final
+     key information must retain the general (possibly append) position. *)
+  let stops_before_length keys key =
+    let len = Expr.UnOp (LstLen, keys) in
+    let nonempty = PFS.mem pfs (Expr.BinOp (Expr.one_i, ILessThanEqual, len)) in
+    let is_last e =
+      Expr.equal e (Expr.BinOp (keys, LstNth,
+        BinOp (len, IMinus, Expr.one_i))) ||
+      Expr.equal e (Expr.BinOp (keys, LstNth,
+        BinOp (Expr.int (-1), IPlus, len))) in
+    let length_key = Expr.Lit (Utf16String (Utf16.of_canonical "length")) in
+    let last_known = PFS.fold_left (fun found (a : Expr.t) -> found ||
+      match a with
+      | BinOp (a, (Equal | ValueEqual), b) ->
+          (is_last a && Expr.equal b length_key) ||
+          (is_last b && Expr.equal a length_key)
+      | _ -> false) false pfs in
+    let canonical_number n =
+      let typed = typed_variable n Type.NumberType ||
+        (match n with
+        | Expr.UnOp (Utf16ToNumber, k) -> typed_key k
+        | _ -> false) in
+      typed && PFS.mem pfs (Expr.UnOp (IsInt, n)) &&
+      PFS.mem pfs (Expr.BinOp (Expr.num 0., FLessThanEqual, n)) &&
+      PFS.mem pfs (Expr.BinOp (n, FLessThan, Expr.num 4294967295.)) in
+    let canonical = PFS.fold_left (fun found (a : Expr.t) -> found ||
+      match a with
+      | BinOp (k, Equal, UnOp (NumberToUtf16, n))
+      | BinOp (UnOp (NumberToUtf16, n), Equal, k) ->
+          Expr.equal k key && canonical_number n
+      | _ -> false) false pfs in
+    nonempty && last_known && canonical in
+  match op, left, right with
+  | BinOp.ILessThanEqual, Expr.Lit (Int n), p when Z.equal n Z.zero ->
+      Option.map (fun _ -> Expr.true_) (position p)
+  | ILessThanEqual, p, Expr.UnOp (LstLen, keys) ->
+      Option.bind (position p) (fun same ->
+        if Expr.equal same keys then Some Expr.true_ else None)
+  | ILessThan, p, Expr.Lit (Int n) when Z.equal n Z.zero ->
+      Option.map (fun _ -> Expr.false_) (position p)
+  | ILessThan, Expr.UnOp (LstLen, keys), p ->
+      Option.bind (position p) (fun same ->
+        if Expr.equal same keys then Some Expr.false_ else None)
+  | ILessThan, (Expr.BinOp (_, KeyInsertIndex, key) as p),
+      Expr.UnOp (LstLen, keys) ->
+      Option.bind (position p) (fun same ->
+        if Expr.equal same keys && stops_before_length keys key
+        then Some Expr.true_ else None)
+  | _ -> None
+
+(* Unroll one known canonical index at the front of the structural insertion
+   scan. This is the defining recurrence of insertion_position: an existing
+   index <= the inserted index advances by one; an ordinary key stops it.
+   Inspect original input types before recursive reduction can infer them.
+   Only typed atoms, literals and total numeric formatting/addition qualify,
+   so no failing slice/index or
+   other partial computation can be erased by the ordinary-key stop case. *)
+let reduce_dense_key_step pfs gamma keys key =
+  let typed e t = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some t
+    | Lit l -> Literal.type_of l = t
+    | _ -> false in
+  let known e = PFS.mem pfs e in
+  let rec number e = typed e Type.NumberType || match e with
+    | Expr.BinOp (left, FPlus, right) -> number left && number right
+    | _ -> false in
+  let aliases n = n :: get_equal_expressions pfs n in
+  let nonnegative n = List.exists (fun a -> number a &&
+      known (Expr.BinOp (Expr.num 0., FLessThanEqual, a))) (aliases n) in
+  let integer n = known (Expr.UnOp (IsInt, n)) in
+  let ordered a b = Expr.equal a b ||
+    known (Expr.BinOp (a, FLessThan, b)) ||
+    known (Expr.BinOp (a, FLessThanEqual, b)) in
+  let upper n = known (Expr.BinOp (n, FLessThan, Expr.num 4294967295.)) in
+  let rec safe_list = function
+    | Expr.EList xs -> List.for_all (function
+        | Expr.Lit _ -> true
+        | Expr.UnOp (NumberToUtf16, n) -> number n
+        | _ -> false) xs
+    | NOp (LstCat, xs) -> List.for_all safe_list xs
+    | e -> typed e Type.ListType in
+  let parts = match keys with
+    | Expr.EList (head :: rest) -> Some (head, [Expr.EList rest])
+    | NOp (LstCat, Expr.EList (head :: rest) :: suffix) ->
+        Some (head, (if rest = [] then suffix else Expr.EList rest :: suffix))
+    | _ -> None in
+  match key, parts with
+  | Expr.UnOp (NumberToUtf16, target), Some (head, suffix)
+    when typed target Type.NumberType && integer target && upper target &&
+         List.for_all safe_list suffix ->
+      let rest = match suffix with
+        | [] -> Expr.EList [] | [x] -> x | xs -> Expr.NOp (LstCat, xs) in
+      (match head with
+      | Expr.UnOp (NumberToUtf16, n)
+        when number n && integer n && nonnegative n &&
+             ordered n target ->
+          Some (Expr.BinOp (Expr.one_i, IPlus,
+            BinOp (rest, KeyInsertIndex, key)))
+      | Lit (Utf16String s)
+        when Utf16.equal s (Utf16.of_canonical "length") && nonnegative target ->
+          Some Expr.zero_i
+      | _ -> None)
+  | _ -> None
+
 (* TODO: can this whole mess be removed since we did sth similar with formulae? *)
 
 (** Reduction of logical expressions
     - gamma is used for:
     - pfs are used for: Car, Cdr, SetDiff *)
+(* Numeric equality can differ only in the sign of zero. Integer truncation
+   identifies those zeros, and otherwise equal Number atoms convert identically.
+   Explicit integrality proves both conversions finite before any later identity
+   can collapse them; missing domain/type facts retain the original expression.
+   Canonicalize only originally typed atoms: keep the conversion itself so its
+   finite-domain obligation survives, and never substitute a partial operand. *)
+let reduce_integer_count_alias pfs gamma operand =
+  let typed = function
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some Type.NumberType
+    | _ -> false in
+  if not !Config.Verification.total || not (typed operand)
+     || not (PFS.mem pfs (Expr.UnOp (IsInt, operand))) then None
+  else
+    let alias = List.fold_left (fun chosen e ->
+      if typed e && PFS.mem pfs (Expr.UnOp (IsInt, e))
+         && Expr.compare e chosen < 0 then e else chosen)
+      operand (get_equal_expressions pfs operand) in
+    if Expr.equal alias operand then None
+    else Some (Expr.UnOp (NumToInt, alias))
+
+(* Concatenation is entirely evaluated before the element-type predicate.
+   Split that predicate only when every original operand is a total list/value;
+   otherwise a false prefix could conceal a failing later slice or index.
+   Consult the frozen input types, never types inferred while reducing it. *)
+let total_list_operands gamma parts =
+  let typed e = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x
+    | Lit (Constant _) -> None
+    | Lit l -> Some (Literal.type_of l)
+    | _ -> None in
+  let rec number e = typed e = Some Type.NumberType || match e with
+    | Expr.BinOp (a, FPlus, b) -> number a && number b
+    | _ -> false in
+  let rec value e = Option.is_some (typed e) || match e with
+    | Expr.EList xs -> List.for_all value xs
+    | UnOp (NumberToUtf16, n) -> number n
+    | NOp (LstCat, xs) -> List.for_all list xs
+    | _ -> false
+  and list e = typed e = Some Type.ListType || match e with
+    | Expr.EList xs -> List.for_all value xs
+    | NOp (LstCat, xs) -> List.for_all list xs
+    | _ -> false in
+  List.for_all list parts
+
+(* Replace only exact whole integer casts at slice bounds. Guards inspect the
+   original operands and frozen input types, before any recursive reduction.
+   Every replacement is licensed by a retained integer equality; no PC fact is
+   removed, no FP expression is rewritten, and each replacement removes a cast. *)
+let normalise_list_slice_bound_casts pfs input_gamma list start count =
+  let typed typ = function
+    | Expr.LVar x | PVar x -> Type_env.get input_gamma x = Some typ
+    | _ -> false in
+  let rec number = function
+    | Expr.Lit (Num n) -> Float.is_finite n
+    | BinOp (a, FPlus, b) -> number a && number b
+    | e -> typed Type.NumberType e in
+  let finite_cast_operand operand =
+    (match operand with
+    | Expr.LVar _ | PVar _ -> typed Type.NumberType operand
+    | BinOp (_, FPlus, _) -> number operand
+    | _ -> false)
+    && PFS.mem pfs (Expr.UnOp (IsInt, operand)) in
+  let add a b = match a, b with
+    | Some a, Some b -> Some (a + b)
+    | _ -> None in
+  let rec casts ~original (e : Expr.t) = match e with
+    | Lit (Int _) -> Some 0
+    | LVar _ | PVar _ when typed Type.IntType e -> Some 0
+    | UnOp (LstLen, xs) when total_list_operands input_gamma [xs] -> Some 0
+    | BinOp (a, (IPlus | IMinus), b) ->
+        add (casts ~original a) (casts ~original b)
+    (* The existing exact integer normal form uses literal-scaled terms. This
+       source-only case admits those total operands, never coefficient solving. *)
+    | BinOp (Lit (Int _), ITimes, e)
+    | BinOp (e, ITimes, Lit (Int _)) when original -> casts ~original e
+    | UnOp (NumToInt, operand)
+      when original && finite_cast_operand operand -> Some 1
+    | _ -> None in
+  if not !Config.Verification.total || !Config.under_approximation
+     || not (total_list_operands input_gamma [list]) then (start, count)
+  else match casts ~original:true start, casts ~original:true count with
+  | Some 0, Some 0 -> (start, count)
+  | Some start_casts, Some count_casts ->
+      let bridge left right = match left with
+        | Expr.UnOp (NumToInt, operand)
+          when finite_cast_operand operand && casts ~original:false right = Some 0 ->
+            Some (left, right)
+        | _ -> None in
+      let aliases = PFS.fold_left (fun found fact -> match fact with
+        | Expr.BinOp (left, Equal, right) ->
+            (match bridge left right with
+            | Some alias -> alias :: found
+            | None -> (match bridge right left with
+                | Some alias -> alias :: found | None -> found))
+        | _ -> found) [] pfs in
+      let aliases = List.sort_uniq (fun (a,b) (c,d) ->
+        let order = Expr.compare a c in
+        if order = 0 then Expr.compare b d else order) aliases in
+      let rec replace (e : Expr.t) =
+        match List.find_map (fun (source,target) ->
+          if Expr.equal e source then Some target else None) aliases with
+        | Some target -> target
+        | None -> (match e with
+          | BinOp (a, ((IPlus | IMinus) as op), b) ->
+              Expr.BinOp (replace a, op, replace b)
+          | BinOp ((Lit (Int _) as coefficient), ITimes, e) ->
+              Expr.BinOp (coefficient, ITimes, replace e)
+          | BinOp (e, ITimes, (Lit (Int _) as coefficient)) ->
+              Expr.BinOp (replace e, ITimes, coefficient)
+          | _ -> e) in
+      let new_start = replace start and new_count = replace count in
+      (match casts ~original:true new_start, casts ~original:true new_count with
+      | Some a, Some b when a + b < start_casts + count_casts -> (new_start, new_count)
+      | _ -> (start, count))
+  | _ -> (start, count)
+
+let reduce_utf16_list_cat gamma parts =
+  if !Config.Verification.total && total_list_operands gamma parts then
+    Some (Expr.conjunct
+      (List.map (fun e -> Expr.UnOp (LstAllUtf16, e)) parts))
+  else None
+
+(* Inserting a UTF16 value at a defined, in-range integer position preserves
+   exactly the original list's element-type predicate. Do not erase a partial
+   operand, an untyped input, or an insertion with unproved bounds. *)
+let reduce_utf16_list_insert pfs gamma xs position value =
+  let typed e t = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some t
+    | Lit (Constant _) -> false
+    | Lit l -> Literal.type_of l = t
+    | _ -> false in
+  let key e = typed e Type.Utf16Type in
+  let rec keys e = match e with
+    | Expr.EList es -> List.for_all key es
+    | NOp (LstCat,es) -> List.for_all keys es
+    | _ -> typed e Type.ListType && PFS.mem pfs (Expr.UnOp (LstAllUtf16,e)) in
+  let key_position = match position with
+    | Expr.BinOp (ks,KeyInsertIndex,k) -> keys ks && key k
+    | _ -> false in
+  let rec integer e = typed e Type.IntType || match e with
+    | Expr.UnOp (LstLen,lst) -> total_list_operands gamma [lst]
+    | BinOp (a,(IPlus | IMinus | ITimes),b) -> integer a && integer b
+    | _ -> false in
+  let len = Expr.UnOp (LstLen,xs) in
+  let lower = PFS.mem pfs (Expr.BinOp (Expr.zero_i,ILessThanEqual,position)) ||
+    PFS.mem pfs (Expr.BinOp (Expr.zero_i,ILessThan,position)) in
+  let upper = PFS.mem pfs (Expr.BinOp (position,ILessThanEqual,len)) in
+  let intrinsic_bound = Expr.equal position Expr.zero_i ||
+    Expr.equal position len || (key_position && match position with
+      | Expr.BinOp (ks,KeyInsertIndex,_) -> Expr.equal ks xs
+      | _ -> false) in
+  if !Config.Verification.total && total_list_operands gamma [xs] && key value &&
+     (integer position || key_position) && (intrinsic_bound || lower && upper)
+  then Some (Expr.UnOp (LstAllUtf16,xs)) else None
+
+(* Inserting at a checked prefix length places the value before its explicit
+   tail. Equal length witnesses may come from the separate key/descriptor
+   sequences; they do not identify those sequences or create heap ownership.
+   Every discarded position/operand must be originally typed and total. *)
+let reduce_insert_before_tail pfs gamma xs position value =
+  let typed e t = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some t
+    | Lit (Constant _) -> false
+    | Lit l -> Literal.type_of l = t
+    | _ -> false in
+  let key e = typed e Type.Utf16Type || match e with
+    | Expr.UnOp (NumberToUtf16,n) -> typed n Type.NumberType
+    | _ -> false in
+  let rec keys e = match e with
+    | Expr.EList es -> List.for_all key es
+    | NOp (LstCat,es) -> List.for_all keys es
+    | _ -> typed e Type.ListType && PFS.mem pfs (Expr.UnOp (LstAllUtf16,e)) in
+  let count = function
+    | Expr.UnOp (LstLen,e) -> typed e Type.ListType
+    | _ -> false in
+  let total_position = typed position Type.IntType || count position ||
+    match position with
+    | Expr.BinOp (ks,KeyInsertIndex,k) -> keys ks && key k
+    | _ -> false in
+  match xs with
+  | Expr.NOp (LstCat,[prefix;EList tail])
+    when !Config.Verification.total && typed prefix Type.ListType &&
+      total_position && total_list_operands gamma [xs;Expr.EList [value]] ->
+      let len=Expr.UnOp (LstLen,prefix) in
+      let lengths=List.filter count (len :: get_equal_expressions pfs len) in
+      let positions=position :: get_equal_expressions pfs position in
+      if List.exists (fun p -> List.exists (Expr.equal p) lengths) positions then
+        Some (Expr.NOp (LstCat,[prefix;Expr.EList (value::tail)]))
+      else None
+  | _ -> None
+
+(* Moving an in-range insertion past a known singleton prefix is exact for
+   unbounded mathematical lists. Consult only original operand types and facts:
+   the new tail index must be nonnegative and no greater than its length.
+   Keep invalid/untyped operands and missing bounds in the ordinary path. *)
+let reduce_insert_after_head pfs gamma xs position value =
+  let typed e t = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some t
+    | Lit (Constant _) -> false
+    | Lit l -> Literal.type_of l = t
+    | _ -> false in
+  let fact e = PFS.mem pfs e in
+  let zero = Expr.zero_i in
+  let positive = fact (Expr.BinOp (zero,ILessThan,position)) ||
+    fact (Expr.BinOp (Expr.one_i,ILessThanEqual,position)) ||
+    (fact (Expr.BinOp (zero,ILessThanEqual,position)) &&
+     fact (Expr.UnOp (Not,Expr.BinOp (position,Equal,zero)))) in
+  if not !Config.Verification.total || not (typed position Type.IntType) ||
+     not (total_list_operands gamma [xs;Expr.EList [value]]) then None
+  else
+    List.find_map (function
+      | Expr.NOp (LstCat,[EList [head];tail]) as cons
+        when typed tail Type.ListType && total_list_operands gamma [cons] &&
+          positive &&
+          (fact (Expr.BinOp (position,ILessThanEqual,Expr.UnOp (LstLen,xs))) ||
+           List.exists (function
+             | Expr.UnOp (LstLen,lst) as length when typed lst Type.ListType ->
+                 fact (Expr.BinOp (position,ILessThanEqual,
+                   Expr.BinOp (Expr.one_i,IPlus,length)))
+             | _ -> false)
+             (Expr.UnOp (LstLen,tail) ::
+               get_equal_expressions pfs (Expr.UnOp (LstLen,tail)))) ->
+          Some (Expr.NOp (LstCat,[Expr.EList [head];
+            Expr.NOp (LstInsert,[tail;
+              Expr.BinOp (position,IMinus,Expr.one_i);value])]))
+      | _ -> None) (xs :: get_equal_expressions pfs xs)
+
+(* A known prefix length locates a literal tail element exactly. The count may
+   name a separate originally typed list whose length is explicitly equal;
+   this is a boundary lookup, never an equality between their contents. *)
+let reduce_prefix_boundary_nth pfs gamma xs index =
+  let typed e t = match e with
+    | Expr.LVar x | PVar x -> Type_env.get gamma x = Some t
+    | _ -> false in
+  let count = function
+    | Expr.UnOp (LstLen,e) -> typed e Type.ListType
+    | _ -> false in
+  let offset = function
+    | e when count e -> Some (e,Z.zero)
+    | Expr.BinOp (e,IPlus,Lit (Int n)) when count e -> Some (e,n)
+    | Expr.BinOp (Lit (Int n),IPlus,e) when count e -> Some (e,n)
+    | Expr.BinOp (e,IMinus,Lit (Int n)) when count e -> Some (e,Z.neg n)
+    | _ -> None in
+  match xs with
+  | Expr.NOp (LstCat,[prefix;EList tail])
+    when !Config.Verification.total && typed prefix Type.ListType &&
+      (typed index Type.IntType || Option.is_some (offset index)) &&
+      total_list_operands gamma [xs] ->
+      let len=Expr.UnOp (LstLen,prefix) in
+      let lengths=List.filter count (len :: get_equal_expressions pfs len) in
+      List.find_map (fun candidate ->
+        match offset candidate with
+        | Some (n,k) when List.exists (Expr.equal n) lengths && Z.sign k>=0 &&
+            Z.lt k (Z.of_int (List.length tail)) -> Some (List.nth tail (Z.to_int k))
+        | _ -> None) (index :: get_equal_expressions pfs index)
+  | _ -> None
+
+(* One guarded step of right(left(s)), not a nonexpansion theorem.
+   Only originally typed variable operands qualify. Facts are read-only positive
+   conjuncts; aliases are one-hop, typed, occurs-checked definitions of the exact
+   slices/lengths below. No trim-bearing premise, inference or solver is used.
+   Returning a canonical slice makes the result ineligible for another step. *)
+let reduce_trailing_utf16_trim pfs input_gamma text =
+  let typed_variable typ = function
+    | Expr.LVar name | PVar name -> Type_env.get input_gamma name = Some typ
+    | _ -> false in
+  if not !Config.Verification.total ||
+     not (typed_variable Type.Utf16Type text) then None
+  else
+    let rec conjuncts acc = function
+      | Expr.BinOp (a, And, b) -> conjuncts (conjuncts acc a) b
+      | fact -> fact :: acc in
+    let facts = PFS.fold_left conjuncts [] pfs in
+    let one_hop typ raw expression =
+      raw expression ||
+      (typed_variable typ expression &&
+       List.exists (function
+         | Expr.BinOp (a, Equal, b) ->
+             let definition =
+               if Expr.equal a expression then Some b
+               else if Expr.equal b expression then Some a
+               else None in
+             (match definition, expression with
+              | Some (Expr.LVar _ | PVar _), _ -> false
+              | Some rhs, (LVar name | PVar name) ->
+                  not (SS.mem name (Expr.lvars rhs) ||
+                       SS.mem name (Expr.pvars rhs)) && raw rhs
+              | _ -> false)
+         | _ -> false) facts) in
+    let zero = Expr.zero_i and one = Expr.one_i in
+    let len = Expr.UnOp (Utf16Len, text) in
+    let is_len = one_hop Type.IntType (Expr.equal len) in
+    let raw_count = function
+      | Expr.BinOp (n, IMinus, Lit (Int k))
+        when Z.equal k Z.one -> is_len n
+      | BinOp (Lit (Int k), IPlus, n)
+        when Z.equal k Z.minus_one -> is_len n
+      | BinOp (n, IPlus, Lit (Int k))
+        when Z.equal k Z.minus_one -> is_len n
+      | _ -> false in
+    let is_count = one_hop Type.IntType raw_count in
+    let raw_head = function
+      | Expr.NOp (Utf16Sub, [ s; a; b ]) ->
+          Expr.equal s text && Expr.equal a zero && Expr.equal b one
+      | _ -> false in
+    let is_head = one_hop Type.Utf16Type raw_head in
+    let raw_prefix = function
+      | Expr.NOp (Utf16Sub, [ s; a; n ]) ->
+          Expr.equal s text && Expr.equal a zero && is_count n
+      | _ -> false in
+    let is_prefix = one_hop Type.Utf16Type raw_prefix in
+    let raw_last = function
+      | Expr.NOp (Utf16Sub, [ s; n; b ]) ->
+          Expr.equal s text && is_count n && Expr.equal b one
+      | _ -> false in
+    let is_last = one_hop Type.Utf16Type raw_last in
+    let raw_prefix_head = function
+      | Expr.NOp (Utf16Sub, [ p; a; b ]) ->
+          is_prefix p && Expr.equal a zero && Expr.equal b one
+      | _ -> false in
+    let is_prefix_head = one_hop Type.Utf16Type raw_prefix_head in
+    let eq left right = function
+      | Expr.BinOp (a, Equal, b) ->
+          (left a && right b) || (left b && right a)
+      | _ -> false in
+    let longer_than_one = List.exists (function
+      | Expr.BinOp (Lit (Int k), ILessThan, n)
+        when Z.equal k Z.one -> is_len n
+      | BinOp (Lit (Int k), ILessThanEqual, n)
+        when Z.equal k (Z.of_int 2) -> is_len n
+      | _ -> false) facts in
+    let prefix_nonempty = List.exists (function
+      | Expr.BinOp (a, ILessThan, UnOp (Utf16Len, p)) ->
+          Expr.equal a zero && is_prefix p
+      | _ -> false) facts in
+    let same_head = List.exists (eq is_prefix_head is_head) facts in
+    let whitespace = List.map
+        (fun unit -> Expr.Lit (Literal.Utf16String
+          (Utils.Utf16.of_canonical (Utils.Utf16.of_code_units [ unit ]))))
+        Utils.Utf16.whitespace_code_units in
+    let nonwhite_head = List.for_all (fun literal ->
+        List.exists (function
+          | Expr.UnOp (Not, equality) ->
+              eq is_head (Expr.equal literal) equality
+          | _ -> false) facts) whitespace in
+    let white_literal e = List.exists (Expr.equal e) whitespace in
+    let rec white_last = function
+      | Expr.BinOp (a, Or, b) -> white_last a && white_last b
+      | equality -> eq is_last white_literal equality in
+    if longer_than_one && prefix_nonempty && same_head && nonwhite_head &&
+       List.exists white_last facts then
+      let count = Expr.BinOp (Expr.int (-1), IPlus, len) in
+      let prefix = Expr.NOp (Utf16Sub, [ text; zero; count ]) in
+      Some (Expr.UnOp (Utf16Trim, prefix))
+    else None
+
+let is_closed_boolean_guard (le : Expr.t) =
+  let closed_location = function
+    | Expr.ALoc _ | Expr.Lit (Loc _ | Null) -> true
+    | _ -> false
+  in
+  let rec all = function
+    | [] -> true
+    | Expr.Lit (Bool _) :: rest -> all rest
+    | Expr.BinOp (left, Equal, right) :: rest
+      when closed_location left && closed_location right -> all rest
+    | Expr.UnOp (Not, child) :: rest -> all (child :: rest)
+    | Expr.BinOp (left, (And | Or), right) :: rest ->
+        all (left :: right :: rest)
+    | _ -> false
+  in
+  all [ le ]
+
+(* A list-source alias is an optional rewrite, not a recursive definition.
+   Retain self-containing equalities as facts without unfolding them here. *)
+let acyclic_list_source_alias source candidate =
+  match source with
+  | Expr.LVar name -> not (SS.mem name (Expr.lvars candidate))
+  | _ -> true
+
 let rec reduce_lexpr_loop
     ?(matching = false)
     ?(reduce_lvars = false)
     ?(resolve_constants = true)
     ?(fuel = 20)
+    ?input_gamma
+    ?pfs_mem
     (pfs : PFS.t)
     (gamma : Type_env.t)
     (le : Expr.t) =
+  (* Only the guarded scan/count/typing shortcuts consult this frozen input view. Ordinary
+     reduction keeps its existing mutable gamma and inference behavior. *)
+  let input_gamma = match input_gamma with
+    | Some original -> original
+    | None -> preparation_profile_copy 0 gamma in
+  let backend, original_mem = match pfs_mem with
+    | Some mem -> 1, mem
+    | None -> 0, PFS.mem pfs in
+  let mem site expression =
+    if not preparation_profile_enabled then original_mem expression
+    else
+      let cell = preparation_profile_membership.(backend).(site) in
+      let result = preparation_profile_observe cell (PFS.length pfs)
+          (fun () -> original_mem expression) in
+      if result then cell.successes <- preparation_profile_increment cell.successes;
+      result in
   (* Resolve fixed runtime constants before any syntactic identity can erase
      them. Share their values with concrete evaluation; never sample dynamic
      constants while simplifying a proof. Recursive descent reuses this pass
@@ -857,7 +1543,7 @@ let rec reduce_lexpr_loop
     if fuel <= 0 then Fun.id
     else
       reduce_lexpr_loop ~matching ~reduce_lvars ~resolve_constants:false
-        ~fuel:(fuel - 1) pfs gamma
+        ~fuel:(fuel - 1) ~input_gamma ?pfs_mem pfs gamma
   in
 
   (* Total proofs must preserve Boolean evaluation order. Reduce the left
@@ -872,6 +1558,25 @@ let rec reduce_lexpr_loop
 
   let le =
     match le with
+    | UnOp (NumToInt, operand) ->
+        Option.value ~default:le
+          (reduce_integer_count_alias pfs input_gamma operand)
+    | UnOp (LstAllUtf16, NOp (LstCat, parts)) ->
+        Option.value ~default:le (reduce_utf16_list_cat input_gamma parts)
+    | UnOp (LstAllUtf16, NOp (LstInsert,[xs;position;value])) ->
+        Option.value ~default:le
+          (reduce_utf16_list_insert pfs input_gamma xs position value)
+    | NOp (LstInsert,[xs;position;value]) ->
+        let reduced = match reduce_insert_before_tail pfs input_gamma xs position value with
+          | Some _ as result -> result
+          | None -> reduce_insert_after_head pfs input_gamma xs position value in
+        Option.value ~default:le reduced
+    | BinOp (xs,LstNth,index) ->
+        Option.value ~default:le
+          (reduce_prefix_boundary_nth pfs input_gamma xs index)
+    | BinOp (left, ((ILessThan | ILessThanEqual) as op), right) ->
+        Option.value ~default:le
+          (reduce_key_insert_bound pfs gamma left op right)
     | BinOp (left, ((Equal | FLessThan | FLessThanEqual) as op), right) ->
         Option.value ~default:le
           (reduce_length_index_comparison gamma left op right)
@@ -986,7 +1691,7 @@ let rec reduce_lexpr_loop
         (* We create a new pfs and gamma where:
            - All shadowed variables are substituted with a fresh variable
            - The gamma has been updated with the types given in the binder *)
-        let new_gamma = Type_env.copy gamma in
+        let new_gamma = preparation_profile_copy 1 gamma in
         let new_pfs = PFS.copy pfs in
         let subst_bindings = List.map (fun (x, _) -> (x, LVar.alloc ())) bt in
         let subst =
@@ -1007,9 +1712,22 @@ let rec reduce_lexpr_loop
             | None -> Type_env.remove new_gamma x)
           bt;
         PFS.substitution subst new_pfs;
+        (* Preserve declared binder types in the shortcut's input view without
+           borrowing any type inferred while reducing the quantified body. *)
+        let new_input_gamma = preparation_profile_copy 2 input_gamma in
+        List.iter
+          (fun (x, t) ->
+            (match Type_env.get input_gamma x with
+            | Some old_type ->
+                Type_env.update new_input_gamma (List.assoc x subst_bindings) old_type
+            | None -> ());
+            match t with
+            | Some t -> Type_env.update new_input_gamma x t
+            | None -> Type_env.remove new_input_gamma x)
+          bt;
         (* We reduce using our new pfs and gamma *)
         let re =
-          reduce_lexpr_loop ~matching ~reduce_lvars new_pfs new_gamma e
+          reduce_lexpr_loop ~matching ~reduce_lvars ~input_gamma:new_input_gamma new_pfs new_gamma e
         in
         let vars = Expr.lvars re in
         let bt = List.filter (fun (b, _) -> Containers.SS.mem b vars) bt in
@@ -1106,23 +1824,28 @@ let rec reduce_lexpr_loop
            && List.length
                 (List.filter
                    (fun e ->
-                     SS.inter (Expr.lvars e) (Expr.lvars e3) != SS.empty)
+                     SS.inter (Expr.lvars e) (Expr.lvars e3) != SS.empty
+                     && acyclic_list_source_alias e1 e)
                    (get_equal_expressions pfs e1))
               > 0 ->
         let eqs = get_equal_expressions pfs e1 in
         let e1' =
           List.hd
             (List.filter
-               (fun e -> SS.inter (Expr.lvars e) (Expr.lvars e3) != SS.empty)
+               (fun e ->
+                 SS.inter (Expr.lvars e) (Expr.lvars e3) != SS.empty
+                 && acyclic_list_source_alias e1 e)
                eqs)
         in
         L.verbose (fun fmt ->
             fmt "Replacement LstSub: %a -> %a" Expr.pp e1 Expr.pp e1');
         LstSub (e1', e2, e3)
     | LstSub (le1, le2, le3) -> (
+        let bound_start, bound_count =
+          normalise_list_slice_bound_casts pfs input_gamma le1 le2 le3 in
         let fle1 = f le1 in
-        let fle2 = substitute_for_list_length pfs (f le2) in
-        let fle3 = substitute_for_list_length pfs (f le3) in
+        let fle2 = substitute_for_list_length pfs (f bound_start) in
+        let fle3 = substitute_for_list_length pfs (f bound_count) in
         L.tmi (fun fmt ->
             fmt "REDUCTION: LstSub(%a, %a, %a)" Expr.pp fle1 Expr.pp fle2
               Expr.pp fle3);
@@ -1408,6 +2131,8 @@ let rec reduce_lexpr_loop
                formatted spelling is "0". NaN remains NaN. The reverse
                composition is deliberately not cancelled. *)
             f (BinOp (number, FPlus, Lit (Num 0.)))
+        | LstAllUtf16, EList xs ->
+            f (Expr.conjunct (List.map (fun x -> Expr.BinOp (UnOp (TypeOf, x), Equal, Lit (Type Utf16Type))) xs))
         | _, Lit lit -> (
             try Lit (CExprEval.evaluate_unop op lit) with
             | CExprEval.TypeError err_msg ->
@@ -1453,6 +2178,17 @@ let rec reduce_lexpr_loop
             let les = List.map Expr.list_length les in
             List.fold_left Expr.Infix.( + ) (List.hd les) (List.tl les)
         | LstLen, LstSub (_, _, len) when lexpr_is_list gamma fle -> len
+        | LstLen, NOp (LstInsert, [ xs; position; _ ]) ->
+            let known_list = match xs with
+              | LVar x | PVar x -> Type_env.get gamma x = Some Type.ListType
+              | Lit (LList _) | EList _ -> true
+              | _ -> false in
+            let lower : Expr.t = BinOp (Expr.zero_i, ILessThanEqual, position) in
+            let upper : Expr.t = BinOp (position, ILessThanEqual, UnOp (LstLen, xs)) in
+            let proved bound = PFS.mem pfs bound || Expr.equal (f bound) Expr.true_ in
+            if known_list && proved lower && proved upper then
+              f (BinOp (UnOp (LstLen, xs), IPlus, Expr.one_i))
+            else def
         | LstLen, UnOp (LstRev, le) -> UnOp (LstLen, f le)
         | LstLen, _ when lexpr_is_list gamma fle -> def
         (* List operations: reverse *)
@@ -1475,6 +2211,12 @@ let rec reduce_lexpr_loop
         | Utf16Len, _ ->
             raise
               (ReductionException (def, "Utf16Len requires a UTF-16 string"))
+        | Utf16Trim, _ when typable gamma fle Utf16Type ->
+            Option.value ~default:def
+              (reduce_trailing_utf16_trim pfs input_gamma fle)
+        | Utf16Trim, _ ->
+            raise
+              (ReductionException (def, "Utf16Trim requires a UTF-16 string"))
         (* String length *)
         | StrLen, _ when lexpr_is_string gamma fle ->
             let len = get_length_of_string fle in
@@ -1504,6 +2246,32 @@ let rec reduce_lexpr_loop
               = Cint.canonicalise
                   (BinOp (UnOp (LstLen, LVar y), IMinus, UnOp (LstLen, x)))
            && prefix_catch pfs x y -> LVar y
+    | NOp (LstInsert, args) -> (
+        let args = List.map f args in
+        match args with
+        | [ (EList xs); Lit (Int i); v ] ->
+            let rec insert n = function
+              | xs when Z.equal n Z.zero -> v :: xs
+              | x :: xs when Z.sign n > 0 -> x :: insert (Z.pred n) xs
+              | _ -> raise (ReductionException (NOp (LstInsert, args), "Insertion index out of bounds"))
+            in EList (insert i xs)
+        | [ Lit (LList xs); i; v ] -> f (NOp (LstInsert, [ EList (List.map (fun x -> Expr.Lit x) xs); i; v ]))
+        | [ _; _; _ ] -> NOp (LstInsert, args)
+        | _ -> raise (ReductionException (NOp (LstInsert, args), "List insertion requires exactly three arguments")))
+    | NOp (Utf16Sub, args) -> (
+        let args = List.map f args in
+        let term = Expr.NOp (Utf16Sub, args) in
+        match args with
+        | [ Lit text; Lit start; Lit count ] -> (
+            try Lit (CExprEval.evaluate_nop Utf16Sub [ text; start; count ]) with
+            | CExprEval.TypeError msg | CExprEval.EvaluationError msg ->
+                raise (ReductionException (term, msg)))
+        | [ text; start; count ] ->
+            if not (typable gamma text Utf16Type
+                    && typable gamma start IntType && typable gamma count IntType)
+            then raise (ReductionException (term, "UTF-16 slice requires Utf16, Int, Int"));
+            term
+        | _ -> raise (ReductionException (term, "UTF-16 slice requires exactly three arguments")))
     | NOp (LstCat, les) -> normalise_cat f les
     (* Set union *)
     | NOp (SetUnion, les) -> (
@@ -1854,11 +2622,14 @@ let rec reduce_lexpr_loop
         match fe with
         | Lit Nono -> Expr.true_
         | Lit _ -> Expr.false_
-        | LVar x when Type_env.get gamma x = Some NoneType ->
-            BinOp (Lit Nono, Equal, fe)
         | PVar _ -> BinOp (Lit Nono, Equal, fe)
-        | LVar _ -> Expr.false_
-        | _ -> Expr.false_)
+        | _ -> (
+            (* Projection may expose an untyped variable or another unknown
+               result. Only a known disjoint result type proves absence false;
+               the type probe must not add assumptions to the caller's gamma. *)
+            match Typing.type_lexpr (Type_env.copy gamma) fe with
+            | Some t, true when t <> NoneType -> Expr.false_
+            | _ -> BinOp (Lit Nono, Equal, fe)))
     (* BinOps: Equalities (typing) *)
     (* Can this be generalised? add an fn to typing, that maps BinOp -> ret type *)
     | BinOp (UnOp (TypeOf, BinOp (_, StrCat, _)), Equal, Lit (Type t))
@@ -1898,21 +2669,81 @@ let rec reduce_lexpr_loop
               let pfs_with_left = PFS.copy pfs in
               PFS.extend pfs_with_left left;
               let right =
-                reduce_lexpr_loop ~matching ~reduce_lvars pfs_with_left gamma
+                reduce_lexpr_loop ~matching ~reduce_lvars ~input_gamma pfs_with_left gamma
                   right
               in
               BinOp (left, Impl, right))
+    (* Membership uses the same identity as v==, including nested values. *)
+    | BinOp (list, KeyInsertIndex, key) -> (
+        let step = reduce_dense_key_step pfs input_gamma list key in
+        let list = f list and key = f key in
+        let literal = function Expr.Lit l -> Some l | _ -> None in
+        let items = match list with
+          | EList xs -> Option_utils.all (List.map literal xs)
+          | Lit (LList xs) -> Some xs
+          | _ -> None in
+        match items, key with
+        | Some xs, Lit (Utf16String _) -> Lit (CExprEval.evaluate_expr (CExprEval.CStore.init []) (BinOp (Lit (LList xs), KeyInsertIndex, key)))
+        | _ -> (match step with Some e -> f e
+                | None -> BinOp (list, KeyInsertIndex, key)))
+    | BinOp (list, LstContains, value) -> (
+        let list = f list in
+        let value = f value in
+        match list with
+        | EList xs ->
+            f (Expr.disjunct (List.map (fun x -> Expr.BinOp (x, ValueEqual, value)) xs))
+        | Lit (LList xs) ->
+            f (Expr.disjunct (List.map (fun x -> Expr.BinOp (Lit x, ValueEqual, value)) xs))
+        | _ -> BinOp (list, LstContains, value))
     (* BinOps: List indexing *)
     | BinOp (le, LstNth, idx) -> (
+        (* Snapshot input types before recursive reduction can infer them.
+           Inference in a bound probe cannot authorize this new shortcut. *)
+        let typed_atom (e : Expr.t) t = match e with
+          | LVar x | PVar x -> Type_env.get gamma x = Some t
+          | Lit l -> Literal.type_of l = t
+          | _ -> false in
+        let transfer_inputs_known = match le with
+          | NOp (LstInsert, [ xs; position; _ ]) ->
+              typed_atom xs Type.ListType &&
+              (typed_atom position Type.IntType || match position with
+               | BinOp (keys, KeyInsertIndex, key) ->
+                   typed_atom keys Type.ListType && typed_atom key Type.Utf16Type
+               | _ -> false)
+          | _ -> false in
         let fle = f le in
         let fidx = f idx in
-        match fidx with
+        let transferred = match fle with
+          | NOp (LstInsert, [ xs; position; _ ]) ->
+              let known_list = match xs with
+                | LVar x | PVar x -> Type_env.get gamma x = Some Type.ListType
+                | _ -> false in
+              let len = Expr.UnOp (LstLen, xs) in
+              let lengths = len :: get_equal_expressions pfs len in
+              let proved bound = PFS.mem pfs bound ||
+                Expr.equal (f bound) Expr.true_ in
+              let lower : Expr.t = BinOp (Expr.zero_i, ILessThanEqual, position) in
+              let strict = List.exists (fun length ->
+                proved (Expr.BinOp (position, ILessThan, length))) lengths in
+              if transfer_inputs_known && known_list &&
+                 List.exists (Expr.equal fidx) lengths &&
+                 proved lower && strict then
+                (* Inserting strictly before the old end shifts its last
+                   element right by one. Equal list-length premises permit a
+                   separate key list to index the descriptor list; they do not
+                   identify the lists or produce any heap resource. *)
+                Some (f (Expr.BinOp (xs, LstNth,
+                  f (Expr.BinOp (fidx, IMinus, Expr.one_i)))))
+              else None
+          | _ -> None in
+        match transferred, fidx with
+        | Some result, _ -> result
         (* Index is a non-negative integer *)
-        | Lit (Int n) when Z.leq Z.zero n ->
+        | None, Lit (Int n) when Z.leq Z.zero n ->
             if lexpr_is_list gamma fle then
               Option.value
                 ~default:(Expr.BinOp (fle, LstNth, fidx))
-                (get_nth_of_list pfs fle (Z.to_int n))
+                (get_nth_of_list pfs fle n)
             else
               let err_msg =
                 Fmt.str "LstNth(%a, %a): list is not a GIL list." Expr.pp fle
@@ -1921,13 +2752,13 @@ let rec reduce_lexpr_loop
               L.normal (fun fmt -> fmt "%s" err_msg);
               raise (ReductionException (BinOp (fle, LstNth, fidx), err_msg))
         (* Index is a number, but is either not an integer or is negative *)
-        | Lit (Int _) | Lit (Num _) ->
+        | None, (Lit (Int _) | Lit (Num _)) ->
             let err_msg =
               "LstNth(list, index): index is smaller than zero or a float."
             in
             raise (ReductionException (BinOp (fle, LstNth, fidx), err_msg))
         (* All other cases *)
-        | _ -> BinOp (fle, LstNth, fidx))
+        | None, _ -> BinOp (fle, LstNth, fidx))
     | BinOp (x, LstRepeat, Lit (Int i)) when Z.lt i (Z.of_int 100) ->
         let fx = f x in
         let result = List.init (Z.to_int i) (fun _ -> fx) in
@@ -2139,11 +2970,11 @@ let rec reduce_lexpr_loop
             (* Rest *)
             | _, _ ->
                 if
-                  (PFS.mem pfs @@ Expr.negate flel)
-                  || (PFS.mem pfs @@ Expr.negate fler)
+                  (mem 0 @@ Expr.negate flel)
+                  || (mem 1 @@ Expr.negate fler)
                 then Lit (Bool false)
-                else if PFS.mem pfs flel then fler
-                else if PFS.mem pfs fler then flel
+                else if mem 2 flel then fler
+                else if mem 3 fler then flel
                 else BinOp (flel, And, fler))
         | Or when lexpr_is_bool gamma def -> (
             match (flel, fler) with
@@ -2152,9 +2983,9 @@ let rec reduce_lexpr_loop
             | Lit (Bool false), x | x, Lit (Bool false) -> x
             (* Rest *)
             | _, _ ->
-                if PFS.mem pfs flel || PFS.mem pfs fler then Lit (Bool true)
-                else if PFS.mem pfs @@ Expr.negate flel then fler
-                else if PFS.mem pfs @@ Expr.negate fler then flel
+                if mem 4 flel || mem 5 fler then Lit (Bool true)
+                else if mem 6 @@ Expr.negate flel then fler
+                else if mem 7 @@ Expr.negate fler then flel
                 else BinOp (flel, Or, fler))
         | StrCat when lexpr_is_string gamma def -> (
             match (flel, fler) with
@@ -2291,10 +3122,18 @@ and reduce_lexpr
     ?(gamma = Type_env.init ())
     (le : Expr.t) =
   (* let t = Unix.gettimeofday () in *)
-  let result = reduce_lexpr_loop ~matching ~reduce_lvars pfs gamma le in
+  (* Boolean literals have no context, inference or definedness work. Closed
+     location guards never consult or change the frozen input-gamma view. *)
+  let result =
+    match le with
+    | Expr.Lit (Bool _) -> le
+    | _ when is_closed_boolean_guard le ->
+        reduce_lexpr_loop ~matching ~reduce_lvars ~input_gamma:gamma pfs gamma le
+    | _ -> reduce_lexpr_loop ~matching ~reduce_lvars pfs gamma le
+  in
   (* Utils.Statistics.update_statistics "Reduce Expression" (Unix.gettimeofday () -. t); *)
   if not @@ Expr.equal le result then
-    Logging.normal (fun f ->
+    Logging.verbose (fun f ->
         f "reduce_lexpr: @[%a -> %a@]" Expr.pp le Expr.pp result);
   result
 
@@ -2481,8 +3320,299 @@ and substitute_for_list_length (pfs : PFS.t) (le : Expr.t) : Expr.t =
     (fun le (len_expr, _lex) -> substitute_for_specific_length pfs len_expr le)
     le len_eqs
 
+type formula_filter_ops = {
+  reduce_formula : Expr.t -> Expr.t;
+  extend : Expr.t -> unit;
+  substitute : SVal.SESubst.t -> unit;
+  substitute_expr : Expr.t -> Expr.t -> unit;
+}
+
+(* Own the snapshot for one complete filter pass. The mapper can only perform
+   bound reductions and original mutations, never supply membership answers. *)
+let filter_map_pfs_with_live_reduction ?(matching = false) gamma pfs mapper =
+  let facts = ref None in
+  let pending_filters = ref false in
+  let callback_mutated = ref false in
+  let invalidate () = facts := None in
+  let mem expression =
+    let snapshot = match !facts with
+      | Some snapshot -> snapshot
+      | None ->
+          let snapshot = PFS.to_set pfs in
+          facts := Some snapshot;
+          snapshot
+    in
+    Expr.Set.mem expression snapshot
+  in
+  let mutate operation =
+    callback_mutated := true;
+    invalidate ();
+    operation ();
+    invalidate ()
+  in
+  let reduce_formula original =
+    (* Keep public dispatch, per-root frozen typing and logging. Private
+       quantified/implication contexts retain their ordinary scan fallback. *)
+    let result = match original with
+      | Expr.Lit (Bool _) -> original
+      | _ when is_closed_boolean_guard original ->
+          reduce_lexpr_loop ~matching ~input_gamma:gamma ~pfs_mem:mem
+            pfs gamma original
+      | _ -> reduce_lexpr_loop ~matching ~pfs_mem:mem pfs gamma original
+    in
+    if not @@ Expr.equal original result then
+      Logging.verbose (fun f ->
+          f "reduce_lexpr: @[%a -> %a@]" Expr.pp original Expr.pp result);
+    result
+  in
+  let ops = {
+    reduce_formula;
+    extend = (fun expression -> mutate (fun () -> PFS.extend pfs expression));
+    substitute = (fun subst -> mutate (fun () -> PFS.substitution subst pfs));
+    substitute_expr = (fun original replacement -> mutate (fun () ->
+        PFS.subst_expr_for_expr original replacement pfs));
+  } in
+  PFS.filter_map_stop
+    (fun original ->
+      callback_mutated := false;
+      let action = mapper ops original in
+      (match action with
+       | `Filter ->
+           (* Ext_list decrements length now but delays unlinking. These
+              formulas stay visible until a subsequent kept-cell commit. *)
+           pending_filters := true
+       | `Replace replacement ->
+           (* A substitution may alter this cell, rebuild the snapshot, then
+              return the original argument. Track mutation, not just equality. *)
+           if !pending_filters || !callback_mutated
+              || not (Expr.equal original replacement) then invalidate ();
+           pending_filters := false
+       | `Stop -> invalidate ());
+      action)
+    pfs
+
+(* Internal sanitizer pass: each reduction observes the original live queue.
+   Index exact structural facts; generic roots retain their frozen gamma copy. *)
+(* Opt-in passive capture. Private in each module: no proof API/state is shared.
+   Serialization and IO failures stop diagnostics only, never the proof. *)
+module Sanitise_capture = struct
+  exception Limit
+
+  let settings = match Sys.getenv_opt "GILLIAN_SANITISE_CAPTURE_DIR" with
+    | None -> None
+    | Some directory -> Some (directory, Option.value ~default:"S05CopySliceStep"
+        (Sys.getenv_opt "GILLIAN_SANITISE_CAPTURE_TARGET"))
+  let module_name = "reduction"
+  let channel = ref None
+  let stopped = ref false
+  let bytes = ref 0
+  let events = ref 0
+  let invocations = ref 0
+  let byte_limit = 8 * 1024 * 1024
+  let event_limit = 4096
+
+  let warn reason =
+    try L.normal (fun m -> m "SANITISE_CAPTURE_STOP module=%s reason=%s"
+      module_name reason) with _ -> ()
+
+  let stop reason =
+    stopped := true;
+    (try
+       (match !channel with
+        | None -> ()
+        | Some output ->
+            let line = Yojson.Safe.to_string (`Assoc
+              ["status", `String "stopped"; "module", `String module_name;
+               "reason", `String reason; "events", `Int !events;
+               "bytes_before_stop", `Int !bytes]) ^ "\n" in
+            if !events < event_limit && String.length line <= byte_limit - !bytes then (
+              output_string output line; flush output;
+              incr events; bytes := !bytes + String.length line);
+            close_out_noerr output);
+       channel := None
+     with _ -> channel := None);
+    warn reason
+
+  let invocation () = match settings with
+    | Some (_, target) when not !stopped
+        && !Gillian_result.Error.current_target = Some target ->
+        incr invocations; Some !invocations
+    | _ -> None
+
+  (* Bound work before the generated AST encoder allocates its JSON tree.
+     Opaque strings/integers have separate size bounds. This is never a reducer. *)
+  let expressions values =
+    let nodes = ref 8192 and characters = ref (256 * 1024) in
+    let spend budget amount =
+      if amount > !budget then raise Limit;
+      budget := !budget - amount in
+    let visitor = object
+      inherit [_] Visitors.iter as super
+      method! visit_expr () expression =
+        spend nodes 1; super#visit_expr () expression
+      method! visit_literal () literal =
+        spend nodes 1;
+        (match literal with
+         | Literal.Utf16String text ->
+             spend characters (String.length (Utils.Utf16.to_canonical text))
+         | Literal.Int value -> spend characters (1 + Z.numbits value / 3)
+         | _ -> ());
+        super#visit_literal () literal
+      method! visit_string : 'env. 'env -> string -> unit =
+        fun _ value -> spend characters (String.length value)
+    end in
+    `List (List.map (fun expression ->
+      visitor#visit_expr () expression; Expr.to_yojson expression) values)
+
+  let emit make_fields =
+    if not !stopped then
+      try
+        if !events >= event_limit - 1 || !bytes >= byte_limit - 1024 then
+          stop "event-or-byte-limit"
+        else (
+          let fields = make_fields () in
+          let line = Yojson.Safe.to_string (`Assoc
+            (["status", `String "event"; "module", `String module_name;
+              "pid", `Int (Unix.getpid ()); "event", `Int (!events + 1);
+              "target", `String (Option.value ~default:"-"
+                !Gillian_result.Error.current_target);
+              "wall_seconds", `Float (Unix.gettimeofday ());
+              "process_cpu_seconds", `Float (Sys.time ())] @ fields)) ^ "\n" in
+          if String.length line > byte_limit - !bytes - 1024 then stop "byte-limit"
+          else (
+            let output = match !channel, settings with
+              | Some output, _ -> output
+              | None, Some (directory, _) ->
+                  if directory = "" || Filename.is_relative directory
+                     || (Unix.lstat directory).Unix.st_kind <> Unix.S_DIR then
+                    invalid_arg "capture directory must be absolute and existing";
+                  let output = open_out_gen
+                    [Open_wronly; Open_creat; Open_excl; Open_binary] 0o600
+                    (Filename.concat directory (module_name ^ ".jsonl")) in
+                  channel := Some output; output
+              | None, None -> raise Limit in
+            output_string output line; flush output;
+            incr events; bytes := !bytes + String.length line))
+      with
+      | Limit -> stop "AST-or-size-limit"
+      | error ->
+          let reason = try Printexc.to_string error with _ -> "capture-error" in
+          stop (if String.length reason > 256 then String.sub reason 0 256 else reason)
+
+  let formula invocation ordinal phase expression = match invocation with
+    | None -> ()
+    | Some invocation when not !stopped -> emit (fun () ->
+        ["reduction_pass", `Int invocation; "ordinal", `Int ordinal;
+         "phase", `String phase; "expression", expressions [expression]])
+    | Some _ -> ()
+end
+
+let reduce_pfs_in_place ?(matching = false) gamma pfs =
+  let capture_invocation = Sanitise_capture.invocation () in
+  let capture_ordinal = ref 0 in
+  let adjust delta expression counts =
+    let count = Option.value ~default:0
+        (Expr.Map.find_opt expression counts) + delta in
+    if count = 0 then Expr.Map.remove expression counts
+    else Expr.Map.add expression count counts
+  in
+  let counts = ref (PFS.fold_left
+      (fun counts expression -> adjust 1 expression counts) Expr.Map.empty pfs) in
+  let mem expression = Expr.Map.mem expression !counts in
+  PFS.map_inplace
+    (fun original ->
+      incr capture_ordinal;
+      Sanitise_capture.formula capture_invocation !capture_ordinal "BEGIN" original;
+      let result = match original with
+        | Expr.Lit (Bool _) -> reduce_lexpr ~matching ~pfs ~gamma original
+        | _ when is_closed_boolean_guard original ->
+            let result = reduce_lexpr_loop ~matching ~input_gamma:gamma
+                ~pfs_mem:mem pfs gamma original in
+            if not @@ Expr.equal original result then
+              Logging.verbose (fun f ->
+                  f "reduce_lexpr: @[%a -> %a@]" Expr.pp original Expr.pp result);
+            result
+        | _ ->
+            let result = reduce_lexpr_loop ~matching ~pfs_mem:mem pfs gamma original in
+            if not @@ Expr.equal original result then
+              Logging.verbose (fun f ->
+                  f "reduce_lexpr: @[%a -> %a@]" Expr.pp original Expr.pp result);
+            result
+      in
+      (* A failing reduction commits neither its cell nor this index update.
+         Counts retain duplicates in the reduced prefix/untouched suffix. *)
+      counts := adjust 1 result (adjust (-1) original !counts);
+      Sanitise_capture.formula capture_invocation !capture_ordinal "END" result;
+      result)
+    pfs
+
+(* This private PFS is append-only during overlap classification. Seed exact
+   structural membership once, and expose only earlier retained originals to
+   each reducer call. Quantified/implication contexts keep their scan fallback. *)
+let extend_pfs_with_overlap_guards gamma pfs guards =
+  let facts = ref (PFS.to_set pfs) in
+  let mem expression = Expr.Set.mem expression !facts in
+  let classify classified_gamma original =
+    (* Match the public reducer's literal/closed/generic dispatch and logging;
+       generic roots still take their original frozen input-gamma copy. *)
+    let result = match original with
+      | Expr.Lit (Bool _) -> original
+      | _ when is_closed_boolean_guard original ->
+          reduce_lexpr_loop ~matching:true ~input_gamma:classified_gamma
+            ~pfs_mem:mem pfs classified_gamma original
+      | _ -> reduce_lexpr_loop ~matching:true ~pfs_mem:mem
+          pfs classified_gamma original
+    in
+    if not @@ Expr.equal original result then
+      Logging.verbose (fun f ->
+          f "reduce_lexpr: @[%a -> %a@]" Expr.pp original Expr.pp result);
+    result
+  in
+  List.iter
+    (fun fo ->
+      (* Classify the whole guard in matching mode: abstract locations may
+         alias. Keep the original guard unless it reduces to literal true;
+         speculative typing must not escape this classification. *)
+      let redundant =
+        match fo with
+        (* Closed location inputs are defined without consulting gamma;
+           identical location/null output leaves make this whole guard true. *)
+        | Expr.BinOp
+            (Expr.UnOp (Not, Expr.BinOp
+               ((Expr.ALoc _ | Expr.Lit (Literal.Loc _)), Equal,
+                (Expr.ALoc _ | Expr.Lit (Literal.Loc _)))),
+             Or, Expr.BinOp
+               (((Expr.ALoc _ | Expr.Lit (Literal.Loc _)
+                 | Expr.Lit Literal.Null) as output), Equal, other))
+          when Expr.equal output other -> true
+        | _ -> try
+          let classified_gamma = Type_env.copy gamma in
+          classify classified_gamma fo = Expr.true_
+          && Hashtbl.length (Type_env.as_hashtbl classified_gamma)
+             = Hashtbl.length (Type_env.as_hashtbl gamma)
+          && Type_env.fold classified_gamma
+               (fun var typ unchanged ->
+                 unchanged && Type_env.get gamma var = Some typ)
+               true
+        with ReductionException _ -> false
+      in
+      if not redundant && not (mem fo) then (
+        (* Equivalent to extend's verified-miss append, without a second scan.
+           No speculative reduced result or not-yet-appended guard is indexed. *)
+        PFS.merge_into_left pfs (PFS.of_list [fo]);
+        facts := Expr.Set.add fo !facts))
+    guards
+
 let resolve_expr_to_location (pfs : PFS.t) (gamma : Type_env.t) (e : Expr.t) :
     string option =
+  (* Structural list equality can leave location aliases inside a conjunction.
+     Each conjunct is already assumed; expose only And, never alternatives or
+     negated/conditional facts. Keep the caller's formula store unchanged. *)
+  let rec conjuncts = function
+    | Expr.BinOp (left, And, right) -> conjuncts left @ conjuncts right
+    | fact -> [ fact ]
+  in
+  let pfs = PFS.of_list (List.concat_map conjuncts (PFS.to_list pfs)) in
   let max_fuel = 10 in
 
   let loc_name = function
@@ -2796,6 +3926,7 @@ let clean_double_equalities (a : Asrt.t) : Asrt.t =
     | And
     | Or
     | Impl
+    | LstContains
     | SetMem
     | SetSub -> true
     | _ -> false

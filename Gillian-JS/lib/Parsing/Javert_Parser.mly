@@ -113,7 +113,9 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token SETTOLIST
 %token LSTLEN
 %token LSTLENINT
+%token VERIFY_SCOPE
 %token STRLEN
+%token UTF16TRIM
 %token STRBYTES
 %token BOOLTOINT
 %token NUMTOINT
@@ -371,6 +373,7 @@ unop_target:
   | LSTLEN      { UnOp.LstLen }
   | LSTREV      { UnOp.LstRev }
   | STRLEN      { UnOp.StrLen }
+  | UTF16TRIM   { UnOp.Utf16Trim }
   | STRBYTES    { UnOp.StrToBytes }
   | SETTOLIST   { UnOp.SetToList }
   | INTTONUM    { UnOp.IntToNum }
@@ -435,7 +438,7 @@ expr_target:
           match (nop : NOp.t) with
           | SetInter
           | SetUnion -> Expr.Set.elements (Expr.Set.of_list les)
-          | LstCat -> les
+          | LstCat | LstInsert | Utf16Sub -> les
         in
         Expr.NOp (nop, les)
      }
@@ -574,6 +577,9 @@ logic_cmd_target:
     { LCmd.SL (GUnfold name) }
   | INVARIANT; LBRACE; a = assertion_target; RBRACE; binders = option(invariant_binders_target); rank = option(jsil_lemma_variant_target)
     { LCmd.SL (Invariant (a, Option.value ~default:[ ] binders, rank)) }
+  | INVARIANT; LBRACE; a = assertion_target; RBRACE; binders = option(invariant_binders_target);
+    VARIANT; LBRACE; LSTLENINT; param = VAR; RBRACE
+    { LCmd.SL (InvariantListLength (a, Option.value ~default:[ ] binders, param)) }
   | SEPASSERT; LBRACE; a = assertion_target; RBRACE; binders = option(binders_target)
     { LCmd.SL (SepAssert (a, Option.value ~default:[ ] binders)) }
   | APPLY; lemma_name = VAR; LBRACE; params = separated_list(COMMA, expr_target); RBRACE; binders = option(binders_target)
@@ -730,11 +736,15 @@ procedure_variant_target:
   | VARIANT; LBRACE; LSTLENINT; param = VAR; RBRACE
     { Spec.ListLength param }
 
+verifier_scope_target:
+  VERIFY_SCOPE; LBRACE; source = expr_target; SCOLON; target = expr_target; RBRACE
+  { Gillian.Gil_syntax.Spec.{ vsb_source = source; vsb_target = target } }
+
 pre_post_target:
-  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; variant = option(procedure_variant_target); NORMAL
-    { Spec.{ pre; posts; variant; flag = Normal; to_verify = true; label = lab_spec } }
-  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; variant = option(procedure_variant_target); ERROR
-  { Spec.{ pre; posts; variant; flag = Error; to_verify = true; label = lab_spec} }
+  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; variant = option(procedure_variant_target); verifier_scope = option(verifier_scope_target); NORMAL
+    { Spec.{ pre; posts; variant; verifier_scope; flag = Normal; to_verify = true; label = lab_spec } }
+  | lab_spec = option(lab_spec_target); pre = spec_line; posts = mult_spec_line; variant = option(procedure_variant_target); verifier_scope = option(verifier_scope_target); ERROR
+  { Spec.{ pre; posts; variant; verifier_scope; flag = Error; to_verify = true; label = lab_spec} }
 
 spec_head_target:
   spec_name = VAR; LBRACE; spec_params = separated_list(COMMA, VAR); RBRACE
@@ -985,7 +995,7 @@ js_lexpr_target:
       let les = match (nop : NOp.t) with
         | SetInter
         | SetUnion -> JSExpr.SJSExpr.elements (JSExpr.SJSExpr.of_list les)
-        | LstCat -> les
+        | LstCat | LstInsert | Utf16Sub -> les
       in
       JSExpr.NOp (nop, les)
     }
@@ -1313,4 +1323,3 @@ top_level_expr_target:
 %inline option_preceded_separated_list(PREC, SEP, X):
   | PREC; xs = separated_list(SEP, X) { xs }
   | { [] }
-

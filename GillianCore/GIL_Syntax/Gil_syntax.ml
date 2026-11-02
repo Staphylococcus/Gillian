@@ -27,3 +27,5 @@ module Type = Type
 module UnOp = UnOp
 module Var = Var
 module Visitors = Visitors
+
+module Linked_program_capture = Linked_program_capture

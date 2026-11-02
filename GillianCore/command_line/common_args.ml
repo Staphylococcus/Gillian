@@ -1,6 +1,8 @@
 open Cmdliner
 module L = Logging
 
+let () = at_exit Smt.shutdown_solver
+
 let exit_code_info =
   [
     Cmd.Exit.info ~doc:"Success" 0;
@@ -174,6 +176,7 @@ module Make (PC : ParserAndCompiler.S) = struct
       Logging.Mode.set_mode logging_mode;
       let reporters = List.map (fun r -> r.reporter) reporters in
       L.initialize reporters;
+      at_exit Smt.shutdown_solver;
       Printexc.record_backtrace (Logging.Mode.enabled ());
       PC.TargetLangOptions.apply tl_opts;
       Config.set_runtime_paths ?default_folders:PC.default_import_paths

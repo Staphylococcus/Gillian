@@ -76,7 +76,10 @@ let normalization_parents () =
             try
               ignore (Engine.CExprEval.evaluate_expr store term);
               false
-            with Failure message -> (
+            with
+            | Engine.CExprEval.EvaluationError message ->
+                String.starts_with ~prefix:"Evaluation Error: List index out of bounds" message
+            | Failure message -> (
               try
                 ignore
                   (Str.search_forward (Str.regexp_string "\nnth\n") message 0);
@@ -657,7 +660,7 @@ let nounfold_demand_selection () =
                (PState.SMatcher.unfold_with_vals ~auto_level state [ x ])))
         [ `Low; `High ])
 
-let nounfold_eager_resources_and_outputs () =
+let nounfold_deferred_resources_and_outputs () =
   with_unfolding (fun () ->
       let x = Expr.LVar "#choice_x" in
       List.iter
@@ -669,18 +672,192 @@ let nounfold_eager_resources_and_outputs () =
             PState.assume ~unfold:true state (bin ILessThanEqual (Expr.int 0) x)
           in
           Alcotest.(check int)
-            "resource/output predicates retain eager alternatives" 2
+            "branch defers opaque resources and outputs" 1
             (List.length outcomes);
+          let after = List.hd outcomes in
+          Alcotest.(check bool) "deferred predicate is still owned" true
+            (List.mem ("SelectionChoice", [x])
+               (Engine.Preds.to_list (PState.get_preds after)));
+          Alcotest.(check bool) "branch cannot invent an output" false
+            (PState.assert_a after [bin Equal x (Expr.int 0)]);
+          let demanded = Option.get
+            (PState.SMatcher.unfold_with_vals ~auto_level:`High after [x]) in
+          Alcotest.(check int) "demand still exposes both alternatives" 2
+            (List.length demanded);
+          let explicit = PState.SMatcher.unfold state "SelectionChoice" [x] in
+          Alcotest.(check int) "explicit unfold still exposes both alternatives" 2
+            (List.length explicit);
           List.iter
             (fun n ->
-              Alcotest.(check bool)
-                "both output values remain represented" true
-                (List.exists
-                   (fun after ->
-                     PState.assert_a after [ bin Equal x (Expr.int n) ])
-                   outcomes))
-            [ 0; 1 ])
-        [ (false, false); (true, true); (false, true) ])
+              Alcotest.(check bool) "demand preserves every value" true
+                (List.exists (fun (_, st) -> PState.assert_a st
+                  [bin Equal x (Expr.int n)]) demanded);
+              Alcotest.(check bool) "explicit unfold preserves every value" true
+                (List.exists (function Ok (_, st) -> PState.assert_a st
+                  [bin Equal x (Expr.int n)] | Error _ -> false) explicit))
+            [0;1])
+        [(false,false);(true,true);(false,true)])
+
+(* Persistent metadata identifies an output witness before the postcondition
+   restores its fields. Use the real JS heap and matcher, including an object
+   identity kept as a logical alias rather than an ALoc expression. *)
+let metadata_post_alias nested () =
+  let object_loc = Expr.ALoc "#loc_post_object" in
+  let original_md = Expr.ALoc "#loc_post_metadata" in
+  let object_alias = Expr.LVar "#post_object_alias" in
+  let md = Expr.LVar "#post_metadata_witness" in
+  let frame = Expr.ALoc "#loc_post_frame" in
+  let key = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical
+      (Utils.Utf16.of_code_units [0x78]))) in
+  let heap = Semantics.SHeap.init () in
+  Semantics.SHeap.init_object heap "#loc_post_object" ~is_empty:true (Some original_md);
+  Semantics.SHeap.init_object heap "#loc_post_metadata" ~is_empty:true (Some (Expr.Lit Literal.Null));
+  Semantics.SHeap.init_object heap "#loc_post_frame" ~is_empty:true (Some (Expr.Lit Literal.Null));
+  Semantics.SHeap.set_fv_pair heap "#loc_post_frame" key (Expr.int 17);
+  let alias = bin Equal object_alias object_loc in
+  let fact = if nested then bin And truth alias else alias in
+  let initial = PState.make_p_from_heap ~pred_defs:(Engine.MP.init_pred_defs ())
+      ~heap ~store:(Engine.SStore.init []) ~preds:(Engine.Preds.init [])
+      ~wands:(Engine.Wands.init []) ~spec_vars:Utils.Containers.SS.empty
+      ~pfs:(Engine.PFS.of_list [fact]) ~gamma:(Gillian.Symbolic.Type_env.init ()) in
+  let before = Yojson.Safe.to_string (PState.to_yojson initial) in
+  let post = [
+    Asrt.CorePred ("Cell", [md; key], [Expr.int 7]);
+    Asrt.CorePred ("Metadata", [object_alias], [md]);
+    Asrt.CorePred ("Metadata", [md], [Expr.Lit Literal.Null]);
+  ] in
+  match PState.SMatcher.produce_posts initial
+      (Gillian.Symbolic.Subst.init [md,md; object_alias,object_alias]) [post] with
+  | [state] ->
+      Alcotest.(check bool) "post uses the retained metadata identity" true
+        (PState.assert_a state [bin Equal md original_md]);
+      let read action args = match PState.execute_action action state args with
+        | [Ok (_, values)] -> values
+        | _ -> Alcotest.fail "expected one real heap read" in
+      Alcotest.(check bool) "restored cell is on the existing metadata" true
+        (read Javert_utils.JSILNames.getCell [original_md;key] = [original_md;key;Expr.int 7]);
+      Alcotest.(check bool) "unrelated caller cell is framed" true
+        (read Javert_utils.JSILNames.getCell [frame;key] = [frame;key;Expr.int 17]);
+      Alcotest.(check bool) "post production preserves the caller snapshot" true
+        (before = Yojson.Safe.to_string (PState.to_yojson initial))
+  | _ -> Alcotest.fail "existing logical metadata alias lost the feasible post"
+
+let metadata_post_conflict () =
+  let loc = Expr.ALoc "#loc_conflict_object" in
+  let metadata = Expr.ALoc "#loc_conflict_metadata" in
+  let alias = Expr.LVar "#conflict_object_alias" in
+  let heap = Semantics.SHeap.init () in
+  Semantics.SHeap.init_object heap "#loc_conflict_object" ~is_empty:true (Some metadata);
+  let initial = PState.make_p_from_heap ~pred_defs:(Engine.MP.init_pred_defs ())
+      ~heap ~store:(Engine.SStore.init []) ~preds:(Engine.Preds.init [])
+      ~wands:(Engine.Wands.init []) ~spec_vars:Utils.Containers.SS.empty
+      ~pfs:(Engine.PFS.of_list [bin Equal alias loc])
+      ~gamma:(Gillian.Symbolic.Type_env.init ()) in
+  let before = Yojson.Safe.to_string (PState.to_yojson initial) in
+  (* A fresh ALoc is an existential witness and may legitimately unify with
+     the retained metadata. Null is the genuinely false claim here. *)
+  let posts = [ [Asrt.CorePred ("Metadata", [alias],
+      [Expr.Lit Literal.Null])] ] in
+  Alcotest.(check int) "a conflicting metadata post cannot produce a proof" 0
+    (List.length (PState.SMatcher.produce_posts initial
+       (Gillian.Symbolic.Subst.init [alias,alias]) posts));
+  Alcotest.(check bool) "rejection preserves the caller snapshot" true
+    (before = Yojson.Safe.to_string (PState.to_yojson initial))
+
+let signed_zero_assertions () =
+  let x = Expr.LVar "#signed_zero_value" in
+  let zero sign = Expr.num (if sign then -0. else 0.) in
+  let guard sign = Asrt.Pure (Expr.UnOp (Not, bin ValueEqual x (zero sign))) in
+  let cases =
+    [
+      (guard false, guard true);
+      (Asrt.Pure (bin ValueEqual x (Expr.EList [ zero false ])),
+       Asrt.Pure (bin ValueEqual x (Expr.EList [ zero true ])));
+      (Asrt.definedness ~fact:true (bin ValueEqual x (zero false)),
+       Asrt.definedness ~fact:true (bin ValueEqual x (zero true)));
+    ]
+  in
+  List.iter (fun (positive, negative) ->
+      let atoms = Engine.MP.simplify_asrts
+          [positive; negative; positive; negative] in
+      Alcotest.(check int) "retain both signs while removing exact duplicates" 2
+        (List.length atoms);
+      Alcotest.(check bool) "both signed assertions remain" true
+        (List.exists (Asrt.equal_atom positive) atoms
+         && List.exists (Asrt.equal_atom negative) atoms)) cases
+
+let signed_zero_post_filter () =
+  let x = Expr.LVar "#signed_zero_input" in
+  let same n = bin ValueEqual x (Expr.num n) in
+  let saved = !Config.delay_entailment in
+  Fun.protect ~finally:(fun () -> Config.delay_entailment := saved) (fun () ->
+      List.iter (fun delayed ->
+          Config.delay_entailment := delayed;
+          List.iter (fun input ->
+              let state = Option.get (PState.assume_t (PState.init ()) x Type.NumberType) in
+              let state = Option.get (PState.assume_a state [same input]) in
+              let original = Format.asprintf "%a" PState.pp state in
+              let produce facts = PState.SMatcher.produce_posts
+                  (PState.copy state) (Gillian.Symbolic.Subst.init [x,x])
+                  [Totality.preserve_assertion_domains (List.map (fun f -> Asrt.Pure f) facts)] in
+              let rejects label facts =
+                if delayed then
+                  Alcotest.(check int) label 0 (List.length (produce facts))
+                else
+                  let rejected = try ignore (produce facts); false with
+                    | Gillian.Utils.Gillian_result.Exc.Gillian_error
+                        (AnalysisFailures [failure]) ->
+                        String.starts_with ~prefix:"Postcondition production failed:" failure.msg
+                        && String.contains failure.msg '#'
+                  in
+                  Alcotest.(check bool) label true rejected
+              in
+              rejects "a known zero cannot produce a nonzero post"
+                [Expr.UnOp (Not, same 0.); Expr.UnOp (Not, same (-0.))];
+              Alcotest.(check int) "the identical zero post remains feasible" 1
+                (List.length (produce [same input]));
+              rejects "the opposite zero post is infeasible"
+                [same (if Int64.bits_of_float input = 0L then -0. else 0.)];
+              Alcotest.(check string) "filtering leaves the caller snapshot intact" original
+                (Format.asprintf "%a" PState.pp state)) [0.; -0.]) [false; true])
+
+let trim_domains_and_certificate () =
+  let input = Expr.LVar "#trim_input" in
+  let state = Option.get (State.assume_t (State.init ()) input Type.Utf16Type) in
+  let check expr =
+    Totality.check_proof_expression ~context:"Trim"
+      ~evaluate:(State.eval_expr state)
+      ~assertion:(fun condition -> State.assert_a state [ condition ]) expr
+  in
+  check (Expr.UnOp (Utf16Trim, input));
+  List.iter
+    (fun operand ->
+      let invalid = Expr.UnOp (Utf16Trim, operand) in
+      expect_domain_failure "Trim is not proved defined:" (fun () ->
+        check (bin Equal invalid invalid));
+      check (bin Or truth (bin Equal invalid invalid)))
+    [ Expr.num 0.; Expr.string "byte string"; Expr.EList [] ];
+  let certificate pid args =
+    Totality.check_command ~is_action_total:(fun _ _ -> false) "trim-certificate"
+      (Cmd.ECall ("ret", pid, args, None))
+  in
+  List.iter
+    (fun pid -> Alcotest.(check bool) "exact one-argument trim external admitted"
+       true (certificate pid [ input ] = None))
+    [ Expr.string "ExecuteStringTrim"; Expr.PVar "ExecuteStringTrim" ];
+  List.iter
+    (fun (pid, args) ->
+      let rejected =
+        try ignore (certificate pid args); false with
+        | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError msg) ->
+            String.starts_with ~prefix:"Unsupported totality proof:" msg
+      in
+      Alcotest.(check bool) "other external names and arities remain unsupported"
+        true rejected)
+    [ (Expr.string "ExecuteStringTrim", []);
+      (Expr.string "ExecuteStringTrim", [ input; input ]);
+      (Expr.string "ExecuteStringNth", [ input ]);
+      (Expr.PVar "other_external", [ input ]) ]
 
 let () =
   Alcotest.run "Proof terms"
@@ -706,6 +883,8 @@ let () =
             (with_total infeasible_assumption);
           Alcotest.test_case "numeric code-unit domains" `Quick
             (with_total code_unit_domains);
+          Alcotest.test_case "trim domains and exact external certificate" `Quick
+            (with_total trim_domains_and_certificate);
           Alcotest.test_case "proof domains and guarded operands" `Quick
             (with_total proof_domain);
           Alcotest.test_case "proof set literals and union" `Quick
@@ -737,6 +916,16 @@ let () =
           Alcotest.test_case "nounfold demand selection" `Quick
             (with_total nounfold_demand_selection);
           Alcotest.test_case "nounfold resource and output selection" `Quick
-            (with_total nounfold_eager_resources_and_outputs);
+            (with_total nounfold_deferred_resources_and_outputs);
+          Alcotest.test_case "logical object metadata post" `Quick
+            (with_total (metadata_post_alias false));
+          Alcotest.test_case "conjunctive object metadata post" `Quick
+            (with_total (metadata_post_alias true));
+          Alcotest.test_case "conflicting metadata post" `Quick
+            (with_total metadata_post_conflict);
+          Alcotest.test_case "signed zero assertions" `Quick
+            (with_total signed_zero_assertions);
+          Alcotest.test_case "signed zero post filtering" `Quick
+            (with_total signed_zero_post_filter);
         ] );
     ]

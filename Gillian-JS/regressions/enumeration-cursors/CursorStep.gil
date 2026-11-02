@@ -1,0 +1,8 @@
+spec CursorStep(enums)
+[[ (enums == #initial) * (#initial == l+ ({{#key}}, #tail)) * types(#tail : List) ]]
+[[ (ret == #tail) * ((l-len ret) i< (l-len #initial)) ]] normal
+proc CursorStep(enums) {
+  key := car enums;
+  ret := cdr enums;
+  return
+};

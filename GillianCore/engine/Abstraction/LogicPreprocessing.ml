@@ -2,6 +2,193 @@ open Config
 open Location
 module L = Logging
 
+(* Opt-in observer only. It never supplies proof facts or changes a result. *)
+module InadmissibleOrigin = struct
+  let enabled =
+    Sys.getenv_opt "GILLIAN_DIAGNOSTIC_INADMISSIBLE_ORIGIN" = Some "1"
+  let focus = Option.value ~default:"S05LifecycleFrame"
+      (Sys.getenv_opt "GILLIAN_DIAGNOSTIC_INADMISSIBLE_ORIGIN_ROOT")
+  type session = {
+    mutable names : SS.t; mutable scope : (string * int) option;
+    mutable stack : int list; mutable sequence : int; mutable bytes : int;
+    mutable failed : bool; mutable notified : bool; mutable pass : int;
+    finals : (string, int) Hashtbl.t;
+  }
+  let session = lazy {
+    names = SS.empty; scope = None; stack = []; sequence = 0; bytes = 0;
+    failed = false; notified = false; pass = 0; finals = Hashtbl.create 1;
+  }
+  let active () = enabled && (Lazy.force session).scope <> None
+  let selected name = enabled && SS.mem name (Lazy.force session).names
+  let label = function
+    | None -> `Null
+    | Some (name, vars) ->
+        `List [`String name; `List (List.map (fun x -> `String x) vars)]
+  let asts xs = `List (List.map Asrt.to_yojson xs)
+  let parent () = match L.Parent.get () with
+    | None -> `Null | Some id -> L.Report_id.to_yojson id
+  let unavailable reason =
+    if enabled then (
+      let s = Lazy.force session in
+      s.failed <- true;
+      if not s.notified then (
+        s.notified <- true;
+        try L.normal (fun m ->
+          m "INADMISSIBLE_ORIGIN_UNAVAILABLE reason=%s adequate=false" reason)
+        with _ -> ()))
+  let emit kind fields =
+    if not enabled then None else
+    let s = Lazy.force session in
+    if s.failed then None else
+    try
+      let logging_parent = parent () in
+      if logging_parent = `Null && kind = "rejected-production" then
+        (unavailable "missing-runtime-parent"; None)
+      else (
+        let sequence = s.sequence in
+        s.sequence <- sequence + 1;
+        let context = match s.scope with
+          | None -> `Null
+          | Some (name, ordinal) ->
+              `List [`String name; `Int ordinal] in
+        let payload : Yojson.Safe.t = `Assoc (
+          ["format", `String "gillian-inadmissible-origin-v1";
+           "event", `String kind; "sequence", `Int sequence; "pass", `Int s.pass;
+           "logging_parent", logging_parent;
+           "logging_context", `String (if logging_parent = `Null
+             then "preprocessing-root" else "active-report");
+           "scope", context;
+           "lineage_parent", (match s.stack with
+             | [] -> `Null | id :: _ -> `Int id);
+           "record_complete", `Bool true] @ fields ()) in
+        let encoded = Yojson.Safe.to_string payload in
+        let cost = String.length encoded + 80 in
+        if cost > 524288 || s.bytes + cost > 4193280 then (
+          unavailable "byte-budget"; None)
+        else (
+          let loggable = L.Loggable.make
+            (fun fmt (_ : Yojson.Safe.t) ->
+              Fmt.pf fmt "INADMISSIBLE_ORIGIN_BEGIN@\n%s@\nINADMISSIBLE_ORIGIN_END"
+                encoded)
+            (fun x -> Ok x) (fun x -> x) payload in
+          match L.Specific.normal loggable L.Logging_constants.Content_type.debug with
+          | None -> unavailable "logger-unavailable"; None
+          | Some _ -> s.bytes <- s.bytes + cost; Some sequence))
+    with _ -> unavailable "serialization-or-logging"; None
+  let trace kind fields = if active () then ignore (emit kind fields)
+  let save_subst subst =
+    if not (active ()) then None else
+    try Some (SVal.SSubst.to_list subst)
+    with _ -> unavailable "substitution-snapshot"; None
+  let subst_json = function
+    | None -> `Null
+    | Some entries -> `List (List.map (fun (name, value) ->
+        `List [`String name; Expr.to_yojson value]) entries)
+  let within id f =
+    if not enabled then f () else
+    let s = Lazy.force session in
+    let previous = s.stack in
+    (match id with None -> () | Some id -> s.stack <- id :: previous);
+    try let result = f () in s.stack <- previous; result
+    with e -> s.stack <- previous; raise e
+  let with_scope name ordinal f =
+    if not (selected name) then f () else
+    let s = Lazy.force session in
+    let previous = s.scope, s.stack in
+    s.scope <- Some (name, ordinal); s.stack <- [];
+    let restore () = s.scope <- fst previous; s.stack <- snd previous in
+    try let result = f () in restore (); result
+    with e -> restore (); raise e
+  let with_auto input f =
+    if not (active ()) then f () else
+    let id = emit "auto-enter" (fun () -> ["input", Asrt.to_yojson input]) in
+    within id (fun () ->
+      let result = f () in
+      ignore (emit "auto-exit" (fun () -> ["outputs", asts result]));
+      result)
+  let map_atoms f xs =
+    if not (active ()) then List.map (f None) xs else
+    List.mapi (fun ordinal atom ->
+      let result = f (Some ordinal) atom in
+      ignore (emit "atom-options" (fun () ->
+        ["atom", `Int ordinal; "input", Asrt.atom_to_yojson atom;
+         "outputs", asts result]));
+      result) xs
+  let map_defs f xs =
+    if active () then List.mapi (fun i x -> f (Some i) x) xs
+    else List.map (f None) xs
+  let index = function None -> `Null | Some i -> `Int i
+  let filter stage f xs =
+    if not (active ()) then List.filter f xs else
+    let ordinal = ref 0 in
+    List.filter (fun a ->
+      let i = !ordinal in incr ordinal;
+      let keep = f a in
+      ignore (emit "filter" (fun () ->
+        ["stage", `String stage; "ordinal", `Int i;
+         "input", Asrt.to_yojson a; "keep", `Bool keep]));
+      keep) xs
+  let product stage acc options =
+    if not (active ()) then
+      List.concat_map
+        (fun a -> List.map (fun b -> b @ a) options) acc
+    else
+      let id = emit "cartesian-input" (fun () ->
+        ["stage", `Int stage; "acc", asts acc; "options", asts options]) in
+      within id (fun () ->
+        List.concat (List.mapi (fun acc_ordinal a ->
+          List.mapi (fun option_ordinal b ->
+            let result = b @ a in
+            ignore (emit "cartesian-choice" (fun () ->
+              ["acc_ordinal", `Int acc_ordinal;
+               "option_ordinal", `Int option_ordinal;
+               "output_ordinal", `Int (acc_ordinal * List.length options + option_ordinal);
+               "output", Asrt.to_yojson result]));
+            result) options) acc))
+  let pred_fields (pred : Pred.t) =
+    ["predicate", `String pred.pred_name;
+     "source_path", (match pred.pred_source_path with None -> `Null | Some x -> `String x);
+     "source_location", (match pred.pred_loc with None -> `Null | Some x -> Location.to_yojson x);
+     "facts", `List (List.map Expr.to_yojson pred.pred_facts);
+     "parameters", `List (List.map (fun (x, _) -> `String x) pred.pred_params);
+     "definitions", `List (List.mapi (fun ordinal (lab, a) ->
+       `Assoc ["ordinal", `Int ordinal; "label", label lab;
+               "assertion", Asrt.to_yojson a]) pred.pred_definitions)]
+  let record_pred stage pred =
+    if selected pred.Pred.pred_name then (
+      let id = emit "predicate-stage" (fun () ->
+        ("stage", `String stage) :: pred_fields pred) in
+      if stage = "pruned" || stage = "installed" then
+        Option.iter (fun id -> Hashtbl.replace (Lazy.force session).finals
+          pred.pred_name id) id)
+  let prepare preds =
+    if enabled then
+      try
+        let s = Lazy.force session in
+        s.pass <- s.pass + 1;
+        s.names <- SS.empty; s.scope <- None; s.stack <- [];
+        Hashtbl.clear s.finals;
+        let rec visit name =
+          if not (SS.mem name s.names) then (
+            s.names <- SS.add name s.names;
+            let pred = Hashtbl.find preds name in
+            List.iter visit (List.concat_map
+              (fun (_, a) -> Asrt.pred_names a) pred.Pred.pred_definitions))
+        in
+        visit focus;
+        SS.iter (fun name -> record_pred "original" (Hashtbl.find preds name)) s.names
+      with _ -> unavailable "focus-or-dependency-missing"
+  let record_table stage preds =
+    if enabled then
+      SS.iter (fun name ->
+        try record_pred stage (Hashtbl.find preds name)
+        with _ -> unavailable "stage-predicate-missing") (Lazy.force session).names
+  let final_event name =
+    if not enabled then None else
+    Hashtbl.find_opt (Lazy.force session).finals name
+end
+
+
 let unfolded_preds : (string, Pred.t) Hashtbl.t = Hashtbl.create small_tbl_size
 
 (*
@@ -14,6 +201,8 @@ let rec auto_unfold
     (predicates : (string, Pred.t) Hashtbl.t)
     (rec_tbl : (string, bool) Hashtbl.t)
     (asrt : Asrt.t) : Asrt.t list =
+  InadmissibleOrigin.with_auto asrt (fun () ->
+  let product_ordinal = if InadmissibleOrigin.active () then Some (ref 0) else None in
   let should_not_unfold name =
     (* We don't unfold:
        - Recursive predicates (except in some very specific cases)
@@ -39,7 +228,7 @@ let rec auto_unfold
     | None -> false
   in
   asrt
-  |> List.map (function
+  |> InadmissibleOrigin.map_atoms (fun atom_ordinal -> function
        | Asrt.CorePred (cp_name, ins, outs) as asrt
          when (not (must_keep_folded cp_name)) && is_already_unfolded cp_name ->
            let name = Option.get (Asrt.as_user_pred_name cp_name) in
@@ -63,9 +252,24 @@ let rec auto_unfold
                     ?loc msg)
            in
            let subst = SVal.SSubst.init combined in
-           let defs = List.map (fun (_, def) -> def) pred.pred_definitions in
+           let diagnostic_subst = InadmissibleOrigin.save_subst subst in
            let asrts =
-             List.map (SVal.SSubst.substitute_asrt subst ~partial:false) defs
+             InadmissibleOrigin.map_defs
+               (fun ordinal (lab, def) ->
+                 let result = SVal.SSubst.substitute_asrt subst ~partial:false def in
+                 InadmissibleOrigin.trace "cached-substitution" (fun () ->
+                   ["atom", InadmissibleOrigin.index atom_ordinal;
+                    "predicate", `String name;
+                    "arguments", `List (List.map Expr.to_yojson args);
+                    "ordinal", InadmissibleOrigin.index ordinal;
+                    "label", InadmissibleOrigin.label lab;
+                    "raw", Asrt.to_yojson def;
+                    "substitution", InadmissibleOrigin.subst_json diagnostic_subst;
+                    "result", Asrt.to_yojson result;
+                    "source_final_event", (match InadmissibleOrigin.final_event name with
+                      | None -> `Null | Some id -> `Int id)]);
+                 result)
+               pred.pred_definitions
            in
            L.tmi (fun m ->
                m "%a ->\n%a" Asrt.pp_atom asrt
@@ -87,9 +291,11 @@ let rec auto_unfold
              L.tmi (fun fmt ->
                  fmt "PREDICATE %s has %d definitions" pred.pred_name
                    (List.length pred.pred_definitions));
+             let diagnostic_subst = InadmissibleOrigin.save_subst subst in
              let new_asrts =
-               List.map
-                 (fun (_, a) ->
+               InadmissibleOrigin.map_defs
+                 (fun ordinal (lab, a) ->
+                   let raw_definition = a in
                    L.tmi (fun fmt -> fmt "Before Auto Unfolding: %a" Asrt.pp a);
                    let facts =
                      List.map (fun fact -> Asrt.Pure fact) pred.pred_facts
@@ -98,6 +304,16 @@ let rec auto_unfold
                    let result =
                      SVal.SSubst.substitute_asrt subst ~partial:false a
                    in
+                   InadmissibleOrigin.trace "substitution" (fun () ->
+                     ["atom", InadmissibleOrigin.index atom_ordinal;
+                      "predicate", `String name;
+                      "arguments", `List (List.map Expr.to_yojson args);
+                      "ordinal", InadmissibleOrigin.index ordinal;
+                      "label", InadmissibleOrigin.label lab;
+                      "raw", Asrt.to_yojson raw_definition;
+                      "with_facts", Asrt.to_yojson a;
+                      "substitution", InadmissibleOrigin.subst_json diagnostic_subst;
+                      "result", Asrt.to_yojson result]);
                    L.tmi (fun fmt ->
                        fmt "After Auto Unfolding: %a" Asrt.pp result);
                    result)
@@ -110,8 +326,20 @@ let rec auto_unfold
              let au_no_rec =
                auto_unfold ~unfold_rec_predicates:false predicates rec_tbl
              in
-             let result = List.concat_map au_no_rec new_asrts in
-             List.filter Simplifications.admissible_assertion result
+             let result =
+               if not (InadmissibleOrigin.active ()) then
+                 List.concat_map au_no_rec new_asrts
+               else
+                 List.concat (List.mapi (fun ordinal a ->
+                   let edge = InadmissibleOrigin.emit "recursive-input" (fun () ->
+                     ["atom", InadmissibleOrigin.index atom_ordinal;
+                      "predicate", `String name; "definition", `Int ordinal;
+                      "input", Asrt.to_yojson a]) in
+                   InadmissibleOrigin.within edge (fun () -> au_no_rec a))
+                   new_asrts)
+             in
+             InadmissibleOrigin.filter "recursive-result"
+               Simplifications.admissible_assertion result
            with Not_found ->
              raise (Failure ("Error: Can't auto_unfold predicate " ^ name)))
        | asrt -> [ [ asrt ] ])
@@ -120,11 +348,16 @@ let rec auto_unfold
      e.g. [[a1; a2]; [b1; b2]] -> [[a1; b1]; [a1; b2]; [a2; b1]; [a2; b2]] *)
   |> List.fold_left
        (fun acc asrts ->
-         List.concat_map
-           (fun asrt -> List.map (fun asrt' -> asrt' @ asrt) asrts)
-           acc)
+         match product_ordinal with
+         | None ->
+             List.concat_map
+               (fun asrt -> List.map (fun asrt' -> asrt' @ asrt) asrts)
+               acc
+         | Some ordinal ->
+             let stage = !ordinal in incr ordinal;
+             InadmissibleOrigin.product stage acc asrts)
        [ [] ]
-  |> List.filter Simplifications.admissible_assertion
+  |> InadmissibleOrigin.filter "auto-result" Simplifications.admissible_assertion)
 
 (*
  * Return: Hashtbl from predicate name to boolean
@@ -194,21 +427,40 @@ let find_recursive_preds (preds : (string, Pred.t) Hashtbl.t) :
   is_recursive_pred
 
 let simplify_and_prune (pred : Pred.t) : Pred.t =
+  InadmissibleOrigin.with_scope pred.pred_name (-1) (fun () ->
   L.verbose (fun fmt ->
       fmt "Predicate %s has %d definitions before pruning." pred.pred_name
         (List.length pred.pred_definitions));
   let new_defs =
-    List.map
-      (fun (oc, x) -> (oc, Reduction.reduce_assertion x))
+    InadmissibleOrigin.map_defs
+      (fun ordinal (oc, x) ->
+        let reduced = Reduction.reduce_assertion x in
+        InadmissibleOrigin.trace "reduce" (fun () ->
+          ["ordinal", InadmissibleOrigin.index ordinal;
+           "label", InadmissibleOrigin.label oc;
+           "input", Asrt.to_yojson x; "output", Asrt.to_yojson reduced]);
+        (oc, reduced))
       pred.pred_definitions
   in
   let new_defs =
-    List.filter (fun (_, x) -> Simplifications.admissible_assertion x) new_defs
+    if not (InadmissibleOrigin.active ()) then
+      List.filter (fun (_, x) -> Simplifications.admissible_assertion x) new_defs
+    else
+      let before = ref 0 and after = ref 0 in
+      List.filter (fun (lab, x) ->
+        let ordinal = !before in incr before;
+        let keep = Simplifications.admissible_assertion x in
+        let output = if keep then (let n = !after in incr after; `Int n) else `Null in
+        InadmissibleOrigin.trace "prune" (fun () ->
+          ["ordinal", `Int ordinal; "output_ordinal", output;
+           "label", InadmissibleOrigin.label lab; "assertion", Asrt.to_yojson x;
+           "keep", `Bool keep]);
+        keep) new_defs
   in
   L.verbose (fun fmt ->
       fmt "Predicate %s left with %d definitions after pruning." pred.pred_name
         (List.length new_defs));
-  { pred with pred_definitions = new_defs }
+  { pred with pred_definitions = new_defs })
 
 (*
  * Return: Hashtbl from predicate name to boolean
@@ -278,16 +530,29 @@ let unfold_preds (preds : (string, Pred.t) Hashtbl.t) :
       let pred = Hashtbl.find preds name in
       L.verbose (fun fmt -> fmt "Unfolding predicate: %s" pred.pred_name);
       let definitions' : ((string * string list) option * Asrt.t) list =
-        List.concat_map
-          (fun (os, a) ->
-            List.map (fun a -> (os, a)) (auto_unfold preds recursion_info a))
-          pred.pred_definitions
+        if not (InadmissibleOrigin.selected name) then
+          List.concat_map
+            (fun (os, a) ->
+              List.map (fun a -> (os, a)) (auto_unfold preds recursion_info a))
+            pred.pred_definitions
+        else
+          List.concat (List.mapi (fun ordinal (os, a) ->
+            InadmissibleOrigin.with_scope name ordinal (fun () ->
+              let expanded = auto_unfold preds recursion_info a in
+              InadmissibleOrigin.trace "expanded-group" (fun () ->
+                ["original_ordinal", `Int ordinal;
+                 "label", InadmissibleOrigin.label os;
+                 "input", Asrt.to_yojson a;
+                 "outputs", InadmissibleOrigin.asts expanded]);
+              List.map (fun a -> (os, a)) expanded))
+            pred.pred_definitions)
       in
       L.verbose (fun fmt ->
           fmt "Definitions' has a length of %d" (List.length definitions'));
       let ret_pred = { pred with pred_definitions = definitions' } in
       L.verbose (fun fmt -> fmt "Pruning.");
       let ret_pred = simplify_and_prune ret_pred in
+      InadmissibleOrigin.record_pred "pruned" ret_pred;
       L.verbose (fun fmt -> fmt "Done pruning.");
       Hashtbl.replace copy_preds ret_pred.pred_name ret_pred;
       Hashtbl.replace unfolded_preds ret_pred.pred_name ret_pred)
@@ -336,7 +601,15 @@ let unfold_spec
       (fun pre -> Spec.{ sspec with ss_pre = pre; ss_posts = posts })
       pres
   in
-  let spec_sspecs = List.concat_map aux spec.spec_sspecs in
+  let spec_sspecs =
+    if not (Preparation_provenance.captures "procedure" spec.spec_name) then
+      List.concat_map aux spec.spec_sspecs
+    else
+      List.concat (List.mapi (fun ordinal (sspec : Spec.st) ->
+        let outputs = aux sspec in
+        Preparation_provenance.spec_group spec.spec_name ordinal sspec.ss_pre outputs;
+        outputs) spec.spec_sspecs)
+  in
   match spec_sspecs with
   | [] -> Fmt.failwith "unfolding in spec at preprocessing led to no spec!"
   | _ ->
@@ -372,7 +645,15 @@ let unfold_lemma
   in
   {
     lemma with
-    lemma_specs = List.concat_map unfold_lemma_spec lemma.lemma_specs;
+    lemma_specs =
+      if not (Preparation_provenance.captures "lemma" lemma.lemma_name) then
+        List.concat_map unfold_lemma_spec lemma.lemma_specs
+      else
+        List.concat (List.mapi (fun ordinal (spec : Lemma.spec) ->
+          let outputs = unfold_lemma_spec spec in
+          Preparation_provenance.lemma_group lemma.lemma_name ordinal
+            spec.lemma_hyp outputs;
+          outputs) lemma.lemma_specs);
   }
 
 let unfold_bispec
@@ -677,12 +958,31 @@ let add_closing_tokens preds =
     guarded_predicates
 
 let preprocess (prog : ('a, int) Prog.t) (unfold : bool) : ('a, int) Prog.t =
+  Preparation_provenance.with_preprocess prog @@ fun () ->
   L.Phase.with_normal ~title:"Logic preprocessing" @@ fun () ->
   Prog_env.using_prog prog @@ fun () ->
   let procs = prog.procs in
   let preds = prog.preds in
   let lemmas = prog.lemmas in
   let onlyspecs = prog.only_specs in
+  (* Reject metadata on declarations without a checked procedure body. The
+     public posts alone remain the caller semantics, including after unfolding. *)
+  let check_scope spec =
+    List.iter (fun (s : Spec.st) ->
+      Spec.validate_verifier_scope ~exact_target:true s;
+      if Option.is_some s.ss_verifier_scope &&
+         (not spec.Spec.spec_to_verify || spec.spec_name = !Config.entry_point)
+      then invalid_arg "Verifier scope metadata requires a verified non-main body")
+      spec.Spec.spec_sspecs
+  in
+  Hashtbl.iter (fun _ (p : ('a, int) Proc.t) ->
+    Option.iter check_scope p.proc_spec) procs;
+  Hashtbl.iter (fun _ (s : Spec.t) ->
+    if List.exists (fun (c : Spec.st) -> Option.is_some c.ss_verifier_scope)
+         s.spec_sspecs then
+      invalid_arg "Verifier scope metadata is not allowed on only-spec declarations")
+    onlyspecs;
+  InadmissibleOrigin.prepare preds;
 
   (* User facts and purity annotations are proof hints, not axioms for total
      verification. Keep definitions unchanged. Parameter type facts added below
@@ -721,6 +1021,7 @@ let preprocess (prog : ('a, int) Prog.t) (unfold : bool) : ('a, int) Prog.t =
        preds);
 
   let procs', preds', lemmas' = explicit_param_types procs preds lemmas in
+  InadmissibleOrigin.record_table "typed" preds';
 
   let () =
     Hashtbl.filter_map_inplace
@@ -769,6 +1070,8 @@ let preprocess (prog : ('a, int) Prog.t) (unfold : bool) : ('a, int) Prog.t =
         prog.macros)
   in
 
+  InadmissibleOrigin.record_table "domains-preserved" preds';
+  Preparation_provenance.before_expansion ~procs:procs' ~lemmas:lemmas';
   let preds'', procs'', bi_specs, lemmas'', onlyspecs' =
     match unfold with
     | false -> (preds', procs', prog.bi_specs, lemmas', onlyspecs)
@@ -782,11 +1085,14 @@ let preprocess (prog : ('a, int) Prog.t) (unfold : bool) : ('a, int) Prog.t =
         (preds'', procs'', bi_specs, lemmas'', onlyspecs')
   in
   add_closing_tokens preds'';
-  {
+  InadmissibleOrigin.record_table "installed" preds'';
+  let result = {
     prog with
     preds = preds'';
     procs = procs'';
     bi_specs;
     lemmas = lemmas'';
     only_specs = onlyspecs';
-  }
+  } in
+  Preparation_provenance.preprocessed result ~unfold;
+  result

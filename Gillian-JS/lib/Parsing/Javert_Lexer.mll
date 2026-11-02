@@ -140,6 +140,7 @@
       "incomplete",   Javert_Parser.INCOMPLETE;
       "lemma",        Javert_Parser.LEMMA;
       "variant",      Javert_Parser.VARIANT;
+        "verify_scope", Javert_Parser.VERIFY_SCOPE;
       "spec",         Javert_Parser.SPEC;
       "bispec",       Javert_Parser.BISPEC;
       "normal",       Javert_Parser.NORMAL;
@@ -234,6 +235,7 @@ rule read = parse
   | "l-rev"              { Javert_Parser.LSTREV }
   | "l-sub"              { Javert_Parser.LSTSUB }
   | "s-len"              { Javert_Parser.STRLEN }
+  | "u16-trim"           { Javert_Parser.UTF16TRIM }
   | "s-bytes"            { Javert_Parser.STRBYTES }
 (* Expression keywords *)
   | "l-nth"              { Javert_Parser.LSTNTH }

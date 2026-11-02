@@ -155,6 +155,9 @@ let rec missing_expr (kb : KB.t) (e : Expr.t) : KB.t list =
        are known if and only if they are in the knowledge base *)
     | PVar _ | LVar _ | ALoc _ -> [ KB.singleton e ]
     | UnOp (LstLen, UnOp (StrToBytes, bytes)) -> f bytes
+    (* Symbolic insertion can survive reduction. Knowing its operands permits
+       evaluation; this dependency analysis proves no length or domain fact. *)
+    | UnOp (LstLen, NOp (LstInsert, args)) -> join args
     | UnOp (LstLen, e1) -> (
         (* If a LstLen exists, then it must be of a program or a logical variable.
            All other cases (literal list, expression list, list concat, sub-list)
@@ -213,7 +216,7 @@ let rec learn_expr
   let f = learn_expr kb in
   match e with
   (* Literals, abstract locations, sublists, and sets are never invertible *)
-  | Lit _ | LstSub _ | ESet _ -> []
+  | Lit _ | LstSub _ | ESet _ | UnOp (LstLen, NOp (LstInsert, _)) -> []
   (* Nothing is learned if the top-level expr is a program or a logical variable *)
   (* Nothing is learned if the program or logical variable is already known *)
   | (PVar _ | LVar _ | ALoc _ | UnOp (LstLen, _)) when top_level || KB.mem e kb
@@ -245,7 +248,8 @@ let rec learn_expr
       (* Now comes the iteration *)
       learn_expr_list kb le_with_base_exprs
   (* Set n-ary operators are not invertible *)
-  | NOp (SetInter, _) | NOp (SetUnion, _) -> []
+  | NOp (SetInter, _) | NOp (SetUnion, _) | NOp (LstInsert, _)
+  | NOp (Utf16Sub, _) -> []
   (* TODO: LstCat is invertible, but not for now *)
   | NOp (LstCat, []) -> f base_expr (EList [])
   | NOp (LstCat, [ x ]) -> f base_expr x
@@ -456,6 +460,15 @@ let ins_outs_expr (kb : KB.t) (base_expr : Expr.t) (e : Expr.t) :
   let learned_outs = KB.of_list (fst (List.split outs)) in
   List.map (fun ins -> (KB.diff ins learned_outs, outs)) ins
 
+(* Keep exactly the original alternatives, including list-length choices and
+   the empty-list fallback used by ins_and_outs_from_lists. *)
+let ins_from_exprs inputs =
+  List.map simple_ins_expr inputs
+  |> List_utils.list_product
+  |> List.map (List.fold_left KB.union KB.empty)
+  |> List_utils.remove_duplicates
+  |> List.map minimise_matchables
+
 let ins_and_outs_from_lists (kb : KB.t) (lei : Expr.t list) (leo : Expr.t list)
     =
   L.(
@@ -465,11 +478,7 @@ let ins_and_outs_from_lists (kb : KB.t) (lei : Expr.t list) (leo : Expr.t list)
           lei
           Fmt.(brackets (list ~sep:semi Expr.pp))
           leo));
-  let ins = List.map simple_ins_expr lei in
-  let ins = List_utils.list_product ins in
-  let ins = List.map (List.fold_left KB.union KB.empty) ins in
-  let ins = List_utils.remove_duplicates ins in
-  let ins = List.map minimise_matchables ins in
+  let ins = ins_from_exprs lei in
   L.(
     verbose (fun m ->
         m "Calculated ins: %a" Fmt.(brackets (list ~sep:semi kb_pp)) ins));
@@ -481,6 +490,7 @@ let ins_and_outs_from_lists (kb : KB.t) (lei : Expr.t list) (leo : Expr.t list)
     learn_expr_list kb' leo
   in
   match ins with
+  | [] when List.is_empty lei -> [ (KB.empty, outs) ]
   | [] -> [ (KB.empty, []) ]
   | _ -> List.map (fun ins -> (ins, outs)) ins
 
@@ -620,6 +630,26 @@ let ins_outs_assertion
       in
       ins_and_outs_from_lists kb (largs @ List.rev llie) lloe
 
+(* A normalized heap can use fresh abstract locations whose disequalities
+   reduce to true. Summary matching may later bind those locations to caller
+   locations, so retain the source guards over their original logical names.
+   Keep their normalization bindings too: heap export may have renamed the
+   witnesses, and exact identity must preserve signed zero and NaN. *)
+let retain_precondition_guards ~original ~bindings normalised =
+  let guards = List.filter Asrt.is_pure_asrt original in
+  let variables = Asrt.lvars guards in
+  let bindings =
+    List.filter_map
+      (fun (variable, value) ->
+        match variable with
+        | Expr.LVar name
+          when SS.mem name variables && not (Expr.equal variable value) ->
+            Some (Asrt.Pure (Expr.BinOp (variable, ValueEqual, value)))
+        | _ -> None)
+      bindings
+  in
+  normalised @ bindings @ guards
+
 let simplify_asrts ?(sorted = true) a =
   let rec aux (a : Asrt.atom) : Asrt.atom list =
     match a with
@@ -638,17 +668,34 @@ let simplify_asrts ?(sorted = true) a =
   else if not sorted then atoms
   else
     let overlapping, separating = List.partition Asrt.is_pure_asrt atoms in
-    let overlapping = List.sort_uniq Stdlib.compare overlapping in
+    (* Literal/Expr identity distinguishes signed zeros. Generic comparison
+       would merge the two guards of a nonzero Number postcondition. *)
+    let overlapping = List.sort_uniq Asrt.compare_atom overlapping in
     List.sort Asrt.prioritise (separating @ overlapping)
 
 let s_init_atoms ~preds kb atoms =
   let step_of_atom ~kb atom =
-    ins_outs_assertion preds kb atom
-    |> List.find_map (fun (ins, outs) ->
-           if KB.subset ins kb then Some (atom, outs) else None)
+    (* Explicit core inputs cannot be supplied by learning its outputs. Defer
+       that work until at least one original input alternative is available;
+       retain every assertion and the original eligible matching path. *)
+    let ineligible_core =
+      match atom with
+      | Asrt.CorePred (name, inputs, _)
+        when Option.is_none (Asrt.as_user_pred_name name)
+             && Option.is_none (Asrt.as_definedness atom) ->
+          let alternatives = ins_from_exprs inputs in
+          alternatives <> []
+          && not (List.exists (fun ins -> KB.subset ins kb) alternatives)
+      | _ -> false
+    in
+    if ineligible_core then None
+    else
+      ins_outs_assertion preds kb atom
+      |> List.find_map (fun (ins, outs) ->
+             if KB.subset ins kb then Some (atom, outs) else None)
   in
   let rec search current kb rest =
-    L.verbose (fun m ->
+    L.tmi (fun m ->
         m "KNOWN: @[%a@].@\n@[<v 2>CUR MP:@\n%a@]@\nTO VISIT: @[%a@]" kb_pp kb
           pp_step_list current
           (Fmt.list ~sep:(Fmt.any "@\n") Asrt.pp_atom_full)

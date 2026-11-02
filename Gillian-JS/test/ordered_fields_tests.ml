@@ -23,8 +23,7 @@ let pc () =
 let check msg condition = Alcotest.(check bool) msg true condition
 let snapshot h = Yojson.Safe.to_string (Heap.to_yojson h)
 
-let action h name args =
-  let context = pc () in
+let action ?(context = pc ()) h name args =
   match Legacy.execute_action name h context.pfs context.gamma args with
   | Ok [ (heap, out, _, _) ] -> (heap, out)
   | _ -> Alcotest.fail ("action failed: " ^ name)
@@ -37,13 +36,13 @@ let make () =
   let heap, _ = action heap setProps [ loc; Expr.ESet [ key "z"; key "a" ] ] in
   heap
 
-let consume heap =
-  match Memory.consume aOrderedFields heap (pc ()) [ loc ] with
+let consume ?(context = pc ()) heap =
+  match Memory.consume aOrderedFields heap context [ loc ] with
   | [ { Branch.value = Ok (heap, out); _ } ] -> (heap, out)
   | _ -> Alcotest.fail "real consume failed"
 
-let produce heap ks vs =
-  match Memory.produce aOrderedFields heap (pc ()) [ loc; ks; vs ] with
+let produce ?(context = pc ()) heap ks vs =
+  match Memory.produce aOrderedFields heap context [ loc; ks; vs ] with
   | [ { Branch.value = heap; _ } ] -> heap
   | _ -> Alcotest.fail "real produce failed"
 
@@ -328,6 +327,997 @@ let conservative_export () =
   in
   check "export never certifies an unknown order" rejected
 
+let symbolic_context typ =
+  let context = pc () in
+  Gillian.Symbolic.Type_env.update context.gamma "#symbolic_key" typ;
+  context
+
+let symbolic_key = Expr.LVar "#symbolic_key"
+
+let symbolic_singleton () =
+  List.iter
+    (fun typ ->
+      let context = symbolic_context typ in
+      let heap = Heap.init () in
+      (* Logical cell production has no insertion provenance. Singleton order
+         must be derived, not stamped onto this original frame. *)
+      Heap.set heap loc_name
+        (Fields.add_abstract symbolic_key (Expr.num 7.) Fields.empty)
+        (Some (Expr.ESet [ symbolic_key ])) (Some metadata);
+      let before = snapshot heap in
+      let expected_keys = Expr.EList [ symbolic_key ] in
+      check "typed singleton enumeration"
+        (snd (action ~context heap getAllProps [ loc ])
+        = [ loc; expected_keys ]);
+      let remainder, outs = consume ~context heap in
+      check "symbolic witness and value preserved"
+        (outs = [ expected_keys; Expr.EList [ Expr.num 7. ] ]);
+      check "consume/enumeration does not promote original history"
+        (snapshot heap = before);
+      let restored = produce ~context remainder (List.hd outs) (List.nth outs 1) in
+      check "roundtrip enumeration remains the symbolic key"
+        (snd (action ~context restored getAllProps [ loc ])
+        = [ loc; expected_keys ]);
+      check "roundtrip retains metadata"
+        (snd (action ~context restored getMetadata [ loc ]) = [ loc; metadata ]))
+    [ Type.Utf16Type; Type.StringType ]
+
+let symbolic_rejections () =
+  let heap = Heap.init () in
+  let before = snapshot heap in
+  let ks = Expr.EList [ symbolic_key ] in
+  let vs = Expr.EList [ Expr.num 7. ] in
+  List.iter
+    (fun context ->
+      check "untyped and non-string singleton keys rejected"
+        (Memory.produce aOrderedFields heap context [ loc; ks; vs ] = []);
+      let invalid = Heap.init () in
+      Heap.set invalid loc_name
+        (Fields.add_abstract symbolic_key (Expr.num 7.) Fields.empty)
+        (Some (Expr.ESet [ symbolic_key ])) (Some metadata);
+      check "consumer cannot admit a non-string singleton"
+        (match Memory.consume aOrderedFields invalid context [ loc ] with
+        | [ { Branch.value = Error _; _ } ] -> true
+        | _ -> false))
+    [ pc (); symbolic_context Type.NumberType; symbolic_context Type.BooleanType ];
+  let context = symbolic_context Type.Utf16Type in
+  List.iter
+    (fun (ks, vs) ->
+      check "typed key does not bypass witness validity"
+        (Memory.produce aOrderedFields heap context [ loc; ks; vs ] = []))
+    [
+      (ks, Expr.EList [ Expr.Lit Literal.Nono ]);
+      (ks, Expr.EList [ Expr.LVar "#possibly_absent" ]);
+      (Expr.EList [ symbolic_key; symbolic_key ], values);
+      (Expr.EList [ symbolic_key; key "other" ], values);
+    ];
+  check "failed symbolic production preserves heap" (snapshot heap = before);
+  let occupied = make () in
+  let occupied_before = snapshot occupied in
+  check "symbolic witness cannot overwrite an owned footprint"
+    (Memory.produce aOrderedFields occupied context [ loc; ks; vs ] = []);
+  check "overlap rejection preserves original"
+    (snapshot occupied = occupied_before)
+
+let sequence_keys = Expr.LVar "#sequence_keys"
+let sequence_values = Expr.LVar "#sequence_values"
+
+let sequence_context () =
+  let context = pc () in
+  List.iter
+    (fun name -> Gillian.Symbolic.Type_env.update context.gamma name Type.ListType)
+    [ "#sequence_keys"; "#sequence_values" ];
+  Gillian.Symbolic.Pure_context.extend context.pfs
+    (Expr.BinOp (UnOp (LstLen, sequence_keys), Equal,
+                 UnOp (LstLen, sequence_values)));
+  context
+
+let sequence_make context =
+  let heap = Heap.init () in
+  Heap.set heap loc_name Fields.empty None (Some metadata);
+  produce ~context heap sequence_keys sequence_values
+
+let sequence_roundtrip () =
+  let context = sequence_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  check "whole sequence actual enumeration"
+    (snd (action ~context heap getAllProps [ loc ]) = [ loc; sequence_keys ]);
+  let remainder, outs = consume ~context heap in
+  check "whole sequence consume preserves both witnesses"
+    (outs = [ sequence_keys; sequence_values ]);
+  check "whole sequence consumption is persistent" (snapshot heap = before);
+  check "whole sequence consumption leaves metadata only"
+    (Heap.get remainder loc_name = Some ((Fields.empty, None), Some metadata));
+  let restored = produce ~context remainder (List.hd outs) (List.nth outs 1) in
+  check "whole sequence production preserves metadata"
+    (snd (action ~context restored getMetadata [ loc ]) = [ loc; metadata ]);
+  Heap.clean_up restored;
+  check "cleanup retains complete ownership"
+    (snd (action ~context restored getAllProps [ loc ]) = [ loc; sequence_keys ]);
+  Heap.is_well_formed restored
+
+let sequence_export_copy () =
+  let context = sequence_context () in
+  let heap = sequence_make context in
+  let assertions = Heap.assertions heap in
+  check "export contains whole witness, not raw empty cells"
+    (List.exists
+       (function Asrt.CorePred (name, [ l ], [ ks; vs ]) ->
+          name = aOrderedFields && l = loc && ks = sequence_keys && vs = sequence_values
+        | _ -> false) assertions);
+  let restore = List.fold_left
+      (fun h -> function
+        | Asrt.CorePred (name, ins, outs) -> (match Memory.produce name h context (ins @ outs) with
+            | [ { Branch.value = h; _ } ] -> h
+            | _ -> Alcotest.fail "sequence frame restoration failed")
+        | _ -> Alcotest.fail "unexpected exported assertion") (Heap.init ()) assertions in
+  let serialized = match Heap.of_yojson (Heap.to_yojson heap) with
+    | Ok h -> h | Error text -> Alcotest.fail text in
+  List.iter (fun h ->
+      check "copy/JSON/frame preserve arbitrary sequence"
+        (snd (action ~context h getAllProps [ loc ]) = [ loc; sequence_keys ]);
+      check "witness variables remain visible to substitution"
+        (Var.Set.mem "#sequence_keys" (Heap.lvars h)
+         && Var.Set.mem "#sequence_values" (Heap.lvars h));
+      Heap.is_well_formed h)
+    [ Heap.copy heap; serialized; restore ]
+
+let sequence_substitution () =
+  let context = sequence_context () in
+  let substitute ks vs =
+    let heap = sequence_make context in
+    let subst = Gillian.Symbolic.Subst.init
+        [ sequence_keys, ks; sequence_values, vs ] in
+    Heap.substitution_in_place subst heap; heap
+  in
+  let h = substitute (keys [ "z"; "a" ]) values in
+  check "concrete substitution retains supplied order" (has_order h [ "z"; "a" ]);
+  let remainder, out = consume h in
+  let exposed = produce remainder (List.hd out) (List.nth out 1) in
+  check "valid concrete witness can become exposed again"
+    (snd (action exposed getCell [ loc; key "z" ]) = [ loc; key "z"; Expr.num 1. ]);
+  List.iter (fun (ks, vs) -> reject_consume (substitute ks vs))
+    [ keys [ "z"; "z" ], values;
+      keys [ "z" ], values;
+      keys [ "10"; "2" ], values;
+      keys [ "z"; "a" ], Expr.EList [ Expr.num 1.; Expr.Lit Literal.Nono ] ];
+  let child = Expr.ALoc "#loc_sequence_child" in
+  let h = substitute (keys [ "z" ]) (Expr.EList [ child ]) in
+  check "child identities remain visible to freshness"
+    (Var.Set.mem "#loc_sequence_child" (Heap.alocs h))
+
+let sequence_aliases () =
+  let context = sequence_context () in
+  let target = "#loc_sequence_target" in
+  let h = sequence_make context in
+  Heap.merge_loc h loc_name loc_name;
+  check "identity substitution cannot delete ownership" (Heap.get_ordered h loc_name <> None);
+  Heap.merge_loc h target loc_name;
+  check "fresh location substitution moves whole ownership"
+    (Heap.get_ordered h target = Some (sequence_keys, sequence_values)
+     && not (Heap.has_loc h loc_name));
+  let collides expose =
+    let h = sequence_make context in
+    expose h;
+    let before = snapshot h in
+    let rejected = try Heap.merge_loc h target loc_name; false
+      with Gillian.Utils.Exceptions.Unsupported _ -> true in
+    check "aliasing exclusive ownership rejects" rejected;
+    check "alias rejection does not drop either footprint" (before = snapshot h)
+  in
+  collides (fun h -> Heap.set_ordered h target sequence_keys sequence_values);
+  collides (fun h -> Heap.init_object h target None);
+  collides (fun h -> Heap.set h target (Fields.add_abstract (key "z") (Expr.num 3.) Fields.empty) None None);
+  let h = sequence_make context in
+  Heap.set h target Fields.empty None (Some metadata);
+  Heap.merge_loc h target loc_name;
+  check "metadata-only alias frames without duplicate cells"
+    (Heap.get_ordered h target = Some (sequence_keys, sequence_values)
+     && Heap.get_met h target = Some metadata)
+
+let sequence_exclusivity () =
+  let context = sequence_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  List.iter (fun (name, args) ->
+      let rejected = try ignore (action ~context heap name args); false
+        with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError text) ->
+          text = "Unsupported ordered fields: operation requires exposed cells." in
+      check (name ^ " cannot bypass opaque ownership") rejected;
+      check "unsupported action retains original footprint" (snapshot heap = before))
+    [ getCell, [ loc; key "z" ]; setCell, [ loc; key "z"; Expr.num 4. ];
+      delCell, [ loc; key "z" ]; setProps, [ loc; Expr.ESet [] ];
+      delProps, [ loc; Expr.ESet [] ]; delObj, [ loc ];
+      Legacy.ga_to_setter aCell, [ loc; key "z"; Expr.Lit Literal.Nono ] ];
+  check "second whole sequence cannot overlap"
+    (Memory.produce aOrderedFields heap context [ loc; sequence_keys; sequence_values ] = []);
+  reject_produce heap (keys [ "z"; "a" ]) values;
+  let occupied = make () in
+  check "whole sequence cannot overlap exposed ownership"
+    (Memory.produce aOrderedFields occupied context [ loc; sequence_keys; sequence_values ] = []);
+  check "whole sequence is not discarded by rejection" (snapshot heap = before)
+
+let sequence_shape_rejections () =
+  let heap = Heap.init () in
+  check "untyped list witnesses cannot create whole fields"
+    (Memory.produce aOrderedFields heap (pc ()) [ loc; sequence_keys; sequence_values ] = []);
+  let context = sequence_context () in
+  List.iter (fun (ks, vs) ->
+      check "known malformed fragment cannot hide in opaque witness"
+        (Memory.produce aOrderedFields heap context [ loc; ks; vs ] = []))
+    [ keys [ "z"; "z" ], sequence_values;
+      keys [ "10"; "2" ], sequence_values;
+      Expr.num 1., sequence_values;
+      sequence_keys, Expr.EList [ Expr.Lit Literal.Nono ] ]
+
+let sequence_index = Expr.LVar "#sequence_index"
+
+let indexed_context ?(lower = true) ?(upper = true) () =
+  let context = sequence_context () in
+  Gillian.Symbolic.Type_env.update context.gamma "#sequence_index" Type.IntType;
+  let add = Gillian.Symbolic.Pure_context.extend context.pfs in
+  if lower then add (Expr.BinOp (Expr.zero_i, ILessThanEqual, sequence_index));
+  if upper then add (Expr.BinOp (sequence_index, ILessThan, UnOp (LstLen, sequence_keys)));
+  context
+
+let selected_key = Expr.BinOp (sequence_keys, LstNth, sequence_index)
+let selected_value = Expr.BinOp (sequence_values, LstNth, sequence_index)
+
+let sequence_indexed_read () =
+  let context = indexed_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  check "total action accepts resource-backed selected key without extra key facts"
+    (Legacy.prepare_total_action getCell heap context.pfs context.gamma
+       [ loc; selected_key ] = [ loc; selected_key ]);
+  (match Legacy.execute_action getCell heap context.pfs context.gamma [ loc; selected_key ] with
+   | Ok [ (after, outputs, learned, _) ] ->
+       check "actual lookup returns paired value at the same arbitrary index"
+         (outputs = [ loc; selected_key; selected_value ]);
+       check "only resource-entailed presence is learned"
+         (learned = [ Expr.UnOp (Not, BinOp (selected_value, Equal, Lit Literal.Nono)) ]);
+       check "read is persistent and metadata is framed"
+         (snapshot after = before && Heap.get_met after loc_name = Some metadata)
+   | _ -> Alcotest.fail "indexed lookup failed");
+  let _, witnesses = consume ~context heap in
+  check "read leaves complete resource available to checked summary"
+    (witnesses = [ sequence_keys; sequence_values ])
+
+let sequence_indexed_bounds () =
+  let reject context prop =
+    let heap = sequence_make context in
+    let before = snapshot heap in
+    let rejected = try ignore (action ~context heap getCell [ loc; prop ]); false
+      with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError text) ->
+        text = "Unsupported ordered fields: operation requires exposed cells." in
+    check "unproved index or unrelated list cannot select an owned value" rejected;
+    check "rejected read leaves ownership intact" (snapshot heap = before)
+  in
+  reject (indexed_context ~lower:false ()) selected_key;
+  reject (indexed_context ~upper:false ()) selected_key;
+  let context = indexed_context () in
+  Gillian.Symbolic.Type_env.update context.gamma "#other_keys" Type.ListType;
+  reject context (Expr.BinOp (LVar "#other_keys", LstNth, sequence_index));
+  reject context (key "z")
+
+let sequence_indexed_cell_consumption () =
+  let context = indexed_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  let rejected = try
+      ignore (Memory.consume aCell heap context [ loc; selected_key ]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "read access does not authorize separate cell consumption" rejected;
+  check "failed split retains whole ownership" (snapshot heap = before)
+
+let sequence_indexed_known_values () =
+  let context = indexed_context () in
+  let heap = sequence_make context in
+  let subst = Gillian.Symbolic.Subst.init
+      [ sequence_values, values; sequence_index, Expr.one_i ] in
+  Heap.substitution_in_place subst heap;
+  let context = sequence_context () in
+  Gillian.Symbolic.Pure_context.extend context.pfs
+    (Expr.BinOp (UnOp (LstLen, sequence_keys), Equal, Expr.int 2));
+  let prop = Expr.BinOp (sequence_keys, LstNth, Expr.one_i) in
+  (match Legacy.execute_action getCell heap context.pfs context.gamma [ loc; prop ] with
+   | Ok [ (_, [ _; _; value ], _, _) ] ->
+       let value = Gillian.Logic.Reduction.reduce_lexpr ~pfs:context.pfs ~gamma:context.gamma value in
+       check "nonempty concrete value witness selects second, not first" (value = Expr.num 2.)
+   | _ -> Alcotest.fail "concrete values indexed lookup failed")
+
+let membership_literals () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let utf16 units = Literal.Utf16String
+      (Gillian.Utils.Utf16.of_canonical (Gillian.Utils.Utf16.of_code_units units)) in
+  let check_case xs value expected =
+    let term = Expr.BinOp (Lit (Literal.LList xs), LstContains, Lit value) in
+    check "concrete membership uses value identity"
+      (Engine.CExprEval.evaluate_expr store term = Literal.Bool expected);
+    check "reduction agrees with concrete membership"
+      (Gillian.Logic.Reduction.reduce_lexpr term = Expr.bool expected);
+    check "direct SMT agrees with concrete membership"
+      (not (Smt.is_sat (Expr.Set.singleton
+              (Expr.BinOp (term, ValueEqual, Expr.bool (not expected))))
+              (Gillian.Symbolic.Type_env.as_hashtbl
+                 (Gillian.Symbolic.Type_env.init ()))))
+  in
+  List.iter (fun (xs, value, expected) -> check_case xs value expected)
+    [ [], Literal.Null, false;
+      [ utf16 [ 0; 0xd800 ] ], utf16 [ 0; 0xd800 ], true;
+      [ utf16 [ 0xd800 ] ], utf16 [ 0xdc00 ], false;
+      [ Literal.String "z" ], utf16 [ 122 ], false;
+      [ Literal.Num nan ], Literal.Num nan, true;
+      [ Literal.Num 0. ], Literal.Num (-0.), false;
+      [ Literal.LList [ Literal.Num nan; Literal.Num (-0.) ] ],
+        Literal.LList [ Literal.Num nan; Literal.Num (-0.) ], true;
+      [ Literal.LList [] ], Literal.LList [ Literal.Null ], false ]
+
+let membership_domains () =
+  let context = sequence_context () in
+  let member = Expr.LVar "#domain_member" in
+  Gillian.Symbolic.Type_env.update context.gamma "#domain_member" Type.Utf16Type;
+  let evaluate = Gillian.Logic.Reduction.reduce_lexpr
+      ~pfs:context.pfs ~gamma:context.gamma in
+  let proves condition = Gillian.Logic.FOSolver.check_entailment
+      Gillian.Utils.Containers.SS.empty context.pfs [ condition ] context.gamma in
+  let accepts term = try
+      Engine.Totality.check_expression ~proof:true ~proves ~evaluate
+        ~require:(fun _ condition -> if not (proves condition) then failwith "domain") term;
+      true
+    with Failure message when message = "domain" -> false in
+  check "membership accepts typed symbolic lists and keys"
+    (accepts (Expr.BinOp (sequence_keys, LstContains, member)));
+  check "membership rejects a non-list operand"
+    (not (accepts (Expr.BinOp (Expr.num 0., LstContains, member))));
+  check "logical sets are not values stored in GIL lists"
+    (not (accepts (Expr.BinOp (sequence_keys, LstContains, Expr.ESet []))))
+
+let membership_symbolic () =
+  let context = sequence_context () in
+  let value = Expr.LVar "#member" in
+  Gillian.Symbolic.Type_env.update context.gamma "#member" Type.Utf16Type;
+  let contains list = Expr.BinOp (list, LstContains, value) in
+  let appended = Expr.NOp (LstCat, [ sequence_keys; Expr.EList [ value ] ]) in
+  let sat fs = Smt.is_sat (Expr.Set.of_list fs)
+      (Gillian.Symbolic.Type_env.as_hashtbl context.gamma) in
+  check "appended member occurs for arbitrary preceding length"
+    (not (sat [ Expr.UnOp (Not, contains appended) ]));
+  check "absence is satisfiable for an empty sequence"
+    (sat [ Expr.BinOp (sequence_keys, Equal, Expr.EList []);
+           Expr.UnOp (Not, contains sequence_keys) ]);
+  check "presence is satisfiable for a nonempty sequence"
+    (sat [ contains sequence_keys ]);
+  check "membership and absence are contradictory"
+    (not (sat [ contains sequence_keys; Expr.UnOp (Not, contains sequence_keys) ]))
+
+let absent_key = Expr.LVar "#absent_key"
+let absence_context ?(typed = true) ?(keys = sequence_keys) () =
+  let context = sequence_context () in
+  if typed then Gillian.Symbolic.Type_env.update context.gamma
+      "#absent_key" Type.Utf16Type;
+  Gillian.Symbolic.Pure_context.extend context.pfs
+    (Expr.UnOp (Not, BinOp (keys, LstContains, absent_key)));
+  context
+
+let sequence_absent_read () =
+  let context = absence_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  check "total lookup requires only proved typed absence"
+    (Legacy.prepare_total_action getCell heap context.pfs context.gamma
+       [ loc; absent_key ] = [ loc; absent_key ]);
+  (match Legacy.execute_action getCell heap context.pfs context.gamma [ loc; absent_key ] with
+   | Ok [ (after, out, facts, _) ] ->
+       check "complete sequence absence returns internal none"
+         (out = [ loc; absent_key; Expr.Lit Literal.Nono ] && facts = []);
+       check "lookup preserves exact sequence and metadata"
+         (snapshot after = before && Heap.get_met after loc_name = Some metadata)
+   | _ -> Alcotest.fail "absent lookup failed");
+  check "lookup leaves both witnesses consumable"
+    (snd (consume ~context heap) = [ sequence_keys; sequence_values ])
+
+let reject_absent context prop =
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  let rejected = try ignore (action ~context heap getCell [ loc; prop ]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "absence requires proved nonmembership in owned keys" rejected;
+  check "rejection retains complete ownership" (snapshot heap = before)
+
+let absence_no_fact () =
+  let context = sequence_context () in
+  Gillian.Symbolic.Type_env.update context.gamma "#absent_key" Type.Utf16Type;
+  reject_absent context absent_key
+
+let absence_wrong_list () =
+  let context = absence_context ~keys:(Expr.LVar "#other_keys") () in
+  Gillian.Symbolic.Type_env.update context.gamma "#other_keys" Type.ListType;
+  reject_absent context absent_key
+
+let absence_present () =
+  let context = sequence_context () in
+  Gillian.Symbolic.Type_env.update context.gamma "#absent_key" Type.Utf16Type;
+  Gillian.Symbolic.Pure_context.extend context.pfs
+    (Expr.BinOp (sequence_keys, LstContains, absent_key));
+  reject_absent context absent_key
+
+let absence_nonkey () =
+  reject_absent (absence_context ~typed:false ()) absent_key;
+  let context = absence_context ~typed:false () in
+  Gillian.Symbolic.Type_env.update context.gamma "#absent_key" Type.NumberType;
+  reject_absent context absent_key
+
+let absence_no_cell_split () =
+  let context = absence_context () in
+  let heap = sequence_make context in
+  let before = snapshot heap in
+  let rejected = try ignore (Memory.consume aCell heap context [ loc; absent_key ]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "absence read does not duplicate a separately consumable cell" rejected;
+  check "failed split leaves whole resource" (snapshot heap = before)
+
+let ukey s = Expr.Lit (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical s))
+let ukeys xs = Expr.EList (List.map ukey xs)
+
+let insertion_position_literals () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let gamma = Gillian.Symbolic.Type_env.as_hashtbl (Gillian.Symbolic.Type_env.init ()) in
+  List.iter (fun (names, name, expected) ->
+    let term = Expr.BinOp (ukeys names, KeyInsertIndex, ukey name) in
+    check "concrete exact insertion index" (Engine.CExprEval.evaluate_expr store term = Literal.Int (Z.of_int expected));
+    check "reducer agrees with concrete insertion" (Gillian.Logic.Reduction.reduce_lexpr term = Expr.int expected);
+    check "SMT agrees with exact numeric/name classification"
+      (not (Smt.is_sat (Expr.Set.singleton (Expr.UnOp (Not, BinOp (term, Equal, Expr.int expected)))) gamma)))
+    [ [], "0", 0; [], "z", 0;
+      ["2"; "10"; "z"; "a"], "1", 0;
+      ["2"; "10"; "z"; "a"], "3", 1;
+      ["2"; "10"; "z"; "a"], "11", 2;
+      ["2"; "10"; "z"; "a"], "b", 4;
+      ["0"; "2"; "4294967294"; "z"], "4294967293", 2;
+      ["0"; "2"; "z"], "4294967294", 2;
+      ["0"; "2"; "z"], "4294967295", 3;
+      ["0"; "2"; "z"], "01", 3;
+      ["0"; "2"; "z"], "-0", 3;
+      ["z"], "__proto__", 1;
+      ["z"], "", 1;
+      ["z"], Gillian.Utils.Utf16.of_code_units [0xd800], 1 ]
+
+let insertion_literal_values () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let xs = Literal.LList [ Literal.Num nan; Literal.Num (-0.) ] in
+  let v = Literal.LList [ Literal.Null ] in
+  List.iter (fun (i, expected) ->
+    let term = Expr.NOp (LstInsert, [ Lit xs; Expr.int i; Lit v ]) in
+    check "concrete insertion retains exact value identity"
+      (Literal.same_value (Engine.CExprEval.evaluate_expr store term) (Literal.LList expected));
+    let wrong = Expr.UnOp (Not, BinOp (term, ValueEqual, Lit (Literal.LList expected))) in
+    check "SMT insertion preserves NaN signed-zero nested values"
+      (not (Smt.is_sat (Expr.Set.singleton wrong)
+        (Gillian.Symbolic.Type_env.as_hashtbl (Gillian.Symbolic.Type_env.init ())))))
+    [ 0, [v; Literal.Num nan; Literal.Num (-0.)];
+      1, [Literal.Num nan; v; Literal.Num (-0.)];
+      2, [Literal.Num nan; Literal.Num (-0.); v] ];
+  List.iter (fun i ->
+    let rejected = try ignore (Engine.CExprEval.evaluate_expr store
+      (NOp (LstInsert, [Lit xs; Expr.int i; Lit v]))); false
+      with Engine.CExprEval.EvaluationError _ -> true in
+    check "concrete invalid position rejects" rejected) [-1; 3]
+
+let insertion_symbolic_lengths () =
+  let c = sequence_context () in
+  let i = Expr.LVar "#insert_at" and v = Expr.LVar "#insert_value" in
+  Gillian.Symbolic.Type_env.update c.gamma "#insert_at" Type.IntType;
+  Gillian.Symbolic.Type_env.update c.gamma "#insert_value" Type.Utf16Type;
+  let term = Expr.NOp (LstInsert, [sequence_keys; i; v]) in
+  let fs = [ Expr.BinOp (Expr.zero_i, ILessThanEqual, i);
+    Expr.BinOp (i, ILessThanEqual, UnOp (LstLen, sequence_keys));
+    Expr.UnOp (Not, BinOp (UnOp (LstLen, term), Equal,
+      BinOp (UnOp (LstLen, sequence_keys), IPlus, Expr.one_i))) ] in
+  check "exact structural insertion adds one at any finite list length"
+    (not (Smt.is_sat (Expr.Set.of_list fs) (Gillian.Symbolic.Type_env.as_hashtbl c.gamma)))
+
+let insertion_key_representation () =
+  let store = Engine.CExprEval.CStore.init [] in
+  List.iter (fun (xs, result) ->
+    let term = Expr.UnOp (LstAllUtf16, xs) in
+    check "concrete uniform representation" (Engine.CExprEval.evaluate_expr store term = Literal.Bool result);
+    check "SMT uniform representation"
+      (not (Smt.is_sat (Expr.Set.singleton (Expr.BinOp (term, ValueEqual, Expr.bool (not result))))
+        (Gillian.Symbolic.Type_env.as_hashtbl (Gillian.Symbolic.Type_env.init ())))))
+    [Expr.EList [], true; ukeys ["0"; "z"], true;
+      Expr.EList [ukey "z"; key "a"], false; Expr.EList [Expr.Lit Literal.Null], false]
+
+let insertion_quantifier_names () =
+  let gamma = Gillian.Symbolic.Type_env.init () in
+  let xs = Expr.LVar "all_u16_index" in
+  Gillian.Symbolic.Type_env.update gamma "all_u16_index" Type.ListType;
+  let fs = [ Expr.BinOp (xs, Equal, ukeys ["z"]);
+    Expr.UnOp (Not, UnOp (LstAllUtf16, xs)) ] in
+  check "UTF16 universal binder cannot capture a caller list name"
+    (not (Smt.is_sat (Expr.Set.of_list fs) (Gillian.Symbolic.Type_env.as_hashtbl gamma)))
+
+let insertion_context () =
+  let c = absence_context () in
+  Gillian.Symbolic.Pure_context.extend c.pfs (Expr.UnOp (LstAllUtf16, sequence_keys));
+  c
+
+let sequence_runtime_insert () =
+  let c = insertion_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let args = [loc; absent_key; Expr.Lit Literal.Null] in
+  check "total setter accepts proved complete insertion"
+    (Legacy.prepare_total_action setCell heap c.pfs c.gamma args = args);
+  match Legacy.execute_action setCell heap c.pfs c.gamma args with
+  | Ok [ (after, [], facts, []) ] ->
+      let position = Expr.BinOp (sequence_keys, KeyInsertIndex, absent_key) in
+      check "real setter derives paired key/value witnesses"
+        (Heap.get_ordered after loc_name = Some
+           (Expr.NOp (LstInsert, [sequence_keys; position; absent_key]),
+            Expr.NOp (LstInsert, [sequence_values; position; Expr.Lit Literal.Null])));
+      check "input branch and metadata preserved"
+        (snapshot heap = before && Heap.get_met after loc_name = Some metadata);
+      check "transfer derives exactly four justified facts" (List.length facts = 4)
+  | _ -> Alcotest.fail "complete insertion failed"
+
+let insertion_reject_guards () =
+  let reject c prop v =
+    let heap = sequence_make c in
+    let before = snapshot heap in
+    let rejected = try ignore (Legacy.execute_action setCell heap c.pfs c.gamma [loc;prop;v]); false
+      with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+    check "invalid insertion rejected" rejected;
+    check "failed insertion preserves input" (snapshot heap = before)
+  in
+  reject (absence_context ()) absent_key (Expr.Lit Literal.Null);
+  reject (sequence_context ()) absent_key (Expr.Lit Literal.Null);
+  reject (insertion_context ()) absent_key (Expr.Lit Literal.Nono);
+  reject (insertion_context ()) (key "legacy") (Expr.Lit Literal.Null);
+  reject (insertion_context ()) absent_key (Expr.ESet []);
+  let c = sequence_context () in
+  Gillian.Symbolic.Type_env.update c.gamma "#absent_key" Type.Utf16Type;
+  Gillian.Symbolic.Pure_context.extend c.pfs (Expr.UnOp (LstAllUtf16, sequence_keys));
+  Gillian.Symbolic.Pure_context.extend c.pfs (Expr.BinOp (sequence_keys, LstContains, absent_key));
+  reject c absent_key (Expr.Lit Literal.Null)
+
+let insertion_no_logical_production () =
+  let c = insertion_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try Memory.produce aCell heap c [ loc; absent_key; Expr.Lit Literal.Null ] = []
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "raw Cell production cannot mutate packed ownership" rejected;
+  check "raw producer leaves packed resource" (snapshot heap = before)
+
+let insertion_total_domains () =
+  let c = insertion_context () in
+  let evaluate = Gillian.Logic.Reduction.reduce_lexpr ~pfs:c.pfs ~gamma:c.gamma in
+  let proves f = Gillian.Logic.FOSolver.check_entailment Gillian.Utils.Containers.SS.empty c.pfs [f] c.gamma in
+  let accepts term = try Engine.Totality.check_expression ~proof:true ~proves ~evaluate
+    ~require:(fun _ f -> if not (proves f) then failwith "domain") term; true
+    with Failure message when message = "domain" -> false in
+  check "exact primitive accepts UTF16/list domain" (accepts (Expr.BinOp (sequence_keys, KeyInsertIndex, absent_key)));
+  check "key position rejects Number key" (not (accepts (Expr.BinOp (sequence_keys, KeyInsertIndex, Expr.num 1.))));
+  check "insertion rejects negative bound" (not (accepts (Expr.NOp (LstInsert, [ukeys []; Expr.int (-1); Expr.Lit Literal.Null]))));
+  check "insertion rejects greater-than-length bound" (not (accepts (Expr.NOp (LstInsert, [ukeys []; Expr.int 1; Expr.Lit Literal.Null]))));
+  check "insertion accepts exact integer endpoint" (accepts (Expr.NOp (LstInsert, [ukeys []; Expr.int 0; Expr.Lit Literal.Null])))
+
+let insertion_symbolic_bounds () =
+  let c = insertion_context () in
+  let position = Expr.BinOp (sequence_keys, KeyInsertIndex, absent_key) in
+  let bounds = [ Expr.BinOp (Expr.zero_i, ILessThanEqual, position);
+    Expr.BinOp (position, ILessThanEqual, UnOp (LstLen, sequence_keys)) ] in
+  List.iter (fun bound ->
+    check "typed structural position bound reduces without recursive SMT"
+      (Gillian.Logic.Reduction.reduce_lexpr ~gamma:c.gamma bound = Expr.true_)) bounds;
+  List.iter (fun outside ->
+    check "negated endpoint bound reduces after comparison normalization"
+      (Gillian.Logic.Reduction.reduce_lexpr ~gamma:c.gamma outside = Expr.false_))
+    [ Expr.BinOp (position, ILessThan, Expr.zero_i);
+      Expr.BinOp (UnOp (LstLen, sequence_keys), ILessThan, position) ];
+  check "total insertion accepts symbolic position without assumed bounds"
+    (let evaluate = Gillian.Logic.Reduction.reduce_lexpr ~pfs:c.pfs ~gamma:c.gamma in
+     let proves f = Gillian.Logic.FOSolver.check_entailment Gillian.Utils.Containers.SS.empty c.pfs [f] c.gamma in
+     try Engine.Totality.check_expression ~proof:true ~proves ~evaluate
+       ~require:(fun _ f -> if not (proves f) then failwith "bound")
+       (Expr.NOp (LstInsert, [sequence_keys; position; Expr.Lit Literal.Null])); true
+     with Failure message when message = "bound" -> false)
+
+let insertion_bound_domains () =
+  let c = insertion_context () in
+  let p = Expr.BinOp (sequence_keys, KeyInsertIndex, absent_key) in
+  let lower = Expr.BinOp (Expr.zero_i, ILessThanEqual, p) in
+  let reduce gamma e = Gillian.Logic.Reduction.reduce_lexpr ~gamma e in
+  let unknown = Gillian.Symbolic.Type_env.init () in
+  check "missing list/key types cannot authorize a bound" (reduce unknown lower <> Expr.true_);
+  let list_only = Gillian.Symbolic.Type_env.init () in
+  Gillian.Symbolic.Type_env.update list_only "#sequence_keys" Type.ListType;
+  check "missing key type cannot authorize a bound" (reduce list_only lower <> Expr.true_);
+  let other = Expr.LVar "#other_keys" in
+  Gillian.Symbolic.Type_env.update c.gamma "#other_keys" Type.ListType;
+  check "unrelated length is not a position bound"
+    (reduce c.gamma (Expr.BinOp (p, ILessThanEqual, UnOp (LstLen, other))) <> Expr.true_);
+  check "strict endpoint is not implied"
+    (reduce c.gamma (Expr.BinOp (Expr.zero_i, ILessThan, p)) <> Expr.true_);
+  let partial = Expr.UnOp (Car, Expr.EList []) in
+  check "shortcut does not erase a partial list input"
+    (try ignore (reduce c.gamma (Expr.BinOp (Expr.zero_i, ILessThanEqual,
+       Expr.BinOp (partial, KeyInsertIndex, absent_key)))); false
+     with Gillian.Logic.Reduction.ReductionException _ -> true);
+  let wrong = Expr.BinOp (sequence_keys, KeyInsertIndex, Expr.num 1.) in
+  check "Number key is not UTF16"
+    (try reduce c.gamma (Expr.BinOp (Expr.zero_i, ILessThanEqual, wrong)) <> Expr.true_
+     with Failure message -> String.starts_with ~prefix:"TYPE ERROR:" message)
+
+let update_context ?(lower = true) ?(upper = true) ?(bounded = true) () =
+  let c = indexed_context ~lower ~upper () in
+  if bounded then Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (UnOp (LstLen, sequence_values), ILessThanEqual,
+      Lit (Int (Z.of_int max_int))));
+  c
+
+let replacement values index value =
+  let next = Expr.BinOp (index, IPlus, Expr.one_i) in
+  Expr.NOp (LstCat, [ Expr.LstSub (values, Expr.zero_i, index);
+    Expr.EList [value]; Expr.LstSub (values, next,
+      Expr.BinOp (UnOp (LstLen, values), IMinus, next)) ])
+
+let sequence_runtime_update () =
+  let c = update_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let args = [loc; selected_key; Expr.bool true] in
+  check "total setter accepts proved complete indexed update"
+    (Legacy.prepare_total_action setCell heap c.pfs c.gamma args = args);
+  (match Legacy.execute_action setCell heap c.pfs c.gamma args with
+  | Ok [(after, [], facts, [])] ->
+      let next = replacement sequence_values sequence_index (Expr.bool true) in
+      check "real update keeps exact keys and replaces one value"
+        (Heap.get_ordered after loc_name = Some (sequence_keys, next));
+      check "update derives only the justified unchanged length"
+        (facts = [Expr.BinOp (UnOp (LstLen, sequence_keys), Equal, UnOp (LstLen, next))]);
+      check "update preserves input branch and metadata"
+        (snapshot heap = before && Heap.get_met after loc_name = Some metadata);
+      check "updated complete resource remains consumable"
+        (snd (consume ~context:c after) = [sequence_keys; next])
+  | _ -> Alcotest.fail "indexed update failed")
+
+let reject_update c prop value =
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try ignore (Legacy.prepare_total_action setCell heap c.pfs c.gamma
+      [loc; prop; value]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "update rejects unproved ownership/domain/value" rejected;
+  check "rejected update keeps the original resource" (snapshot heap = before)
+
+let update_index_bounds () =
+  reject_update (update_context ~lower:false ()) selected_key (Expr.bool true);
+  reject_update (update_context ~upper:false ()) selected_key (Expr.bool true)
+
+let update_native_bound () =
+  reject_update (update_context ~bounded:false ()) selected_key (Expr.bool true)
+
+let update_wrong_list () =
+  let c = update_context () in
+  Gillian.Symbolic.Type_env.update c.gamma "#other_update_keys" Type.ListType;
+  reject_update c (Expr.BinOp (LVar "#other_update_keys", LstNth, sequence_index)) (Expr.bool true)
+
+let update_nonvalues () =
+  reject_update (update_context ()) selected_key (Expr.Lit Literal.Nono);
+  reject_update (update_context ()) selected_key (Expr.ESet [])
+
+let update_no_logical_production () =
+  let c = update_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try ignore (Memory.produce aCell heap c
+      [loc; selected_key; Expr.bool true]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "logical producer cannot apply indexed runtime update" rejected;
+  check "failed logical update preserves whole ownership" (snapshot heap = before)
+
+let update_literal_identity () =
+  let store = Engine.CExprEval.CStore.init [] in
+  let original = Literal.LList [Literal.Num nan; Literal.Num (-0.); Literal.Null] in
+  List.iter (fun (index, value, expected) ->
+    let term = replacement (Expr.Lit original) (Expr.int index) (Expr.Lit value) in
+    check "native replacement preserves untouched NaN and signed zero"
+      (Literal.same_value (Engine.CExprEval.evaluate_expr store term) (Literal.LList expected));
+    check "reducer retains exact replacement identity"
+      (Gillian.Logic.Reduction.reduce_lexpr
+        (Expr.BinOp (term, ValueEqual, Lit (Literal.LList expected))) = Expr.bool true))
+    [0, Literal.Bool true, [Literal.Bool true; Literal.Num (-0.); Literal.Null];
+     1, Literal.Bool true, [Literal.Num nan; Literal.Bool true; Literal.Null];
+     2, Literal.Bool true, [Literal.Num nan; Literal.Num (-0.); Literal.Bool true]]
+
+let update_slice_domains () =
+  let c = update_context () in
+  let proves condition = Gillian.Logic.FOSolver.check_entailment
+      Gillian.Utils.Containers.SS.empty c.pfs [condition] c.gamma in
+  let evaluate = Gillian.Logic.Reduction.reduce_lexpr ~pfs:c.pfs ~gamma:c.gamma in
+  let term = replacement sequence_values sequence_index (Expr.bool true) in
+  Engine.Totality.check_expression ~proof:true ~proves ~evaluate
+    ~require:(fun _ condition -> if not (proves condition) then Alcotest.fail "replacement slice domain") term
+
+let length_key = ukey "length"
+
+let named_context ?(lower = true) ?(upper = true) ?(reverse = false)
+    ?(identity = false) () =
+  let c = update_context ~lower ~upper () in
+  let left, right = if reverse then length_key, selected_key else selected_key, length_key in
+  Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (left, (if identity then ValueEqual else Equal), right));
+  c
+
+let named_sequence_read () =
+  List.iter (fun (reverse, identity) ->
+    let c = named_context ~reverse ~identity () in
+    let heap = sequence_make c in
+    let before = snapshot heap in
+    check "named owned key passes total read guard"
+      (Legacy.prepare_total_action getCell heap c.pfs c.gamma [loc; length_key] = [loc; length_key]);
+    check "literal lookup returns the owned paired value"
+      (snd (action ~context:c heap getCell [loc; length_key]) = [loc; length_key; selected_value]);
+    check "named read leaves metadata and complete ownership intact"
+      (snapshot heap = before && snd (consume ~context:c heap) = [sequence_keys; sequence_values]))
+    [false, false; true, false; false, true; true, true]
+
+let named_sequence_update () =
+  let c = named_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let desc = Expr.EList [ukey "d"; Expr.num 4294967295.; Expr.bool true;
+    Expr.bool false; Expr.bool false] in
+  let args = [loc; length_key; desc] in
+  check "named descriptor update passes total write guard"
+    (Legacy.prepare_total_action setCell heap c.pfs c.gamma args = args);
+  let after, out = action ~context:c heap setCell args in
+  check "named write changes only the selected descriptor"
+    (out = [] && Heap.get_ordered after loc_name = Some
+      (sequence_keys, replacement sequence_values sequence_index desc));
+  check "named write preserves metadata and original heap branch"
+    (snapshot heap = before && Heap.get_met after loc_name = Some metadata)
+
+let named_sequence_wrong_list () =
+  let c = update_context () in
+  let other = Expr.LVar "#other_named_keys" in
+  Gillian.Symbolic.Type_env.update c.gamma "#other_named_keys" Type.ListType;
+  Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (BinOp (other, LstNth, sequence_index), Equal, length_key));
+  reject_update c length_key (Expr.bool true)
+
+let named_sequence_bounds () =
+  reject_update (named_context ~lower:false ()) length_key (Expr.bool true);
+  reject_update (named_context ~upper:false ()) length_key (Expr.bool true)
+
+let named_sequence_missing_equality () =
+  reject_update (update_context ()) length_key (Expr.bool true);
+  reject_update (named_context ()) (ukey "unrelated") (Expr.bool true)
+
+let named_sequence_no_logical_write () =
+  let c = named_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try ignore (Memory.produce aCell heap c
+      [loc; length_key; Expr.bool true]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "named alias cannot authorize logical production" rejected;
+  check "rejected named production preserves whole ownership" (snapshot heap = before)
+
+let named_sequence_no_split () =
+  let c = named_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try ignore (Memory.consume aCell heap c [loc; length_key]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "named read cannot split a Cell from complete ownership" rejected;
+  check "rejected named split leaves the original resource" (snapshot heap = before)
+
+let named_sequence_no_ownership () =
+  let c = named_context () in
+  let heap = Heap.init () in
+  Heap.init_object heap loc_name (Some metadata);
+  let before = snapshot heap in
+  let rejected = try ignore (Legacy.prepare_total_action setCell heap c.pfs c.gamma
+      [loc; length_key; Expr.bool true]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "pure key equality supplies no cell ownership" rejected;
+  check "unowned named write preserves metadata-only input" (snapshot heap = before)
+
+let selected_context ?(lower = true) ?(upper = true) ?(typed = true) () =
+  let c = named_context ~lower ~upper () in
+  if typed then Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (UnOp (TypeOf, selected_value), Equal, Lit (Type ListType)));
+  c
+
+let consume_selected c heap prop =
+  match Memory.consume aSelectedFields heap c [loc; prop] with
+  | [{Branch.value = Ok (heap, outputs); _}] -> heap, outputs
+  | _ -> Alcotest.fail "selected whole-resource consumption failed"
+
+let produce_selected c heap prop outputs =
+  match Memory.produce aSelectedFields heap c (loc :: prop :: outputs) with
+  | [{Branch.value = heap; _}] -> heap
+  | _ -> Alcotest.fail "selected whole-resource production failed"
+
+let reject_selected_consume c heap prop =
+  let before = snapshot heap in
+  check "unproved selection cannot consume ownership"
+    (match Memory.consume aSelectedFields heap c [loc; prop] with
+     | [{Branch.value = Error _; _}] -> true | _ -> false);
+  check "failed selected consumption preserves input" (snapshot heap = before)
+
+let reject_selected_produce c heap prop outputs =
+  let before = snapshot heap in
+  check "false/overlapping selection cannot produce ownership"
+    (Memory.produce aSelectedFields heap c (loc :: prop :: outputs) = []);
+  check "failed selected production preserves input" (snapshot heap = before)
+
+let selected_roundtrip () =
+  let c = selected_context () in
+  let original = sequence_make c in
+  let before = snapshot original in
+  let remainder, outputs = consume_selected c original length_key in
+  check "index, complete witnesses and descriptor are actual getter outputs"
+    (outputs = [sequence_index; sequence_keys; sequence_values; selected_value]);
+  check "getter/deleter preserve original branch" (snapshot original = before);
+  check "opaque field resource is wholly consumed"
+    (Heap.get_ordered remainder loc_name = None);
+  (match Heap.get remainder loc_name with
+   | Some ((fields, None), Some md) ->
+       check "all exposed fields/domain removed; metadata framed"
+         (Fields.is_empty fields && md = metadata)
+   | _ -> Alcotest.fail "selected consume left an independent field footprint");
+  let restored = produce_selected c remainder length_key outputs in
+  check "canonical whole resource is restored"
+    (snd (consume ~context:c restored) = [sequence_keys; sequence_values]);
+  check "original runtime lookup reads restored paired descriptor"
+    (snd (action ~context:c restored getCell [loc; length_key]) =
+     [loc; length_key; selected_value]);
+  check "metadata remains owned" (Heap.get_met restored loc_name = Some metadata)
+
+let selected_bounds () =
+  List.iter (fun c -> reject_selected_consume c (sequence_make c) length_key)
+    [selected_context ~lower:false (); selected_context ~upper:false ()]
+
+let selected_wrong_list () =
+  let c = update_context () in
+  let other = Expr.LVar "#selected_other_keys" in
+  Gillian.Symbolic.Type_env.update c.gamma "#selected_other_keys" Type.ListType;
+  Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (BinOp (other, LstNth, sequence_index), Equal, length_key));
+  reject_selected_consume c (sequence_make c) length_key
+
+let selected_missing_facts () =
+  let c = selected_context () in
+  reject_selected_consume c (sequence_make c) (ukey "not-owned");
+  let c = selected_context ~typed:false () in
+  reject_selected_consume c (sequence_make c) length_key;
+  let c = selected_context () in
+  reject_selected_consume c (Heap.init ()) length_key
+
+let selected_false_witnesses () =
+  let c = selected_context () in
+  let remainder, outputs = consume_selected c (sequence_make c) length_key in
+  let candidate index keys values descriptor = [index; keys; values; descriptor] in
+  List.iter (fun (prop, out) -> reject_selected_produce c remainder prop out)
+    [ length_key, candidate (Expr.int (-1)) sequence_keys sequence_values selected_value;
+      length_key, candidate (Expr.num 0.) sequence_keys sequence_values selected_value;
+      length_key, candidate sequence_index sequence_keys sequence_values (Expr.EList []);
+      length_key, candidate sequence_index (ukeys []) sequence_values selected_value;
+      length_key, candidate sequence_index sequence_keys (Expr.EList []) selected_value;
+      ukey "not-owned", outputs;
+      Expr.num 0., outputs ];
+  reject_selected_produce c (sequence_make c) length_key outputs
+
+let selected_no_cell_split () =
+  let c = selected_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let rejected = try ignore (Memory.consume aCell heap c [loc; length_key]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true in
+  check "selected descriptor knowledge cannot split whole ownership" rejected;
+  check "cell rejection preserves complete resource" (snapshot heap = before)
+
+let descriptor n = Expr.EList
+  [ukey "d"; Expr.num n; Expr.bool true; Expr.bool true; Expr.bool true]
+
+let selected_concrete_mutation () =
+  let c = pc () in
+  let heap = Heap.init () in
+  Heap.init_object heap loc_name (Some metadata);
+  let heap, _ = action heap setCell [loc; ukey "z"; descriptor 1.] in
+  let heap, _ = action heap setCell [loc; ukey "a"; descriptor 2.] in
+  let heap, _ = action heap setProps [loc; Expr.ESet [ukey "z"; ukey "a"]] in
+  let remainder, outputs = consume_selected c heap (ukey "z") in
+  check "actual concrete selection uses the first owned index"
+    (outputs = [Expr.int 0; ukeys ["z"; "a"];
+                Expr.EList [descriptor 1.; descriptor 2.]; descriptor 1.]);
+  let heap = produce_selected c remainder (ukey "z") outputs in
+  let heap, _ = action heap setCell [loc; ukey "z"; descriptor 3.] in
+  let remainder, updated = consume_selected c heap (ukey "z") in
+  check "runtime update changes selected descriptor and retains order"
+    (updated = [Expr.int 0; ukeys ["z"; "a"];
+                Expr.EList [descriptor 3.; descriptor 2.]; descriptor 3.]);
+  let heap = produce_selected c remainder (ukey "z") updated in
+  let heap, _ = action heap setCell [loc; ukey "z"; Expr.Lit Literal.Nono] in
+  let heap, _ = action heap setCell [loc; ukey "z"; descriptor 4.] in
+  let remainder, reinserted = consume_selected c heap (ukey "z") in
+  check "delete/reinsert produces a new index and current order"
+    (reinserted = [Expr.int 1; ukeys ["a"; "z"];
+                   Expr.EList [descriptor 2.; descriptor 4.]; descriptor 4.]);
+  let restored = produce_selected c remainder (ukey "z") reinserted in
+  check "current observable order survives the checked roundtrip"
+    (snd (action restored getAllProps [loc]) = [loc; ukeys ["a"; "z"]]);
+  reject_selected_produce c restored (ukey "z") outputs
+
+let prefix_selection_context ?(owned_alias = true) () =
+  let c = sequence_context () in
+  let var name typ =
+    Gillian.Symbolic.Type_env.update c.gamma name typ;
+    Expr.LVar name in
+  let pk = var "#cursor_prefix_keys" Type.ListType in
+  let pv = var "#cursor_prefix_values" Type.ListType in
+  let rk = var "#cursor_rest_keys" Type.ListType in
+  let rv = var "#cursor_rest_values" Type.ListType in
+  let prop = var "#cursor_key" Type.Utf16Type in
+  let desc = var "#cursor_descriptor" Type.ListType in
+  let index = Expr.UnOp (LstLen, pk) in
+  let ks = Expr.NOp (LstCat, [pk; Expr.EList [prop]; rk]) in
+  let vs = Expr.NOp (LstCat, [pv; Expr.EList [desc]; rv]) in
+  let add = Gillian.Symbolic.Pure_context.extend c.pfs in
+  if owned_alias then add (Expr.BinOp (sequence_keys, Equal, ks));
+  add (Expr.BinOp (sequence_values, Equal, vs));
+  add (Expr.BinOp (UnOp (LstLen, pk), Equal, UnOp (LstLen, pv)));
+  add (Expr.BinOp (UnOp (LstLen, rk), Equal, UnOp (LstLen, rv)));
+  add (Expr.UnOp (LstAllUtf16, ks));
+  add (Expr.BinOp (prop, Equal, BinOp (ks, LstNth, index)));
+  add (Expr.BinOp (desc, ValueEqual, BinOp (vs, LstNth, index)));
+  add (Expr.BinOp (Expr.zero_i, ILessThanEqual, index));
+  add (Expr.BinOp (index, ILessThan, UnOp (LstLen, sequence_keys)));
+  c, prop, index
+
+let selected_prefix_alias_roundtrip () =
+  let c, prop, index = prefix_selection_context () in
+  let original = sequence_make c in
+  let before = snapshot original in
+  let remainder, outputs = consume_selected c original prop in
+  check "proved prefix alias retains the complete owned witnesses"
+    (List.nth outputs 1 = sequence_keys && List.nth outputs 2 = sequence_values);
+  check "selected index is the exact mathematical prefix length"
+    (Gillian.Logic.FOSolver.is_equal ~pfs:c.pfs ~gamma:c.gamma
+      (List.hd outputs) index);
+  check "selection retains original branch and frames metadata"
+    (snapshot original = before && Heap.get_met remainder loc_name = Some metadata);
+  let restored = produce_selected c remainder prop outputs in
+  check "proved alias roundtrip restores the entire ordered footprint"
+    (snd (consume ~context:c restored) = [sequence_keys; sequence_values])
+
+let selected_prefix_alias_read () =
+  let c, prop, index = prefix_selection_context () in
+  let heap = sequence_make c in
+  let before = snapshot heap in
+  let _, outputs = action ~context:c heap getCell [loc; prop] in
+  check "actual read uses the matching complete descriptor sequence"
+    (Gillian.Logic.FOSolver.is_equal ~pfs:c.pfs ~gamma:c.gamma
+      (List.nth outputs 2) (Expr.BinOp (sequence_values, LstNth, index)));
+  check "actual alias read preserves fields and metadata" (snapshot heap = before)
+
+let selected_prefix_alias_rejections () =
+  let c, prop, _ = prefix_selection_context ~owned_alias:false () in
+  reject_selected_consume c (sequence_make c) prop;
+  let c, prop, _ = prefix_selection_context () in
+  reject_selected_consume c (Heap.init ()) prop;
+  let c, prop, index = prefix_selection_context () in
+  let remainder, outputs = consume_selected c (sequence_make c) prop in
+  reject_selected_produce c remainder prop
+    (Expr.BinOp (index, IPlus, Expr.one_i) :: List.tl outputs);
+  reject_selected_produce c remainder prop
+    [List.hd outputs; sequence_keys; sequence_values; Expr.EList []]
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -347,5 +1337,63 @@ let () =
             ("complete frame assertion roundtrip", frame_export);
             ("frame export after mutation", frame_export_mutation);
             ("conservative frame export", conservative_export);
+            ("typed symbolic singleton roundtrip", symbolic_singleton);
+            ("symbolic witness and ownership rejection", symbolic_rejections);
+            ("whole sequence roundtrip and metadata", sequence_roundtrip);
+            ("whole sequence export copy serialization", sequence_export_copy);
+            ("whole sequence value substitution", sequence_substitution);
+            ("whole sequence location aliases", sequence_aliases);
+            ("whole sequence exclusive action guards", sequence_exclusivity);
+            ("whole sequence known-shape rejection", sequence_shape_rejections);
+            ("whole sequence arbitrary indexed read", sequence_indexed_read);
+            ("whole sequence index bounds and identity", sequence_indexed_bounds);
+            ("whole sequence no separate cell consumption", sequence_indexed_cell_consumption);
+            ("whole sequence selected concrete value", sequence_indexed_known_values);
+            ("exact key insertion positions", insertion_position_literals);
+            ("insertion exact values", insertion_literal_values);
+            ("insertion arbitrary list length", insertion_symbolic_lengths);
+            ("uniform key representation", insertion_key_representation);
+            ("capture-free UTF16 quantifier", insertion_quantifier_names);
+            ("actual complete-sequence insertion", sequence_runtime_insert);
+            ("actual indexed whole-field update", sequence_runtime_update);
+            ("indexed update bounds", update_index_bounds);
+            ("indexed update native length bound", update_native_bound);
+            ("indexed update owned list", update_wrong_list);
+            ("indexed update nonvalues", update_nonvalues);
+            ("indexed update no logical production", update_no_logical_production);
+            ("indexed update exact literal identity", update_literal_identity);
+            ("indexed update slice domains", update_slice_domains);
+            ("insertion ownership rejection", insertion_reject_guards);
+            ("insertion no raw logical production", insertion_no_logical_production);
+            ("insertion total domains", insertion_total_domains);
+            ("symbolic insertion position bounds", insertion_symbolic_bounds);
+            ("insertion bound domains", insertion_bound_domains);
+            ("membership literal identity", membership_literals);
+            ("membership exact symbolic sequence", membership_symbolic);
+            ("membership total domains", membership_domains);
+            ("whole sequence absent read", sequence_absent_read);
+            ("absence requires nonmembership", absence_no_fact);
+            ("absence requires owned list", absence_wrong_list);
+            ("presence cannot authorize absence", absence_present);
+            ("absence requires string key", absence_nonkey);
+            ("absence cannot split ownership", absence_no_cell_split);
+            ("named whole-field read equality", named_sequence_read);
+            ("named whole-field descriptor update", named_sequence_update);
+            ("named access requires owned key list", named_sequence_wrong_list);
+            ("named access requires proved index bounds", named_sequence_bounds);
+            ("named access requires key equality", named_sequence_missing_equality);
+            ("named access cannot authorize logical production", named_sequence_no_logical_write);
+            ("named access cannot split ownership", named_sequence_no_split);
+            ("named equality cannot supply ownership", named_sequence_no_ownership);
+            ("selected whole-resource real roundtrip", selected_roundtrip);
+            ("selected witness bounds", selected_bounds);
+            ("selection cannot borrow another key list", selected_wrong_list);
+            ("selection requires identity type and ownership", selected_missing_facts);
+            ("selected false and overlapping witnesses", selected_false_witnesses);
+            ("selection cannot split cell ownership", selected_no_cell_split);
+            ("selected update and reinsertion witnesses", selected_concrete_mutation);
+            ("selected prefix alias complete roundtrip", selected_prefix_alias_roundtrip);
+            ("selected prefix alias actual read", selected_prefix_alias_read);
+            ("selected prefix alias rejects false witnesses", selected_prefix_alias_rejections);
           ] );
     ]

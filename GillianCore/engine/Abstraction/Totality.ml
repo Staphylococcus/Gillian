@@ -14,6 +14,29 @@ let unsupported message =
     (Gillian_result.Exc.Gillian_error
        (OperationError ("Unsupported totality proof: " ^ message)))
 
+(* Is this an empty resource footprint? Pure recursive predicates are allowed
+   only when every definition and guard is resource-free. Abstract predicates,
+   missing definitions, core resources and wands remain non-empty. A visited
+   recursive edge is safe only because all its other edges are still checked. *)
+let heap_free_assertion preds assertion =
+  let rec check seen atoms = List.for_all (atom seen) atoms
+  and atom seen = function
+    | Asrt.Emp | Asrt.Pure _ | Asrt.Types _ -> true
+    | asrt when Option.is_some (Asrt.as_definedness asrt) -> true
+    | Asrt.CorePred (name, _, _) -> (match Asrt.as_user_pred_name name with
+        | None -> false
+        | Some name when SS.mem name seen -> true
+        | Some name -> (match Hashtbl.find_opt preds name with
+            | None -> false
+            | Some (pred : Pred.t) ->
+                let seen = SS.add name seen in
+                not pred.pred_abstract && pred.pred_definitions <> []
+                && List.for_all (fun (_, a) -> check seen a) pred.pred_definitions
+                && Option.fold ~none:true ~some:(check seen) pred.pred_guard))
+    | Asrt.Wand _ -> false
+  in
+  check SS.empty assertion
+
 (* A finite integral binary64 value denotes an exact mathematical integer.
    Strict IEEE comparison on these values agrees with natural-number order.
    Arithmetic remains binary64: stalled/rounded updates must still prove descent. *)
@@ -75,7 +98,6 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
             typ list ListType;
             typ index IntType;
             nonnegative index;
-            bounded index;
             Expr.BinOp (index, ILessThan, length list);
           ]
     | BinOp (value, LstRepeat, count) ->
@@ -141,8 +163,8 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
         | Not | BoolToInt -> need (typ e BooleanType)
         | IUnaryMinus | IntToNum -> need (typ e IntType)
         | StrLen | StrToBytes | ToNumberOp -> need (typ e StringType)
-        | Utf16Len | Utf16ToNumber -> need (typ e Utf16Type)
-        | LstLen | LstRev -> need (typ e ListType)
+        | Utf16Len | Utf16ToNumber | Utf16Trim -> need (typ e Utf16Type)
+        | LstLen | LstRev | LstAllUtf16 -> need (typ e ListType)
         | NumToInt ->
             List.iter need
               [
@@ -229,12 +251,33 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
         | UnsignedRightShiftF
         | M_atan2
         | M_pow -> both NumberType
+        | KeyInsertIndex -> List.iter need [ typ left ListType; typ right Utf16Type ]
+        | LstContains ->
+            need (typ left ListType);
+            need (Expr.UnOp (Not, typ right SetType))
         | SetMem when proof -> need (typ right SetType)
         | (SetSub | SetDiff) when proof -> both SetType
         | SetMem | SetSub | SetDiff ->
             unsupported_on_guard guard "set expressions in executable code."
         | And | Or | Impl | LstNth | LstRepeat | StrNth | IDiv | IMod ->
             assert false)
+    | NOp (Utf16Sub, [ string; start; count ]) when proof ->
+        children [ string; start; count ];
+        List.iter need
+          [ typ string Utf16Type; typ start IntType; typ count IntType;
+            nonnegative start; nonnegative count;
+            Expr.BinOp (Expr.BinOp (start, IPlus, count), ILessThanEqual,
+              Expr.UnOp (Utf16Len, string)) ]
+    | NOp (Utf16Sub, _) ->
+        unsupported_on_guard guard
+          "UTF-16 slicing is a three-argument proof expression only."
+    | NOp (LstInsert, [ xs; i; v ]) ->
+        children [ xs; i; v ];
+        List.iter need [ typ xs ListType; typ i IntType;
+          Expr.BinOp (Lit (Int Z.zero), ILessThanEqual, i);
+          Expr.BinOp (i, ILessThanEqual, UnOp (LstLen, xs));
+          Expr.UnOp (Not, typ v SetType) ]
+    | NOp (LstInsert, _) -> unsupported_on_guard guard "list insertion requires exactly three arguments."
     | NOp (LstCat, xs) ->
         children xs;
         List.iter (fun x -> need (typ x ListType)) xs
@@ -308,55 +351,95 @@ let check_assertion_production ~evaluate ~assertion ~assume state a =
   if !Config.Verification.total then
     let obligations = List.filter_map Asrt.as_definedness a in
     let facts, values = List.partition fst obligations in
-    let check state (fact, e) =
-      let proves c = assertion state (evaluate state c) in
+    let check ~quick state (fact, e) =
+      let proves c =
+        let condition = evaluate state c in
+        if not quick then assertion state condition
+        else if Expr.equal condition Expr.true_ then true
+        else if Expr.equal condition Expr.false_ then false
+        else raise (Pending_domain e)
+      in
       check_expression ~proof:true ~proves ~evaluate:(evaluate state)
         ~require:(fun partial condition ->
           if not (proves condition) then raise (Pending_domain partial))
         (if fact then Expr.UnOp (Not, e) else e)
     in
-    (* If value domains need no context at all, an already checked final fact
-       batch need not be assumed into the disposable checking context. Reuse
-       the domain checker; any requested premise or evaluation disables this
-       shortcut. Actual assertion production still retains every fact. *)
-    let context_free_values =
-      List.for_all
-        (fun (_, e) ->
-          try
-            check_expression ~proof:true
-              ~proves:(fun e -> raise (Pending_domain e))
-              ~evaluate:(fun e -> raise (Pending_domain e))
-              ~require:(fun e _ -> raise (Pending_domain e))
-              e;
-            true
-          with Pending_domain _ -> false)
-        values
+    (* Already established value domains need no extra facts. Check against
+       the current state before assuming a final batch into the disposable
+       context; actual assertion production still retains every fact. *)
+    let values_defined ~quick state =
+      try
+        List.iter (check ~quick state) values;
+        true
+      with Pending_domain _ -> false
     in
-    let rec establish state pending =
-      let ready, deferred =
-        List.fold_left
-          (fun (ready, deferred) ((_, e) as obligation) ->
-            try
-              check state obligation;
-              (* A defined fact already reduced to true adds no information.
-                 Avoid rechecking consistency of the entire scratch context for
-                 batches of such facts (common in matched predicate outputs). *)
-              if Expr.equal (evaluate state e) Expr.true_ then (ready, deferred)
-              else (e :: ready, deferred)
-            with Pending_domain _ -> (ready, obligation :: deferred))
-          ([], []) pending
+    (* Ordering only: an outer partial operator can depend on facts containing
+       a shallower cast or lookup. This score never establishes a domain; every
+       selected obligation still goes through the unchanged checks above. *)
+    let rec partial_depth (e : Expr.t) =
+      let maximum es =
+        List.fold_left (fun depth e -> max depth (partial_depth e)) 0 es
       in
-      if ready = [] then List.iter (check state) (List.rev deferred @ values)
-      else if deferred = [] && context_free_values then
-        List.iter (check state) values
+      match e with
+      | UnOp ((NumToInt | Car | Cdr), e) -> 1 + partial_depth e
+      | UnOp (_, e) | Exists (_, e) | ForAll (_, e) -> partial_depth e
+      | BinOp (left,
+          (LstNth | LstRepeat | StrNth | IDiv | IMod | Utf16Nth | Utf16CodeUnit),
+          right) -> 1 + maximum [left; right]
+      | BinOp (left, _, right) -> maximum [left; right]
+      | LstSub (list, start, count) -> 1 + maximum [list; start; count]
+      | NOp ((Utf16Sub | LstInsert), es) -> 1 + maximum es
+      | NOp (_, es) | EList es | ESet es
+      | ConstructorApp (_, es) | FuncApp (_, es) -> maximum es
+      | Cases (e, cases) -> maximum (e :: List.map (fun (_, _, e) -> e) cases)
+      | Lit _ | PVar _ | LVar _ | ALoc _ -> 0
+    in
+    let rec establish ~quick state pending =
+      let pending =
+        if quick then pending
+        else List.stable_sort
+          (fun (_, left) (_, right) ->
+            Int.compare (partial_depth left) (partial_depth right)) pending
+      in
+      let ready, deferred =
+        let rec collect ready deferred = function
+          | [] -> (ready, deferred)
+          | ((_, e) as obligation) :: rest ->
+              let checked =
+                try
+                  check ~quick state obligation;
+                  Some (Expr.equal (evaluate state e) Expr.true_)
+                with Pending_domain _ -> None
+              in
+              match checked with
+              | None -> collect ready (obligation :: deferred) rest
+              (* A defined fact already reduced to true adds no information.
+                 Keep the quick batch and its no-consistency fast path. *)
+              | Some true -> collect ready deferred rest
+              | Some false when quick -> collect (e :: ready) deferred rest
+              | Some false ->
+                  (* Stage this checked fact before any later solver request.
+                     Untested facts stay deferred and cannot justify a domain. *)
+                  (e :: ready, List.rev_append rest deferred)
+        in
+        collect [] [] pending
+      in
+      (* Stage facts whose domains reduce to true before asking the solver
+         about dependent expressions. In particular, a fresh invariant type
+         fact must enter the disposable context before a partial operator uses
+         that variable. No unchecked fact enters either context. *)
+      if ready = [] && quick then establish ~quick:false state pending
+      else if ready = [] then
+        List.iter (check ~quick:false state) (List.rev deferred @ values)
+      else if deferred = [] && values_defined ~quick:true state then ()
       else
         (* Batch independently checked facts: no pending fact enters the context,
            and one consistency query suffices for this round. *)
         match assume state (List.rev ready) with
         | None -> ()
-        | Some state -> establish state (List.rev deferred)
+        | Some state -> establish ~quick:true state (List.rev deferred)
     in
-    try establish state facts
+    try establish ~quick:true state facts
     with Pending_domain e ->
       raise
         (Gillian_result.Exc.analysis_failure
@@ -422,6 +505,20 @@ let prepare_loops
       unsupported (proc.proc_name ^ " has a control-flow edge outside its body.");
     next
   in
+  (* A compiler may leave completion/merge commands after an unconditional
+     throw jump. They cannot enter a loop at runtime. Use only syntactic
+     reachability from command zero, retaining every existing normal and error
+     successor and both unknown-conditional branches. This global set also
+     preserves outside-parent entries while discovering nested components. *)
+  let reachable = Array.make length false in
+  let rec visit = function
+    | [] -> ()
+    | i :: rest when reachable.(i) -> visit rest
+    | i :: rest ->
+        reachable.(i) <- true;
+        visit (successors i @ rest)
+  in
+  visit [ 0 ];
   (* Frame only locals whose value cannot change observably across iterations.
      A modified live local must be generalized by the invariant, otherwise an
      exit can retain its concrete first-entry value and yield a false proof. *)
@@ -449,6 +546,7 @@ let prepare_loops
     match cmd with
     | Cmd.Assignment (x, e) -> (SS.singleton x, Expr.pvars e)
     | LAction (x, _, es) -> (SS.singleton x, expressions es)
+    | Apply (x, pid_args, _) -> (SS.singleton x, Expr.pvars pid_args)
     | Arguments x -> (SS.singleton x, SS.empty)
     | PhiAssignment phis -> (SS.of_list (List.map fst phis), SS.empty)
     | Call ({ var_name; fun_name; args; bindings }, _) ->
@@ -530,7 +628,7 @@ let prepare_loops
         let entries = ref (if List.mem 0 members then [ 0 ] else []) in
         Array.iteri
           (fun i _ ->
-            if not (List.mem i members) then
+            if reachable.(i) && not (List.mem i members) then
               List.iter
                 (fun j -> if List.mem j members then entries := j :: !entries)
                 (successors i))
@@ -576,7 +674,7 @@ let prepare_loops
           header)
       components
   in
-  discover [] (List.init length Fun.id);
+  discover [] (List.filter (fun i -> reachable.(i)) (List.init length Fun.id));
   let body =
     Array.mapi
       (fun i (annot, label, cmd) ->
@@ -608,7 +706,9 @@ let prepare_loops
                  ^ " loop variant must use only program variables or logical \
                     binders captured by its invariant.");
               Cmd.Logic (SL (Invariant (a, binders, Some rank)))
-          | Logic (SL (Invariant _)) ->
+          (* Third reachability use: a dead invariant remains verbatim with
+             empty metadata; every reachable unmatched invariant still fails. *)
+          | Logic (SL (Invariant _)) when reachable.(i) ->
               unsupported
                 (proc.proc_name
                ^ " contains an operation outside the totality fragment: \
@@ -629,8 +729,20 @@ let inline_body (proc : ('a, 'b) Proc.t) =
 
 let check_command ~is_action_total name (cmd : int Cmd.t) =
   match cmd with
+  | Cmd.ECall
+      (_, (Lit (String "ExecuteStringTrim") | PVar "ExecuteStringTrim"),
+       [ _ ], _) ->
+      (* This exact primitive checks its UTF-16 argument in External. Its
+         defined edge-strip model decreases native sequence length on every
+         recursive step. No other external name or arity is certified. *)
+      None
   | Cmd.Call ({ fun_name = Lit (String callee); args; _ }, _) ->
       Some (callee, List.length args)
+  | Cmd.Apply _ ->
+      (* Deferred call, not a certified primitive or a helper-name whitelist.
+         The interpreter requires a resolved nonempty list and a target body,
+         then uses the ordinary call proof, arity, rank and inline-body gates. *)
+      None
   | LAction (_, action, args) ->
       if not (is_action_total action (List.length args)) then
         unsupported
@@ -734,7 +846,9 @@ let order_procs
                 (callee
                ^ " requires exact call arity in the current totality fragment."
                 ))
-          else if not (inline_body target) then
+          else if not (!Config.Verification.closed_entry
+                       || SS.mem name !Config.Verification.closed_initializers
+                       || inline_body target) then
             unsupported
               (callee
              ^ " must be selected and proved total along with its caller."))

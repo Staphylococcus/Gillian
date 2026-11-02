@@ -155,6 +155,7 @@ struct
           ss_pre = (pre, None);
           ss_posts = [ (new_post, None) ];
           ss_variant = None;
+          ss_verifier_scope = None;
           ss_flag = fl;
           ss_to_verify = false;
           ss_label = None;

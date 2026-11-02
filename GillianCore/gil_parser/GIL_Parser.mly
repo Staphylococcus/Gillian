@@ -115,7 +115,10 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token UNSIGNEDRIGHTSHIFTL
 %token M_ATAN2
 %token M_POW
+%token LSTINSERT
+%token UTF16SUB
 %token LSTCAT
+%token VERIFY_SCOPE
 %token LSTREV
 %token STRCAT
 %token UTF16CAT
@@ -147,10 +150,12 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token CAR
 %token CDR
 %token SETTOLIST
+%token LSTALLUTF16
 %token LSTLEN
 %token STRLEN
 %token NUMTOUTF16 UTF16TONUM UTF16NTH UTF16LESS UTF16CODE
 %token UTF16LEN
+%token UTF16TRIM
 %token STRBYTES
 %token INTTONUM
 %token BOOLTOINT
@@ -167,6 +172,8 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 %token PRODUCE
 %token ASSUME_TYPE
 %token LSTNTH
+%token KEYINSERTINDEX
+%token LSTCONTAINS
 %token LSTREPEAT
 %token LSTSUB
 %token STRNTH
@@ -403,6 +410,10 @@ atomic_expr_target:
 (* l-nth (list, n) *)
   | LSTNTH; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
      { Expr.BinOp (e1, LstNth, e2) }
+  | LSTCONTAINS; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
+     { Expr.BinOp (e1, LstContains, e2) }
+  | KEYINSERTINDEX; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
+     { Expr.BinOp (e1, KeyInsertIndex, e2) }
   | LSTREPEAT; LBRACE; e1=expr_target; COMMA; e2=expr_target; RBRACE
      { Expr.BinOp (e1, LstRepeat, e2) }
   | LSTSUB; LBRACE; e1=expr_target; COMMA; e2=expr_target; COMMA; e3 = expr_target; RBRACE
@@ -597,21 +608,28 @@ var_and_var_target:
 gmain_target:
   init_data = option(INIT_DATA);
   internal = option(INTERNAL_FILE);
-  imports = option(import_target);
-  imports_to_verify = option(import_verify_target);
+  imports = import_banks_target;
   g_prog = gdeclaration_target;
   EOF
     {
       internal_file := Option.is_some internal;
       let init_data = Option.value init_data ~default:`Null in
-      let imports = List.map (fun path -> (path, false))
-        (Option.value ~default:[] imports)
-      in
-      let imports_to_verify = List.map (fun path -> (path, true))
-        (Option.value ~default:[] imports_to_verify)
-      in
-      (Prog.update_imports g_prog (imports @ imports_to_verify), init_data);
+      (Prog.update_imports g_prog imports, init_data);
     }
+;
+
+(* Decide the bank after IMPORT, rather than choosing between two optional
+   banks before seeing whether VERIFY follows it. *)
+import_banks_target:
+  | { [] }
+  | imports = import_target; verified = option(import_verify_target)
+    {
+      List.map (fun path -> (path, false)) imports
+      @ List.map (fun path -> (path, true))
+          (Option.value ~default:[] verified)
+    }
+  | verified = import_verify_target
+    { List.map (fun path -> (path, true)) verified }
 ;
 
 gdeclaration_target:
@@ -818,6 +836,10 @@ g_spec_kind:
   | NORMAL { Flag.Normal }
   | ERROR { Flag.Error }
 
+verifier_scope_target:
+  VERIFY_SCOPE; LBRACE; source = expr_target; SCOLON; target = expr_target; RBRACE
+  { Spec.{ vsb_source = source; vsb_target = target } }
+
 g_sspec_target:
 (* {trusted} [spec_name: #bla, #ble, #bli] [[ .... ]] [[ .... ]] flag *)
   trusted = option(TRUSTED);
@@ -825,12 +847,13 @@ g_sspec_target:
   ss_pre = g_spec_line;
   ss_posts = g_mult_spec_line;
   ss_variant = option(variant_target);
+  ss_verifier_scope = option(verifier_scope_target);
   ss_flag = g_spec_kind
   {
     if Option.is_some ss_variant && not !Config.Verification.total then
       Printf.eprintf "Warning: procedure variants are not checked; verification remains partial correctness.\n";
     let ss_to_verify = Option.is_none trusted in
-    let spec : Spec.st = { ss_pre; ss_posts; ss_variant; ss_flag; ss_to_verify; ss_label = lab_spec} in
+    let spec : Spec.st = { ss_pre; ss_posts; ss_variant; ss_verifier_scope; ss_flag; ss_to_verify; ss_label = lab_spec} in
     spec
   }
 ;
@@ -1230,6 +1253,8 @@ nop_target:
   | SETUNION { NOp.SetUnion }
   | SETINTER { NOp.SetInter }
   | LSTCAT   { NOp.LstCat   }
+  | LSTINSERT { NOp.LstInsert }
+  | UTF16SUB { NOp.Utf16Sub }
 ;
 
 unop_target:
@@ -1262,11 +1287,13 @@ unop_target:
   | CAR         { UnOp.Car }
   | CDR         { UnOp.Cdr }
   | LSTLEN      { UnOp.LstLen }
+  | LSTALLUTF16 { UnOp.LstAllUtf16 }
   | LSTREV      { UnOp.LstRev }
   | STRLEN      { UnOp.StrLen }
   | NUMTOUTF16  { UnOp.NumberToUtf16 }
   | UTF16TONUM  { UnOp.Utf16ToNumber }
   | UTF16LEN    { UnOp.Utf16Len }
+  | UTF16TRIM   { UnOp.Utf16Trim }
   | STRBYTES    { UnOp.StrToBytes }
   | SETTOLIST   { UnOp.SetToList }
   | INTTONUM    { UnOp.IntToNum }

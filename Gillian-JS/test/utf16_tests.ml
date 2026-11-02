@@ -91,6 +91,22 @@ let lowering () =
               Equal,
               Expr.Lit (Type Utf16Type) ) ))
 
+let trim_lowering () =
+  let open Gillian.Gil_syntax in
+  let parsed = Parsing.parse_expr_from_string "u16-trim value" in
+  let expected = Expr.UnOp (Utf16Trim, Expr.PVar "value") in
+  Alcotest.(check bool) "JSIL parser preserves the explicit typed trim" true
+    (Expr.equal parsed expected);
+  Alcotest.(check bool) "JSIL lowering retains the exact operator" true
+    (Expr.equal (Js2jsil_lib.JSIL2GIL.jsil2gil_expr parsed) expected);
+  let literal = Parsing.parse_expr_from_string "u16-trim \"\xc2\xa0A\xef\xbb\xbf\"" in
+  Alcotest.(check bool) "JSIL literals use UTF16 without changing trim" true
+    (Expr.equal (Js2jsil_lib.JSIL2GIL.jsil2gil_expr literal)
+       (Expr.UnOp (Utf16Trim,
+          Expr.Lit (Literal.Utf16String
+            (Gillian.Utils.Utf16.of_canonical
+              (Gillian.Utils.Utf16.of_code_units [ 0xa0; 65; 0xfeff ]))))))
+
 let () =
   Alcotest.run "JavaScript UTF-16"
     [
@@ -100,5 +116,6 @@ let () =
           ("malformed", `Quick, malformed);
           ("canonical", `Quick, canonical);
           ("lowering boundaries", `Quick, lowering);
+          ("trim lowering", `Quick, trim_lowering);
         ] );
     ]

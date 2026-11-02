@@ -5,6 +5,7 @@
   cmdliner
   fmt.tty
   gil_syntax
+  smt
   utils
   usage_logs
   engine

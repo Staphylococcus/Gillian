@@ -3,6 +3,7 @@ module SVal = Gillian.Symbolic.Values
 module Flag = Gillian.Gil_syntax.Flag
 module Expr = Gillian.Gil_syntax.Expr
 module SS = Containers.SS
+type verifier_scope_binding = Gillian.Gil_syntax.Spec.verifier_scope_binding
 
 (** Procedure measures have a distinct structural form so their integer length
     never passes through the numeric semantics of ordinary JSIL expressions. *)
@@ -17,6 +18,7 @@ type st = {
   pre : Asrt.t;  (** Precondition *)
   posts : Asrt.t list;  (** Postcondition *)
   variant : variant option;  (** Optional procedure termination measure *)
+  verifier_scope : verifier_scope_binding option;
   flag : Flag.t;  (** Return flag ({!type:jsil_return_flag}) *)
   to_verify : bool;  (** Should the spec be verified? *)
   label : (string * SS.t) option;
@@ -36,11 +38,12 @@ type t = {
 let s_init
     ?(label : (string * SS.t) option)
     ?(variant : variant option)
+    ?(verifier_scope : verifier_scope_binding option)
     (pre : Asrt.t)
     (posts : Asrt.t list)
     (flag : Flag.t)
     (to_verify : bool) : st =
-  { pre; posts; variant; flag; to_verify; label }
+  { pre; posts; variant; verifier_scope; flag; to_verify; label }
 
 let init
     (name : string)
@@ -64,12 +67,15 @@ let pp_sspec fmt sspec =
         (Fmt.iter ~sep:(Fmt.any ", ") SS.iter Fmt.string)
         exs
   in
-  Fmt.pf fmt "%a[[  @[<hov 0>%a@]  ]]@\n[[  @[<hov 0>%a@]  ]]%a@\n%s"
+  Fmt.pf fmt "%a[[  @[<hov 0>%a@]  ]]@\n[[  @[<hov 0>%a@]  ]]%a%a@\n%s"
     (Fmt.option pp_lab) sspec.label Asrt.pp sspec.pre
     (Fmt.list ~sep:(Fmt.any ";@\n") Asrt.pp)
     sspec.posts
     (Fmt.option (fun fmt rank -> Fmt.pf fmt " variant(%a)" pp_variant rank))
-    sspec.variant (Flag.str sspec.flag)
+    sspec.variant
+    (Fmt.option (fun fmt (b : verifier_scope_binding) ->
+       Fmt.pf fmt " verify_scope(%a; %a)" Expr.pp b.vsb_source Expr.pp b.vsb_target))
+    sspec.verifier_scope (Flag.str sspec.flag)
 
 let pp fmt spec =
   let pp_incomplete fmt = function

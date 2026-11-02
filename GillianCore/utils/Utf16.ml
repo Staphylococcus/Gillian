@@ -81,6 +81,13 @@ let source_text string =
   append (code_units string);
   Buffer.contents buffer
 
+(* Exact current trim whitespace units; shared by symbolic definitions and
+   guarded reduction. The concrete is_space decision below stays unchanged. *)
+let whitespace_code_units =
+  [ 0x09; 0x0a; 0x0b; 0x0c; 0x0d; 0x20; 0xa0; 0x1680;
+    0x2028; 0x2029; 0x202f; 0x205f; 0x3000; 0xfeff ]
+  @ List.init 11 (fun i -> 0x2000 + i)
+
 let is_space = function
   | 0x09
   | 0x0a

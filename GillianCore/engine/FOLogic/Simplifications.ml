@@ -49,16 +49,175 @@ let simplification_cache = Simplification_cache.create 1
 
 (*************************************)
 
+(* Diagnostic only: adjustable wall clock; process CPU excludes children.
+   The thunk is evaluated once; exceptions and proof operations are unchanged. *)
+(* Opt-in log-volume control only; default diagnostics stay unchanged. *)
+let simplification_phase_log_enabled =
+  Sys.getenv_opt "GILLIAN_SIMPLIFICATION_PHASE_LOG" <> Some "0"
+
+let simplification_phase stage count f =
+  let target = Option.value ~default:"-" !Gillian_result.Error.current_target in
+  if simplification_phase_log_enabled then
+  L.normal (fun m ->
+      m "SIMPLIFY_PHASE BEGIN target=%s stage=%s count=%d" target stage count);
+  Reduction.preparation_profile_dump ();
+  let wall = Unix.gettimeofday () in
+  let cpu = Sys.time () in
+  let result = f () in
+  let cpu_elapsed = Sys.time () -. cpu in
+  let wall_elapsed = Unix.gettimeofday () -. wall in
+  if simplification_phase_log_enabled then
+  L.normal (fun m ->
+      m "SIMPLIFY_PHASE END target=%s stage=%s wall_seconds=%.6f process_cpu_seconds=%.6f"
+        target stage wall_elapsed cpu_elapsed);
+  Reduction.preparation_profile_dump ();
+  result
+
 let reduce_pfs_in_place ?(matching = false) _ gamma (pfs : PFS.t) =
-  PFS.map_inplace (Reduction.reduce_lexpr ~matching ~gamma ~pfs) pfs
+  Reduction.reduce_pfs_in_place ~matching gamma pfs
+
+(* Opt-in passive capture. Private in each module: no proof API/state is shared.
+   Serialization and IO failures stop diagnostics only, never the proof. *)
+module Sanitise_capture = struct
+  exception Limit
+
+  let settings = match Sys.getenv_opt "GILLIAN_SANITISE_CAPTURE_DIR" with
+    | None -> None
+    | Some directory -> Some (directory, Option.value ~default:"S05CopySliceStep"
+        (Sys.getenv_opt "GILLIAN_SANITISE_CAPTURE_TARGET"))
+  let module_name = "simplifications"
+  let channel = ref None
+  let stopped = ref false
+  let bytes = ref 0
+  let events = ref 0
+  let invocations = ref 0
+  let byte_limit = 8 * 1024 * 1024
+  let event_limit = 4096
+
+  let warn reason =
+    try L.normal (fun m -> m "SANITISE_CAPTURE_STOP module=%s reason=%s"
+      module_name reason) with _ -> ()
+
+  let stop reason =
+    stopped := true;
+    (try
+       (match !channel with
+        | None -> ()
+        | Some output ->
+            let line = Yojson.Safe.to_string (`Assoc
+              ["status", `String "stopped"; "module", `String module_name;
+               "reason", `String reason; "events", `Int !events;
+               "bytes_before_stop", `Int !bytes]) ^ "\n" in
+            if !events < event_limit && String.length line <= byte_limit - !bytes then (
+              output_string output line; flush output;
+              incr events; bytes := !bytes + String.length line);
+            close_out_noerr output);
+       channel := None
+     with _ -> channel := None);
+    warn reason
+
+  let invocation () = match settings with
+    | Some (_, target) when not !stopped
+        && !Gillian_result.Error.current_target = Some target ->
+        incr invocations; Some !invocations
+    | _ -> None
+
+  (* Bound work before the generated AST encoder allocates its JSON tree.
+     Opaque strings/integers have separate size bounds. This is never a reducer. *)
+  let expressions values =
+    let nodes = ref 8192 and characters = ref (256 * 1024) in
+    let spend budget amount =
+      if amount > !budget then raise Limit;
+      budget := !budget - amount in
+    let visitor = object
+      inherit [_] Visitors.iter as super
+      method! visit_expr () expression =
+        spend nodes 1; super#visit_expr () expression
+      method! visit_literal () literal =
+        spend nodes 1;
+        (match literal with
+         | Literal.Utf16String text ->
+             spend characters (String.length (Utils.Utf16.to_canonical text))
+         | Literal.Int value -> spend characters (1 + Z.numbits value / 3)
+         | _ -> ());
+        super#visit_literal () literal
+      method! visit_string : 'env. 'env -> string -> unit =
+        fun _ value -> spend characters (String.length value)
+    end in
+    `List (List.map (fun expression ->
+      visitor#visit_expr () expression; Expr.to_yojson expression) values)
+
+  let gamma table =
+    let table = Type_env.as_hashtbl table in
+    if Hashtbl.length table > 8192 then raise Limit;
+    let characters = ref (256 * 1024) in
+    let bindings = Hashtbl.fold (fun name typ bindings ->
+      let type_size = match typ with Type.DatatypeType name -> String.length name | _ -> 0 in
+      characters := !characters - String.length name - type_size;
+      if !characters < 0 then raise Limit;
+      (name, typ) :: bindings) table []
+      |> List.sort (fun (a, _) (b, _) -> String.compare a b) in
+    `List (List.map (fun (name, typ) -> `List [`String name; Type.to_yojson typ]) bindings)
+
+  let emit make_fields =
+    if not !stopped then
+      try
+        if !events >= event_limit - 1 || !bytes >= byte_limit - 1024 then
+          stop "event-or-byte-limit"
+        else (
+          let fields = make_fields () in
+          let line = Yojson.Safe.to_string (`Assoc
+            (["status", `String "event"; "module", `String module_name;
+              "pid", `Int (Unix.getpid ()); "event", `Int (!events + 1);
+              "target", `String (Option.value ~default:"-"
+                !Gillian_result.Error.current_target);
+              "wall_seconds", `Float (Unix.gettimeofday ());
+              "process_cpu_seconds", `Float (Sys.time ())] @ fields)) ^ "\n" in
+          if String.length line > byte_limit - !bytes - 1024 then stop "byte-limit"
+          else (
+            let output = match !channel, settings with
+              | Some output, _ -> output
+              | None, Some (directory, _) ->
+                  if directory = "" || Filename.is_relative directory
+                     || (Unix.lstat directory).Unix.st_kind <> Unix.S_DIR then
+                    invalid_arg "capture directory must be absolute and existing";
+                  let output = open_out_gen
+                    [Open_wronly; Open_creat; Open_excl; Open_binary] 0o600
+                    (Filename.concat directory (module_name ^ ".jsonl")) in
+                  channel := Some output; output
+              | None, None -> raise Limit in
+            output_string output line; flush output;
+            incr events; bytes := !bytes + String.length line))
+      with
+      | Limit -> stop "AST-or-size-limit"
+      | error ->
+          let reason = try Printexc.to_string error with _ -> "capture-error" in
+          stop (if String.length reason > 256 then String.sub reason 0 256 else reason)
+
+  let pass invocation pass phase matching table pfs = match invocation with
+    | None -> ()
+    | Some invocation when not !stopped -> emit (fun () ->
+        if PFS.length pfs > 8192 then raise Limit;
+        ["invocation", `Int invocation; "pass", `Int pass; "phase", `String phase;
+         "matching", `Bool matching; "pfs_count", `Int (PFS.length pfs);
+         "pfs", expressions (PFS.to_list pfs); "gamma", gamma table])
+    | Some _ -> ()
+end
 
 let sanitise_pfs ?(matching = false) store gamma pfs =
-  let old_pfs = ref (PFS.init ()) in
-  while not (PFS.equal !old_pfs pfs) do
-    old_pfs := PFS.copy pfs;
-    reduce_pfs_in_place ~matching store gamma pfs
-  done;
-  PFS.remove_duplicates pfs
+  simplification_phase "sanitise_fixedpoint" (PFS.length pfs) (fun () ->
+    let old_pfs = ref (PFS.init ()) in
+    let capture_invocation = Sanitise_capture.invocation () in
+    let capture_pass = ref 0 in
+    while not (PFS.equal !old_pfs pfs) do
+      incr capture_pass;
+      Sanitise_capture.pass capture_invocation !capture_pass "BEGIN" matching gamma pfs;
+      old_pfs := PFS.copy pfs;
+      reduce_pfs_in_place ~matching store gamma pfs;
+      Sanitise_capture.pass capture_invocation !capture_pass "END" matching gamma pfs
+    done);
+  simplification_phase "sanitise_dedup" (PFS.length pfs) (fun () ->
+    PFS.remove_duplicates pfs)
 
 let sanitise_pfs_no_store ?(matching = false) =
   sanitise_pfs ~matching (Hashtbl.create 1)
@@ -339,20 +498,22 @@ let simplify_pfs_and_gamma
   in
 
   let key : simpl_key_type =
-    {
+    simplification_phase "cache_key" (PFS.length lpfs) (fun () -> {
       kill_new_lvars;
       gamma_list = Type_env.to_list gamma;
       pfs_list = PFS.to_list lpfs;
       existentials = !existentials;
       matching;
       save_spec_vars (* rpfs_lvars = (PFS.lvars rpfs) *);
-    }
+    })
   in
-  match Simplification_cache.mem simplification_cache key with
+  match simplification_phase "cache_lookup" (PFS.length lpfs) (fun () ->
+    Simplification_cache.mem simplification_cache key) with
   | true ->
       (* update_statistics "Simpl: cached" 0.; *)
       let { simpl_gamma; simpl_pfs; simpl_existentials; subst } =
-        Simplification_cache.find simplification_cache key
+        simplification_phase "cache_find" (PFS.length lpfs) (fun () ->
+          Simplification_cache.find simplification_cache key)
       in
       Type_env.reset gamma simpl_gamma;
       PFS.set lpfs simpl_pfs;
@@ -404,12 +565,13 @@ let simplify_pfs_and_gamma
         `Stop
       in
       (* PF simplification *)
-      let rec filter_mapper_formula (pfs : PFS.t) (pf : Expr.t) :
+      let rec filter_mapper_formula
+          (ops : Reduction.formula_filter_ops) (pfs : PFS.t) (pf : Expr.t) :
           [ `Stop | `Replace of Expr.t | `Filter ] =
         (* Reduce current assertion *)
-        let rec_call = filter_mapper_formula pfs in
-        let extend_with = PFS.extend pfs in
-        let whole = Reduction.reduce_lexpr ~matching ~gamma ~pfs pf in
+        let rec_call = filter_mapper_formula ops pfs in
+        let extend_with = ops.extend in
+        let whole = ops.reduce_formula pf in
         match whole with
         (* These we must not encounter here *)
         | ForAll (bt, _) ->
@@ -450,7 +612,8 @@ let simplify_pfs_and_gamma
                    nonnumeric left || nonnumeric right
                | _ -> false -> (
             match idx with
-            | Lit (Int nx) ->
+            | Lit (Int nx)
+              when Z.geq nx Z.zero && Z.leq nx (Z.of_int 100) ->
                 let prepend_lvars =
                   List.init (Z.to_int nx) (fun _ -> LVar.alloc ())
                 in
@@ -591,10 +754,9 @@ let simplify_pfs_and_gamma
                       | false, true -> (y, x)
                       | _ -> (x, y)
                     in
-                    PFS.subst_expr_for_expr
+                    ops.substitute_expr
                       (UnOp (LstLen, LVar y))
-                      (UnOp (LstLen, LVar x))
-                      lpfs;
+                      (UnOp (LstLen, LVar x));
                     `Replace whole
                 | Lit (Loc _), ALoc _ | ALoc _, Lit (Loc _) ->
                     (* TODO: What should actually happen here... *)
@@ -620,7 +782,7 @@ let simplify_pfs_and_gamma
                     let temp_subst =
                       SESubst.init [ (ALoc alocr, ALoc alocl) ]
                     in
-                    PFS.substitution temp_subst lpfs;
+                    ops.substitute temp_subst;
                     let substituted =
                       SESubst.subst_in_expr ~partial:true temp_subst whole
                     in
@@ -667,7 +829,7 @@ let simplify_pfs_and_gamma
                               Error "Type mismatch"
                           | _ ->
                               let temp_subst = SESubst.init [ (LVar v, le) ] in
-                              PFS.substitution temp_subst lpfs;
+                              ops.substitute temp_subst;
 
                               (if SESubst.mem result (LVar v) then
                                  let le' =
@@ -679,7 +841,7 @@ let simplify_pfs_and_gamma
                                           ((Fmt.to_to_string Expr.pp) le)
                                           ((Fmt.to_to_string Expr.pp) le'))); *)
                                  if le <> le' then
-                                   PFS.extend lpfs (BinOp (le, ValueEqual, le')));
+                                   ops.extend (BinOp (le, ValueEqual, le')));
                               SESubst.iter result (fun x le ->
                                   let sle =
                                     SESubst.subst_in_expr temp_subst
@@ -904,7 +1066,7 @@ let simplify_pfs_and_gamma
       (*****************************************
        ********* THIS IS THE BEGINNING *********
        *****************************************)
-      PFS.sort lpfs;
+      simplification_phase "initial_sort" (PFS.length lpfs) (fun () -> PFS.sort lpfs);
       let old_pfs = ref (PFS.init ()) in
       let iteration_count = ref 0 in
 
@@ -913,23 +1075,29 @@ let simplify_pfs_and_gamma
         L.tmi (fun fmt -> fmt "Iteration: %d" !iteration_count);
         L.tmi (fun fmt -> fmt "PFS:\n%a" PFS.pp lpfs);
 
-        old_pfs := PFS.copy lpfs;
+        simplification_phase "iteration_copy" (PFS.length lpfs) (fun () ->
+          old_pfs := PFS.copy lpfs);
 
         (* Step 1 - Simplify unit types and sort *)
-        simplify_unit_types ();
-        PFS.sort lpfs;
+        simplification_phase "unit_types" (PFS.length lpfs) simplify_unit_types;
+        simplification_phase "iteration_sort" (PFS.length lpfs) (fun () -> PFS.sort lpfs);
 
         (* Step 2 - Main loop *)
-        if PFS.filter_map_stop (filter_mapper_formula lpfs) lpfs then
+        if simplification_phase "formula_filter" (PFS.length lpfs) (fun () ->
+          Reduction.filter_map_pfs_with_live_reduction ~matching gamma lpfs
+            (fun ops -> filter_mapper_formula ops lpfs)) then
           pfs_false lpfs rpfs;
 
-        PFS.substitution result lpfs;
+        simplification_phase "result_substitution" (PFS.length lpfs) (fun () ->
+          PFS.substitution result lpfs);
 
         if
           PFS.length lpfs = 0
           || (PFS.length lpfs > 0 && not (PFS.get_nth 0 lpfs = Some Expr.false_))
         then (
           (* Step 3 - Bring back my variables *)
+          simplification_phase "restore_sanitise" (PFS.length lpfs) (fun () ->
+          simplification_phase "restore_variables" (PFS.length lpfs) (fun () ->
           SESubst.iter result (fun v le ->
               match v with
               | LVar v ->
@@ -940,10 +1108,11 @@ let simplify_pfs_and_gamma
                        || ((not kill_new_lvars) && vars_to_save <> SS.empty))
                     && not (Names.is_aloc_name v)
                   then PFS.extend lpfs (BinOp (LVar v, ValueEqual, le))
-              | _ -> ());
+              | _ -> ()));
 
-          sanitise_pfs_no_store ~matching gamma lpfs;
+          sanitise_pfs_no_store ~matching gamma lpfs);
 
+          simplification_phase "typing_cleanup" (PFS.length lpfs) (fun () ->
           let current_lvars = SS.union (PFS.lvars lpfs) (PFS.lvars rpfs) in
           Type_env.iter gamma (fun v _ ->
               if SS.mem v !vars_to_kill && not (SS.mem v current_lvars) then
@@ -957,17 +1126,19 @@ let simplify_pfs_and_gamma
                        ( Expr.zero_i,
                          ILessThanEqual,
                          UnOp (LstLen, Expr.from_var_name v) ))
-              | _ -> ());
+              | _ -> ()));
 
-          analyse_list_structure lpfs;
+          simplification_phase "list_analysis" (PFS.length lpfs) (fun () ->
+            analyse_list_structure lpfs);
 
-          PFS.sort lpfs)
+          simplification_phase "final_sort" (PFS.length lpfs) (fun () -> PFS.sort lpfs))
       done;
 
       L.verbose (fun m -> m "PFS/Gamma simplification completed:\n");
       L.verbose (fun m -> m "PFS:@\n%a@\n" PFS.pp lpfs);
       L.verbose (fun m -> m "Gamma:@\n%a@\n" Type_env.pp gamma);
 
+      simplification_phase "cache_store" (PFS.length lpfs) (fun () ->
       let cached_simplification =
         {
           simpl_gamma = Type_env.to_list gamma;
@@ -977,12 +1148,13 @@ let simplify_pfs_and_gamma
         }
       in
       Simplification_cache.replace simplification_cache key
-        cached_simplification;
+        cached_simplification);
 
       (* Utils.Statistics.update_statistics "FOS: SimplifyPFSandGamma"
          (Unix.gettimeofday () -. t); *)
 
       (* Step 5 - Sort ALoc transitivity *)
+      simplification_phase "aloc_cleanup" (PFS.length lpfs) (fun () ->
       let rec find_loc_all_the_way aloc res =
         let f = find_loc_all_the_way in
         match SESubst.get result aloc with
@@ -1006,6 +1178,7 @@ let simplify_pfs_and_gamma
             PFS.substitution aloc_subst lpfs;
             PFS.substitution aloc_subst rpfs)
       in
+      ());
 
       (* Step 6 - Conclude *)
       (result, !existentials)

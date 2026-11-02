@@ -4,6 +4,7 @@ open Js2jsil_lib
 module GProg = Gillian.Gil_syntax.Prog
 module GProc = Gillian.Gil_syntax.Proc
 module Literal = Gillian.Gil_syntax.Literal
+module Expr = Gillian.Gil_syntax.Expr
 module Annot = Gillian.Gil_syntax.Annot
 module Utf16 = Javert_utils.Utf16
 
@@ -268,13 +269,35 @@ struct
               units
           in
           Utf16String (Utf16.of_canonical (Utf16.of_code_units units))
-      | "ExecuteStringTrim", [ Some (Utf16String string) ] ->
-          Utf16String
-            (Utf16.of_canonical (Utf16.trim (Utf16.to_canonical string)))
       | _ -> unsupported ()
     in
     let state = update_store state x (Val.from_literal result) in
     [ (state, cs, i, i + 1) ]
+
+  let execute_string_trim state cs i x = function
+    | [ value ] ->
+        let result =
+          match Val.to_literal value with
+          | Some (Utf16String string) ->
+              Val.from_literal
+                (Utf16String
+                   (Utf16.of_canonical (Utf16.trim (Utf16.to_canonical string))))
+          | _ -> (
+              match State.get_type state value with
+              | Some Gillian.Gil_syntax.Type.Utf16Type ->
+                  State.eval_expr state
+                    (Expr.UnOp
+                       (Gillian.Gil_syntax.UnOp.Utf16Trim, Val.to_expr value))
+              | _ ->
+                  raise
+                    (Exceptions.Unsupported
+                       "ExecuteStringTrim requires a UTF-16 string"))
+        in
+        let state = update_store state x result in
+        [ (state, cs, i, i + 1) ]
+    | _ ->
+        raise
+          (Exceptions.Unsupported "ExecuteStringTrim expects one argument")
 
   (** General External Procedure Treatment
 
@@ -299,8 +322,9 @@ struct
     match pid with
     | "ExecuteStringLength"
     | "ExecuteStringNth"
-    | "ExecuteStringFromCodeUnits"
-    | "ExecuteStringTrim" -> execute_string_primitive state cs i x pid v_args
+    | "ExecuteStringFromCodeUnits" ->
+        execute_string_primitive state cs i x pid v_args
+    | "ExecuteStringTrim" -> execute_string_trim state cs i x v_args
     | "ExecuteStringCodeUnits" -> execute_string_code_units state cs i x v_args
     | "ExecuteEval" -> execute_eval prog state cs i x v_args j
     | "ExecuteFunctionConstructor" ->

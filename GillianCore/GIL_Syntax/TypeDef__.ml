@@ -99,6 +99,8 @@ and binop =
   | M_atan2
   | M_pow
   | LstNth
+  | LstContains  (** List membership by value identity *)
+  | KeyInsertIndex  (** Exact OrdinaryOwnPropertyKeys insertion position *)
   | LstRepeat
   | StrCat
   | Utf16Less
@@ -141,19 +143,21 @@ and unop =
   | Car
   | Cdr
   | LstLen
+  | LstAllUtf16
   | LstRev
   | SetToList
   | StrLen
   | NumberToUtf16
   | Utf16ToNumber
   | Utf16Len
+  | Utf16Trim
   | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
   | NumToInt
   | BoolToInt
   | IntToNum
   | IsInt
 
-and nop = LstCat | SetUnion | SetInter
+and nop = LstCat | LstInsert | Utf16Sub | SetUnion | SetInter
 
 and expr =
   | Lit of literal
@@ -291,10 +295,13 @@ and constructor = {
   constructor_datatype : string;
 }
 
+and verifier_scope_binding = { vsb_source : expr; vsb_target : expr }
+
 and single_spec = {
   ss_pre : assertion * location option;
   ss_posts : (assertion * location option) list;
   ss_variant : expr option;
+  ss_verifier_scope : verifier_scope_binding option; [@default None]
   ss_flag : flag;
   ss_to_verify : bool;
   ss_label : (string * string list) option;

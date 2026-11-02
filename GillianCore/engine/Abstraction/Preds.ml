@@ -146,18 +146,32 @@ let consume_pred
       (targets : vt option list)
       (f_eq : vt -> vt -> bool) : bool * (int * int) =
     let candidate = List.mapi (fun i cv -> (i, cv)) candidate in
-    let icount, ocount =
-      List.fold_left2
-        (fun (ic, oc) (i, cv) tv ->
-          match tv with
-          | None -> (ic, oc)
-          (* First check syntactic equality and only then try f_eq *)
-          | Some tv when (not (Expr.equal cv tv)) && not (f_eq cv tv) -> (ic, oc)
-          | _ -> if Containers.SI.mem i ins then (ic + 1, oc) else (ic, oc + 1))
-        (0, 0) candidate targets
+    let inputs, outputs =
+      List.partition (fun ((i, _), _) -> Containers.SI.mem i ins)
+        (List.combine candidate targets)
     in
-    let result = (icount = ins_count, (icount, ocount)) in
-    result
+    let count_matches pairs =
+      List.fold_left
+        (fun count ((_, cv), tv) ->
+          match tv with
+          | Some tv when Expr.equal cv tv || f_eq cv tv -> count + 1
+          | _ -> count)
+        0 pairs
+    in
+    (* One failed input already disqualifies the candidate. Later input
+       equalities cannot restore ownership, and may ask unrelated SMT queries. *)
+    let rec match_inputs count = function
+      | [] -> count
+      | ((_, cv), Some tv) :: rest
+        when Expr.equal cv tv || f_eq cv tv -> match_inputs (count + 1) rest
+      | _ -> count
+    in
+    let icount = match_inputs 0 inputs in
+    (* Outputs cannot rescue a candidate with mismatched inputs. Avoid unrelated
+       solver queries for its output witnesses; preserve the existing ranking
+       among candidates whose complete input footprint does match. *)
+    if icount <> ins_count then (false, (icount, 0))
+    else (true, (icount, count_matches outputs))
   in
   (* Sort the candidate predicates according to the number of ins matched,
      and then the number of outs matched, in decreasing order of matches *)
@@ -168,13 +182,17 @@ let consume_pred
     List.fold_left
       (fun (b', i', o', result) candidate ->
         let ccurrent = (b', i', o', result) in
-        if i' = ins_count && o' = known_outs_count then ccurrent
+        if b' && i' = ins_count && o' = known_outs_count then ccurrent
         else
           let b, (i, o) =
             try
               (* In case something goes wrong with the evaluation, ignore *)
               eval_cand_with_fun candidate targets f_eq
-            with _ -> (false, (0, 0))
+            with
+            | ( Gillian_result.Exc.Gillian_error _
+              | Gillian_result.Exc.Gillian_internal_error _ ) as err
+              when !Config.Verification.total -> raise err
+            | _ -> (false, (0, 0))
           in
           let cnew = (b, i, o, candidate) in
           match (b', b) with

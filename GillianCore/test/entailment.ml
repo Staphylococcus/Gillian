@@ -79,40 +79,130 @@ let finite_position () =
      the short-budget run must remain inconclusive
      and the required-query API must still raise its ordinary totality error. *)
   if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then (
-    Alcotest.(check bool)
-      "optional unknown cannot prove UNSAT" false (Smt.proves_unsat fs g);
-    Alcotest.(check bool)
-      "remembered inconclusive precheck still proves nothing" false
-      (Smt.proves_unsat fs g);
+    (* This resource-control invocation runs alone in a fresh test directory.
+       Check both the rejection semantics and visibility without verbose logs. *)
+    let module L = Logging in
+    L.Mode.set_mode (Enabled Normal);
+    L.initialize [ L.file_reporter ];
+    let saved_dump = !Config.dump_smt in Config.dump_smt := true;
+    Fun.protect
+      ~finally:(fun () ->
+        Config.dump_smt := saved_dump;
+        L.wrap_up ();
+        L.initialize [];
+        L.Mode.set_mode (Enabled Verbose))
+      (fun () ->
+        L.verbose (fun m -> m "UNKNOWN_CONTROL_VERBOSE_SENTINEL");
+        let trace = L.Loggable.make_string "UNKNOWN_CONTROL_COMMAND_TRACE" in
+        let trace_type = L.Logging_constants.Content_type.cmd in
+        ignore (L.Specific.normal trace trace_type);
+        let reduction = bin IPlus (Expr.int 9001) (Expr.int 1) in
+        let expected = Expr.int 9002 in
+        let reduction_line =
+          Fmt.str "reduce_lexpr: @[%a -> %a@]" Expr.pp reduction Expr.pp expected
+        in
+        Alcotest.(check bool) "normal reduction preserves result" true
+          (Expr.equal (Engine.Reduction.reduce_lexpr reduction) expected);
+        Alcotest.(check bool)
+          "optional unknown cannot prove UNSAT" false (Smt.proves_unsat fs g);
+        Alcotest.(check bool)
+          "remembered inconclusive precheck still proves nothing" false
+          (Smt.proves_unsat fs g);
 
-    let rejected check =
-      try
-        check ();
-        false
-      with
-      | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError msg) ->
-        msg = "Incomplete totality proof: SMT returned unknown"
-    in
-    Alcotest.(check bool)
-      "required unknown remains an error" true
-      (rejected (fun () -> ignore (Smt.exec_sat fs g)));
-    Hashtbl.add g "#other_s" Type.Utf16Type;
-    Hashtbl.add g "#other_index" Type.NumberType;
-    let seeded_fs =
-      Expr.Set.add
-        (bin Equal (Expr.LVar "#other_s") s)
-        (Expr.Set.add (bin Equal (Expr.LVar "#other_index") index) fs)
-    in
-    Alcotest.(check bool)
-      "seed failure cannot hide required unknown" true
-      (rejected (fun () -> ignore (Smt.is_sat seeded_fs g)));
-    Hashtbl.remove g "#other_s";
-    Hashtbl.remove g "#other_index";
-    Hashtbl.add g "#length" Type.NumberType;
-    let single_pair = Expr.Set.add (bin Equal (Expr.LVar "#length") len) fs in
-    Alcotest.(check bool)
-      "single-pair seed failure cannot hide required unknown" true
-      (rejected (fun () -> ignore (Smt.is_sat single_pair g))))
+        let rejected check =
+          try
+            check ();
+            false
+          with
+          | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError msg) ->
+            msg = "Incomplete totality proof: SMT returned unknown"
+        in
+        Alcotest.(check bool)
+          "required unknown remains an error" true
+          (rejected (fun () -> ignore (Smt.exec_sat fs g)));
+        Hashtbl.add g "#other_s" Type.Utf16Type;
+        Hashtbl.add g "#other_index" Type.NumberType;
+        let seeded_fs =
+          Expr.Set.add
+            (bin Equal (Expr.LVar "#other_s") s)
+            (Expr.Set.add (bin Equal (Expr.LVar "#other_index") index) fs)
+        in
+        Alcotest.(check bool)
+          "seed failure cannot hide required unknown" true
+          (rejected (fun () -> ignore (Smt.is_sat seeded_fs g)));
+        Hashtbl.remove g "#other_s";
+        Hashtbl.remove g "#other_index";
+        Hashtbl.add g "#length" Type.NumberType;
+        let single_pair = Expr.Set.add (bin Equal (Expr.LVar "#length") len) fs in
+        Alcotest.(check bool)
+          "single-pair seed failure cannot hide required unknown" true
+          (rejected (fun () -> ignore (Smt.is_sat single_pair g)));
+        Alcotest.(check bool) "reason metadata preserves same-session known SAT" true
+          (Option.is_some (Smt.exec_sat
+            (Expr.Set.singleton (Expr.Lit (Literal.Bool true))) (Hashtbl.create 1)));
+        let ch = open_in_bin "file.log" in
+        let log = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        let lines = String.split_on_char '\n' log in
+        Alcotest.(check bool) "unknown remains visible at normal logging" true
+          (List.mem "The solver returned: unknown" lines);
+        let prefix = "SMT_QUERY_RESULT " in
+        let unknown_rows = List.filter (fun line ->
+          String.starts_with ~prefix line && String.ends_with ~suffix:"result=unknown" line) lines in
+        let old_unknowns = List.filter ((=) "The solver returned: unknown") lines in
+        Alcotest.(check int) "every unknown has a causal native result" (List.length old_unknowns)
+          (List.length unknown_rows);
+        let field name row = let prefix=name ^ "=" in
+          let f=List.find (String.starts_with ~prefix) (String.split_on_char ' ' row) in
+          String.sub f (String.length prefix) (String.length f-String.length prefix) in
+        let ids=List.map (field "query") unknown_rows in
+        Alcotest.(check int) "unknown native IDs are unique" (List.length ids)
+          (List.length (List.sort_uniq String.compare ids));
+        Alcotest.(check bool) "unknown dumps actually exist" true
+          (List.for_all (fun id -> id <> "none" && Sys.file_exists (Filename.concat "gillian_smt_queries" id)) ids);
+        let reason_prefix = "SMT_PRIMARY_UNKNOWN_REASON " in
+        let reason_rows = List.filter (String.starts_with ~prefix:reason_prefix) lines in
+        Alcotest.(check int) "every native unknown has exactly one reason response"
+          (List.length ids) (List.length reason_rows);
+        Alcotest.(check (list string)) "reason responses join only actual UNKNOWN queries"
+          (List.sort String.compare ids)
+          (List.sort String.compare (List.map (field "query") reason_rows));
+        List.iter (fun row ->
+          let prefix = reason_prefix ^ "query=" ^ field "query" row
+            ^ " status=available response=" in
+          Alcotest.(check bool) "native reason response is available" true
+            (String.starts_with ~prefix row);
+          let encoded = String.sub row (String.length prefix)
+            (String.length row - String.length prefix) in
+          match Sexplib.Sexp.of_string encoded with
+          | Sexplib.Sexp.Atom response ->
+              (match Sexplib.Sexp.of_string response with
+               | Sexplib.Sexp.List [Sexplib.Sexp.Atom ":reason-unknown";
+                                   Sexplib.Sexp.Atom reason] ->
+                   Alcotest.(check bool) "native reason is nonempty" true (reason <> "")
+               | _ -> Alcotest.fail "malformed native reason response")
+          | _ -> Alcotest.fail "reason response is not one escaped string") reason_rows;
+        List.iter (fun policy -> Alcotest.(check bool) ("unknown policy " ^ policy ^ " is attributed") true
+          (List.exists (fun row -> field "raw_unknown" row = policy) unknown_rows)) ["true";"false"];
+
+        Alcotest.(check bool) "verbose tracing really is disabled" false
+          (List.mem "UNKNOWN_CONTROL_VERBOSE_SENTINEL" lines);
+        Alcotest.(check bool) "normal file logging omits command traces" false
+          (List.mem "UNKNOWN_CONTROL_COMMAND_TRACE" lines);
+        Alcotest.(check bool) "normal file logging omits reduction traces" false
+          (List.mem reduction_line lines);
+        L.Mode.set_mode (Enabled Verbose);
+        ignore (L.Specific.normal trace trace_type);
+        Alcotest.(check bool) "verbose reduction preserves result" true
+          (Expr.equal (Engine.Reduction.reduce_lexpr reduction) expected);
+        let ch = open_in_bin "file.log" in
+        let verbose_log = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        let verbose_lines = String.split_on_char '\n' verbose_log in
+        Alcotest.(check bool) "verbose file logging retains command traces" true
+          (List.mem "UNKNOWN_CONTROL_COMMAND_TRACE" verbose_lines);
+        Alcotest.(check bool) "verbose file logging retains reduction traces" true
+          (List.mem reduction_line verbose_lines)))
   else
     (* The optional API may legitimately use its bounded unknown outcome.
        A false precheck is not a proof: require actual UNSAT from the original
@@ -656,59 +746,64 @@ let contained_goal () =
     (entails content (bin Equal code (Expr.num 65.)))
 
 let numeric_rank () =
-  let position = Expr.LVar "#rank_pos" and len = Expr.LVar "#rank_len" in
-  let count = Expr.LVar "#rank_count" and before = Expr.LVar "#rank_before" in
-  let text = Expr.LVar "#rank_text" in
-  let maximum = Expr.num 9007199254740991. in
-  let gamma = Gamma.init () in
-  List.iter
-    (fun name -> Gamma.update gamma name Type.NumberType)
-    [ "#rank_pos"; "#rank_len"; "#rank_count"; "#rank_before" ];
-  Gamma.update gamma "#rank_text" Type.Utf16Type;
-  let next = bin FPlus position (Expr.num 1.) in
-  let twice = bin FPlus next (Expr.num 1.) in
-  let base =
-    [
-      Expr.UnOp (IsInt, position);
-      Expr.UnOp (IsInt, len);
-      Expr.UnOp (IsInt, count);
-      bin FLessThanEqual (Expr.num 0.) count;
-      bin FLessThanEqual count position;
-      bin FLessThan position len;
-      bin FLessThanEqual len maximum;
-      bin ValueEqual before (bin FMinus maximum position);
-      bin ValueEqual len (Expr.UnOp (IntToNum, Expr.UnOp (Utf16Len, text)));
-      bin ILessThanEqual
-        (Expr.UnOp (Utf16Len, text))
-        (Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))));
-      bin FLessThanEqual (Expr.num 55296.)
-        (bin Utf16CodeUnit text (Expr.UnOp (ToIntOp, position)));
-    ]
+  let run () =
+    let position = Expr.LVar "#rank_pos" and len = Expr.LVar "#rank_len" in
+    let count = Expr.LVar "#rank_count" and before = Expr.LVar "#rank_before" in
+    let text = Expr.LVar "#rank_text" in
+    let maximum = Expr.num 9007199254740991. in
+    let gamma = Gamma.init () in
+    List.iter
+      (fun name -> Gamma.update gamma name Type.NumberType)
+      [ "#rank_pos"; "#rank_len"; "#rank_count"; "#rank_before" ];
+    Gamma.update gamma "#rank_text" Type.Utf16Type;
+    let next = bin FPlus position (Expr.num 1.) in
+    let twice = bin FPlus next (Expr.num 1.) in
+    let base =
+      [
+        Expr.UnOp (IsInt, position);
+        Expr.UnOp (IsInt, len);
+        Expr.UnOp (IsInt, count);
+        bin FLessThanEqual (Expr.num 0.) count;
+        bin FLessThanEqual count position;
+        bin FLessThan position len;
+        bin FLessThanEqual len maximum;
+        bin ValueEqual before (bin FMinus maximum position);
+        bin ValueEqual len (Expr.UnOp (IntToNum, Expr.UnOp (Utf16Len, text)));
+        bin ILessThanEqual
+          (Expr.UnOp (Utf16Len, text))
+          (Expr.Lit (Int (Z.pred (Z.shift_left Z.one 53))));
+        bin FLessThanEqual (Expr.num 55296.)
+          (bin Utf16CodeUnit text (Expr.UnOp (ToIntOp, position)));
+      ]
+    in
+    let entails facts goals =
+      Solver.check_entailment Utils.Containers.SS.empty (Engine.PFS.of_list facts)
+        goals gamma
+    in
+    List.iter
+      (fun (name, after_position, facts) ->
+        let rank = bin FMinus maximum after_position in
+        Alcotest.(check bool)
+          (name ^ " actual Number rank")
+          true
+          (entails facts
+             [
+               Expr.UnOp (IsInt, rank);
+               bin FLessThanEqual (Expr.num 0.) rank;
+               bin FLessThan rank before;
+             ]);
+        Alcotest.(check bool)
+          (name ^ " wrong nondecreasing rank")
+          false
+          (entails facts [ bin FLessThanEqual before rank ]))
+      [
+        ("one increment", next, base);
+        ("two increments", twice, bin FLessThan next len :: base);
+      ]
   in
-  let entails facts goals =
-    Solver.check_entailment Utils.Containers.SS.empty (Engine.PFS.of_list facts)
-      goals gamma
-  in
-  List.iter
-    (fun (name, after_position, facts) ->
-      let rank = bin FMinus maximum after_position in
-      Alcotest.(check bool)
-        (name ^ " actual Number rank")
-        true
-        (entails facts
-           [
-             Expr.UnOp (IsInt, rank);
-             bin FLessThanEqual (Expr.num 0.) rank;
-             bin FLessThan rank before;
-           ]);
-      Alcotest.(check bool)
-        (name ^ " wrong nondecreasing rank")
-        false
-        (entails facts [ bin FLessThanEqual before rank ]))
-    [
-      ("one increment", next, base);
-      ("two increments", twice, bin FLessThan next len :: base);
-    ]
+  let saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) run
 
 let numeric_conjuncts () =
   let x = Expr.LVar "#conj_x" and s = Expr.LVar "#conj_s" in
@@ -1390,6 +1485,10941 @@ let length_zero_core () =
     "missing zero equation rejects the empty-length goal" false
     (entail facts_d goal)
 
+let utf16_code_order_core () =
+  (* Original q280 entailment premises. Restore MAX_SAFE_INTEGER from its
+     exact binary64 bits, not the rounded decimal log printer. No new facts. *)
+  let facts = parse_gil_set
+    [
+      "(#len == (as_num (u16-len #s)))";
+      "(#pos == #pos)";
+      "(#len == #len)";
+      "(#this == undefined)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #pos)";
+      "(0. <= #count)";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_437 v== (9007199254740991. - #pos))";
+      "(#pos < #len)";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== ((#pos + 1.) + 1.))";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(is_int #next_pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= (#count + 1.))";
+      "((#count + 1.) <= #next_pos)";
+    ]
+  in
+  let s = Expr.LVar "#s" and pos = Expr.LVar "#pos" in
+  let code = bin Utf16CodeUnit s (Expr.UnOp (ToIntOp, pos)) in
+  let lower = Expr.num 55296. in
+  let goal = bin FLessThanEqual lower code in
+  let premise = not_ (bin FLessThan code lower) in
+  assert (Expr.Set.mem premise facts);
+  let fresh_gamma () =
+    let g = Gamma.init () in
+    Gamma.update g "#s" Type.Utf16Type;
+    Gamma.update g "#this" Type.UndefinedType;
+    List.iter (fun n -> Gamma.update g n Type.NumberType)
+      [ "#pos"; "#len"; "#count"; "#next_pos"; "#lvar_437" ];
+    g
+  in
+  let entail fs goal =
+    Solver.check_entailment Utils.Containers.SS.empty
+      (Engine.PFS.of_list (Expr.Set.elements fs)) [ goal ] (fresh_gamma ())
+  in
+  let queries () =
+    if Sys.file_exists "gillian_smt_queries" then
+      Array.to_list (Sys.readdir "gillian_smt_queries")
+    else []
+  in
+  let before = queries () in
+  let saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) "original lower-bound entailment" true
+      (entail facts goal);
+    (* Require the actual original two-atom native query. An always-success
+       stub emits no query; the prior complete-query path emits larger sets. *)
+    let core = Expr.Set.of_list [ Expr.negate goal; premise ] in
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) core in
+    let fresh = List.filter (fun name -> not (List.mem name before)) (queries ()) in
+    Alcotest.(check int) "one native query establishes the entailment" 1
+      (List.length fresh);
+    let observed = List.filter (fun name ->
+      let path = Filename.concat "gillian_smt_queries" name in
+      let ch = open_in_bin path in
+      let contents = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix contents) fresh in
+    Alcotest.(check int) "one original-fact native core query" 1
+      (List.length observed);
+    Printf.printf "UTF16_ORDER_CORE_NATIVE_QUERY=%s\n%!" (List.hd observed);
+    let literal units = Expr.Lit (Literal.Utf16String
+        (Gillian.Utils.Utf16.of_canonical
+           (Gillian.Utils.Utf16.of_code_units units))) in
+    let concrete units = Expr.Set.of_list
+        [ bin Equal s (literal units); bin Equal pos (Expr.num 0.) ] in
+    let low = Expr.Set.add premise (concrete [55296; 65]) in
+    Alcotest.(check bool) "nearby stronger bound has a counterexample" false
+      (entail low (bin FLessThanEqual (Expr.num 55297.) code));
+    Alcotest.(check bool) "missing premise retains a counterexample" false
+      (entail (concrete [65]) goal);
+    let next = bin Utf16CodeUnit s (Expr.num 1.) in
+    Alcotest.(check bool) "another access cannot borrow the premise" false
+      (entail low (bin FLessThanEqual lower next));
+    let g = fresh_gamma () |> Gamma.as_hashtbl in
+    let sat_core = Expr.Set.of_list
+        [ premise; not_ (bin FLessThanEqual (Expr.num 55297.) code) ] in
+    Alcotest.(check bool) "SAT core is inconclusive, not proof" false
+      (Smt.proves_unsat sat_core g);
+    Alcotest.(check bool) "same core has a native SAT model" true
+      (Option.is_some (Smt.exec_sat sat_core g)))
+
+
+(* These tests call the shared SAT path on retained helper queries, including
+   branch infeasibility. Native core observation rejects an always-success or
+   registry-only implementation; explicit SAT models reject always-UNSAT. *)
+let observe_original_core label facts expected gamma =
+  let queries () =
+    if Sys.file_exists "gillian_smt_queries" then
+      Array.to_list (Sys.readdir "gillian_smt_queries") else []
+  in
+  let before = queries () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) (label ^ " original query is UNSAT") true
+      (Option.is_none (Smt.check_sat facts (Gamma.as_hashtbl gamma)));
+    let fresh = List.filter (fun name -> not (List.mem name before)) (queries ()) in
+    Alcotest.(check int) (label ^ " one native core query") 1 (List.length fresh);
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) expected in
+    let path = Filename.concat "gillian_smt_queries" (List.hd fresh) in
+    let ch = open_in_bin path in
+    let contents = Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+    Alcotest.(check bool) (label ^ " exact original atoms observed") true
+      (String.starts_with ~prefix contents);
+    Printf.printf "ORIGINAL_CORE_NATIVE_QUERY=%s:%s\n%!" label (List.hd fresh))
+
+let original_core_gamma () =
+  let g = Gamma.init () in
+  Gamma.update g "#s" Type.Utf16Type;
+  List.iter (fun n -> Gamma.update g n Type.NumberType)
+    [ "#pos"; "#count"; "#len"; "#next_pos"; "#lvar_375"; "#after" ];
+  g
+
+let original_core_literal units = Expr.Lit (Literal.Utf16String
+  (Gillian.Utils.Utf16.of_canonical (Gillian.Utils.Utf16.of_code_units units)))
+
+let original_finite_add_core () =
+  (* Native query121; only solver-added concrete search seeds removed from
+     the fixture, if present. All selected core facts remain original. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((#pos + 1.) == (#pos + 1.)))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #pos)";
+      "(0. <= #count)";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! ((#pos + 1.) == (#pos + 1.)))";
+      "(is_int #pos)";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "finite_add" facts expected (original_core_gamma ());
+  let counterexample = Expr.Set.add (bin ValueEqual (Expr.LVar "#pos") (Expr.num nan))
+      (Expr.Set.remove (Expr.UnOp (IsInt, Expr.LVar "#pos")) expected) in
+  Alcotest.(check bool) "finite_add removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let original_code_upper_core () =
+  (* Native query204; only solver-added concrete search seeds removed from
+     the fixture, if present. All selected core facts remain original. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(! (u16-code(#s, (num_to_int #pos)) <= 56319.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #next_pos)";
+      "(is_int #pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= #count)";
+      "(0. <= (#count + 1.))";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== ((#pos + 1.) + 1.))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((#count + 1.) <= #next_pos)";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (u16-code(#s, (num_to_int #pos)) <= 56319.))";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "code_upper" facts expected (original_core_gamma ());
+  let counterexample = Expr.Set.union
+      (parse_gil_set [ "(! (u16-code(#s, (num_to_int #pos)) <= 56319.))" ])
+      (Expr.Set.of_list
+         [ bin Equal (Expr.LVar "#pos") (Expr.num 0.);
+           bin Equal (Expr.LVar "#s") (original_core_literal [57344]) ]) in
+  Alcotest.(check bool) "code_upper removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let original_length_index_core () =
+  (* Native query361; only solver-added concrete search seeds removed from
+     the fixture, if present. All selected core facts remain original. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) < 56320.))";
+      "(! (((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #next_pos)";
+      "(is_int #pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= #count)";
+      "(0. <= (#count + 1.))";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== (#pos + 1.))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int (#pos + 1.))))";
+      "((#count + 1.) <= #next_pos)";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(is_int #pos)";
+      "(0. <= #count)";
+      "(#count <= #pos)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int (#pos + 1.))))";
+      "((#pos + 1.) < #len)";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "length_index" facts expected (original_core_gamma ());
+  let counterexample = let failed = bin ILessThanEqual (Expr.UnOp (Utf16Len, Expr.LVar "#s"))
+      (Expr.UnOp (NumToInt, Expr.UnOp (ToIntOp,
+          bin FPlus (Expr.LVar "#pos") (Expr.num 1.)))) in
+    Expr.Set.union (Expr.Set.remove failed expected)
+      (Expr.Set.of_list
+         [ bin Equal (Expr.LVar "#pos") (Expr.num 0.);
+           bin Equal (Expr.LVar "#count") (Expr.num 0.);
+           bin Equal (Expr.LVar "#len") (Expr.num 2.);
+           bin Equal (Expr.LVar "#s") (original_core_literal [65;65]) ]) in
+  Alcotest.(check bool) "length_index removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let numeric_dependency_focus () =
+  let facts = parse_gil_set
+    [
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #pos)";
+      "(0. <= #count)";
+      "(#after <= #len)";
+      "(#count <= #pos)";
+      "(#len <= 9007199254740991.)";
+      "(#pos < #len)";
+      "((#after v== (#pos + 1.)) or (#after v== ((#pos + 1.) + 1.)))";
+    ] in
+  let g = original_core_gamma () in
+  let goal = bin FLessThanEqual
+    (bin FPlus (Expr.LVar "#count") (Expr.num 1.)) (Expr.LVar "#after") in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before = queries () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) "original complete numeric dependency entailment" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+         (Engine.PFS.of_list (Expr.Set.elements facts)) [goal] g);
+    let full = Expr.Set.add (not_ goal) facts in
+    let lossy = parse_gil_set
+      [ "(! ((#count + 1.) <= #after))"; "(is_int #count)";
+        "(0. <= #count)"; "(#after <= #len)"; "(#count <= #pos)";
+        "((#after v== (#pos + 1.)) or (#after v== ((#pos + 1.) + 1.)))" ] in
+    let prefix fs = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs in
+    let fresh = List.filter (fun n -> not (List.mem n before)) (queries ()) in
+    let contents = List.map (fun n ->
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" n) in
+      Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch))) fresh in
+    Alcotest.(check bool) "complete numeric native query observed" true
+      (List.exists (String.starts_with ~prefix:(prefix full)) contents);
+    Alcotest.(check bool) "lossy focused query is not submitted" false
+      (List.exists (String.starts_with ~prefix:(prefix lossy)) contents));
+  let concrete = Expr.Set.union facts
+    (parse_gil_set [ "(#pos == 0.)"; "(#count == 0.)";
+                     "(#after == 1.)"; "(#len == 2.)" ]) in
+  Alcotest.(check bool) "nearby stronger numeric goal retains counterexample" false
+    (Solver.check_entailment Utils.Containers.SS.empty
+       (Engine.PFS.of_list (Expr.Set.elements concrete))
+       [bin FLessThanEqual
+          (bin FPlus (Expr.LVar "#count") (Expr.num 2.)) (Expr.LVar "#after")]
+       (original_core_gamma ()))
+
+
+let original_mask_lower_core () =
+  (* Retained native query190; only concrete search seeds removed. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (56320. <= u16-code(#s, (num_to_int (#pos + 1.)))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #next_pos)";
+      "(is_int #pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= #count)";
+      "(0. <= (#count + 1.))";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== ((#pos + 1.) + 1.))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((#count + 1.) <= #next_pos)";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! (56320. <= u16-code(#s, (num_to_int (#pos + 1.)))))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "mask_lower" facts expected (original_core_gamma ());
+  let counterexample = Expr.Set.union
+    (parse_gil_set
+    [
+      "(! (56320. <= u16-code(#s, (num_to_int (#pos + 1.)))))";
+    ])
+    (Expr.Set.of_list
+       [bin ValueEqual (Expr.LVar "#pos") (Expr.num 0.);
+        bin Equal (Expr.LVar "#s") (original_core_literal [65;55296])]) in
+  Alcotest.(check bool) "mask_lower removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let original_mask_upper_core () =
+  (* Retained native query218; only concrete search seeds removed. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) <= 57343.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #next_pos)";
+      "(is_int #pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= #count)";
+      "(0. <= (#count + 1.))";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== ((#pos + 1.) + 1.))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((#count + 1.) <= #next_pos)";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) <= 57343.))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.)";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "mask_upper" facts expected (original_core_gamma ());
+  let counterexample = Expr.Set.union
+    (parse_gil_set
+    [
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) <= 57343.))";
+    ])
+    (Expr.Set.of_list
+       [bin ValueEqual (Expr.LVar "#pos") (Expr.num 0.);
+        bin Equal (Expr.LVar "#s") (original_core_literal [65;57344])]) in
+  Alcotest.(check bool) "mask_upper removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let original_mask_complement_core () =
+  (* Retained native query315; only concrete search seeds removed. *)
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (57343. < u16-code(#s, (num_to_int (#pos + 1.)))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! (#value == none))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#pos + 1.))))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) < 56320.))";
+      "(! (((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #next_pos)";
+      "(is_int #pos)";
+      "(is_int (#count + 1.))";
+      "(0. <= #count)";
+      "(0. <= (#count + 1.))";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== (#pos + 1.))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((#count + 1.) <= #next_pos)";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+    ] in
+  let expected = parse_gil_set
+    [
+      "(! (57343. < u16-code(#s, (num_to_int (#pos + 1.)))))";
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) < 56320.))";
+      "(! (((num_to_int32 u16-code(#s, (num_to_int (#pos + 1.)))) &f 64512.) == 56320.))";
+    ] in
+  assert (Expr.Set.subset expected facts);
+  observe_original_core "mask_complement" facts expected (original_core_gamma ());
+  let counterexample = Expr.Set.union
+    (parse_gil_set
+    [
+      "(! (57343. < u16-code(#s, (num_to_int (#pos + 1.)))))";
+      "(! (u16-code(#s, (num_to_int (#pos + 1.))) < 56320.))";
+    ])
+    (Expr.Set.of_list
+       [bin ValueEqual (Expr.LVar "#pos") (Expr.num 0.);
+        bin Equal (Expr.LVar "#s") (original_core_literal [65;56320])]) in
+  Alcotest.(check bool) "mask_complement removed-premise counterexample is SAT" true
+    (Option.is_some (Smt.check_sat counterexample
+       (Gamma.as_hashtbl (original_core_gamma ()))))
+
+let observe_length_projection label facts expected gamma =
+  let g = Gamma.as_hashtbl gamma in
+  let before_gamma = Hashtbl.copy g in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before = queries () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) (label ^ " original query is UNSAT") true
+      (Option.is_none (Smt.check_sat facts g));
+    let fresh = List.filter (fun name -> not (List.mem name before)) (queries ()) in
+    Alcotest.(check int) (label ^ " one native projection query") 1 (List.length fresh);
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) expected in
+    let ch = open_in_bin (Filename.concat "gillian_smt_queries" (List.hd fresh)) in
+    let contents = Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+    Alcotest.(check bool) (label ^ " exact numeric projection observed") true
+      (String.starts_with ~prefix contents);
+    Alcotest.(check bool) (label ^ " caller gamma unchanged") true
+      (Hashtbl.length g = Hashtbl.length before_gamma &&
+       Hashtbl.fold (fun k v ok -> ok && Hashtbl.find_opt g k = Some v)
+         before_gamma true);
+    Printf.printf "LENGTH_PROJECTION_NATIVE_QUERY=%s:%s\n%!" label (List.hd fresh))
+
+let original_length_projection () =
+  let facts = parse_gil_set
+    [
+      "(! (56319. < u16-code(#s, (num_to_int #pos))))";
+      "(! (#len v== -0.))";
+      "(! (#pos v== -0.))";
+      "(! ((num_to_int #pos) < 0.))";
+      "(! ((num_to_int (#pos + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #pos)))";
+      "(! (u16-code(#s, (num_to_int #pos)) < 55296.))";
+      "(is_int #count)";
+      "(is_int #len)";
+      "(is_int #pos)";
+      "(0. <= #count)";
+      "(#count <= #pos)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_375 v== (9007199254740991. - #pos))";
+      "(#pos == #pos)";
+      "(#pos < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((as_num (u16-len #s)) <= (num_to_int (#pos + 1.)))";
+      "((#pos + 1.) == (#pos + 1.))";
+      "((#pos + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #pos)) == u16-code(#s, (num_to_int #pos)))";
+    ] in
+  let core = parse_gil_set
+    [
+      "(is_int #pos)";
+      "(#len == (as_num (u16-len #s)))";
+      "((as_num (u16-len #s)) <= (num_to_int (#pos + 1.)))";
+      "((#pos + 1.) < #len)";
+    ] in
+  assert (Expr.Set.subset core facts);
+  let expected name =
+    let p = Expr.LVar "#pos" and n = Expr.LVar "#len" in
+    let abstract = Expr.LVar name in
+    let sum = bin FPlus p (Expr.num 1.) in
+    Expr.Set.of_list [Expr.UnOp (IsInt,p); bin Equal n abstract;
+      bin FLessThanEqual abstract (Expr.UnOp (ToIntOp,sum));
+      bin FLessThan sum n] in
+  observe_length_projection "plain" facts
+    (expected "#utf16_length_projection_0") (original_core_gamma ());
+  let occupied = original_core_gamma () in
+  Gamma.update occupied "#utf16_length_projection_0" Type.StringType;
+  let collision = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#utf16_length_projection_1")
+       (Expr.LVar "#utf16_length_projection_1")) facts in
+  observe_length_projection "collision" collision
+    (expected "#utf16_length_projection_2") occupied;
+  (* Each missing-selector-premise case has a real model in the original
+     UTF16 domain, not merely in the wider numeric projection. *)
+  List.iter
+    (fun (label,removed,pos,length,units) ->
+      let concrete = Expr.Set.union (Expr.Set.remove removed core)
+        (Expr.Set.of_list
+          [bin Equal (Expr.LVar "#pos") (Expr.num pos);
+           bin Equal (Expr.LVar "#len") (Expr.num length);
+           bin Equal (Expr.LVar "#s") (original_core_literal units)]) in
+      Alcotest.(check bool) ("length projection missing " ^ label ^ " is SAT") true
+        (Option.is_some (Smt.check_sat concrete
+           (Gamma.as_hashtbl (original_core_gamma ())))))
+    [ ("integrality", Expr.UnOp (IsInt,Expr.LVar "#pos"), -1.5,0.,[]);
+      ("link", bin Equal (Expr.LVar "#len")
+         (Expr.UnOp (IntToNum,Expr.UnOp (Utf16Len,Expr.LVar "#s"))),0.,2.,[]);
+      ("failed comparison", bin FLessThanEqual
+         (Expr.UnOp (IntToNum,Expr.UnOp (Utf16Len,Expr.LVar "#s")))
+         (Expr.UnOp (ToIntOp,bin FPlus (Expr.LVar "#pos") (Expr.num 1.))),
+         0.,2.,[65;65]) ]
+
+(* Recorded wrong-post definedness obligations: the four-atom contained
+   query dropped the length alias and returned unknown; the richer query was
+   UNSAT. Observe the actual native queries, not just the returned boolean. *)
+let utf16_length_alias_contained () =
+  let cases = [
+    ("direct", "#lvar_396", 0,
+     parse_gil_set [
+      "(is_int #lvar_396)";
+      "(0. <= #lvar_396)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len == (#lvar_396 + 1.))";
+      "(#lvar_396 < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int #lvar_396)))";
+    ],
+     parse_gil_set [
+      "(is_int #lvar_396)";
+      "(0. <= #lvar_396)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int #lvar_396)))";
+    ]);
+    ("next", "#lvar_402", 1,
+     parse_gil_set [
+      "(is_int #lvar_402)";
+      "(0. <= #lvar_402)";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len == ((#lvar_402 + 1.) + 1.))";
+      "(#lvar_402 < #len)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int (#lvar_402 + 1.))))";
+      "((#lvar_402 + 1.) < #len)";
+    ],
+     parse_gil_set [
+      "(is_int #lvar_402)";
+      "(0. <= #lvar_402)";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((u16-len #s) i<= (as_int (num_to_int (#lvar_402 + 1.))))";
+    ])
+  ] in
+  List.iter (fun (label, pname, offset, full, lossy) ->
+    let s = Expr.LVar "#s" and p = Expr.LVar pname in
+    let length = Expr.UnOp (Utf16Len, s) in
+    let index = if offset = 0 then p else bin FPlus p (Expr.num 1.) in
+    let converted = Expr.UnOp (NumToInt, Expr.UnOp (ToIntOp, index)) in
+    let failed = bin ILessThanEqual length converted in
+    assert (Expr.Set.mem failed full && Expr.Set.mem failed lossy);
+    let irrelevant = Expr.UnOp (IsInt, Expr.LVar "#irrelevant_count") in
+    let facts = Expr.Set.add irrelevant (Expr.Set.remove failed full) in
+    let fresh_gamma () =
+      let g = Gamma.init () in
+      Gamma.update g "#s" Type.Utf16Type;
+      List.iter (fun n -> Gamma.update g n Type.NumberType)
+        [pname; "#len"; "#irrelevant_count"];
+      g
+    in
+    let entail fs goal = Solver.check_entailment Utils.Containers.SS.empty
+      (Engine.PFS.of_list (Expr.Set.elements fs)) [goal] (fresh_gamma ()) in
+    let goal = bin ILessThan converted length in
+    let queries () = if Sys.file_exists "gillian_smt_queries" then
+      Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+    let prefix fs = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs in
+    let before = queries () and saved = !Config.dump_smt in
+    Config.dump_smt := true;
+    Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+      Alcotest.(check bool) (label ^ " original index bound") true
+        (entail facts goal);
+      let fresh = List.filter (fun n -> not (List.mem n before)) (queries ()) in
+      let contents = List.map (fun n ->
+        let ch = open_in_bin (Filename.concat "gillian_smt_queries" n) in
+        let text = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        (n,text)) fresh in
+      let retained = List.filter (fun (_,text) ->
+        String.starts_with ~prefix:(prefix (Expr.Set.add irrelevant full)) text) contents in
+      Alcotest.(check int) (label ^ " native query retains length alias") 1
+        (List.length retained);
+      Alcotest.(check bool) (label ^ " lossy contained query not submitted") false
+        (List.exists (fun (_,text) -> String.starts_with ~prefix:(prefix lossy) text)
+           contents);
+      Printf.printf "UTF16_LENGTH_ALIAS_NATIVE_QUERY=%s:%s\n%!"
+        label (fst (List.hd retained)));
+    let rounded = Expr.UnOp (IntToNum, length) in
+    let link = bin Equal (Expr.LVar "#len") rounded in
+    let value_link = bin ValueEqual (Expr.LVar "#len") rounded in
+    assert (Expr.Set.mem link facts && Expr.Set.mem value_link facts);
+    let concrete units = Expr.Set.of_list
+      [ bin ValueEqual p (Expr.num 0.);
+        bin ValueEqual (Expr.LVar "#len") (Expr.num (float_of_int (offset + 1)));
+        bin Equal s (original_core_literal units) ] in
+    let without_links = Expr.Set.remove link (Expr.Set.remove value_link facts) in
+    Alcotest.(check bool) (label ^ " missing length aliases reject") false
+      (entail (Expr.Set.union without_links (concrete [])) goal);
+    let actual = concrete (List.init (offset + 1) (fun _ -> 65)) in
+    let stronger = bin ILessThan
+      (Expr.UnOp (NumToInt, Expr.UnOp (ToIntOp, bin FPlus index (Expr.num 1.))))
+      length in
+    Alcotest.(check bool) (label ^ " stronger index bound rejects") false
+      (entail (Expr.Set.union facts actual) stronger)) cases
+
+(* Captured Ucs2ZeroCount definedness obligations: focused queries 30/69/92
+   returned unknown, while complete queries 31/70/93 were UNSAT. *)
+let utf16_length_focused_dependencies () =
+  let cases = [
+    ("direct", 0, parse_gil_set [
+        "(is_int #count)";
+        "(is_int #pos)";
+        "(is_int #zeroPrevious)";
+        "(0. <= #count)";
+        "(0. <= #zeroPrevious)";
+        "(#count == 0.)";
+        "(#count == (#zeroPreviousCount + 1.))";
+        "(#count <= #pos)";
+        "(#len == 0.)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == 0.)";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#pos <= #len)";
+        "(#s == u16\"\")";
+        "(#zeroPrevious == 0.)";
+        "(#zeroPrevious < #pos)";
+        "(#zeroPreviousCount == 0.)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int #zeroPrevious)))";
+      ],
+     parse_gil_set [
+        "(is_int #zeroPrevious)";
+        "(0. <= #zeroPrevious)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#zeroPrevious < #pos)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int #zeroPrevious)))";
+      ]);
+    ("terminal", 0, parse_gil_set [
+        "(! ((#zeroPrevious + 1.) < #len))";
+        "(is_int #count)";
+        "(is_int #pos)";
+        "(is_int #zeroPrevious)";
+        "(0. <= #count)";
+        "(0. <= #zeroPrevious)";
+        "(#count == 0.)";
+        "(#count == (#zeroPreviousCount + 1.))";
+        "(#count <= #pos)";
+        "(#len == 0.)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == 0.)";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#pos <= #len)";
+        "(#s == u16\"\")";
+        "(#zeroPrevious == 0.)";
+        "(#zeroPrevious < #pos)";
+        "(#zeroPreviousCount == 0.)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int #zeroPrevious)))";
+      ],
+     parse_gil_set [
+        "(! ((#zeroPrevious + 1.) < #len))";
+        "(is_int #zeroPrevious)";
+        "(0. <= #zeroPrevious)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#zeroPrevious < #pos)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int #zeroPrevious)))";
+      ]);
+    ("next", 1, parse_gil_set [
+        "(is_int #count)";
+        "(is_int #pos)";
+        "(is_int #zeroPrevious)";
+        "(0. <= #count)";
+        "(0. <= #zeroPrevious)";
+        "(#count == 0.)";
+        "(#count == (#zeroPreviousCount + 1.))";
+        "(#count <= #pos)";
+        "(#len == 0.)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == 0.)";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#pos <= #len)";
+        "(#s == u16\"\")";
+        "(#zeroPrevious == 0.)";
+        "(#zeroPrevious < #pos)";
+        "(#zeroPreviousCount == 0.)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int (#zeroPrevious + 1.))))";
+        "((#zeroPrevious + 1.) < #len)";
+      ],
+     parse_gil_set [
+        "(is_int #zeroPrevious)";
+        "(0. <= #zeroPrevious)";
+        "(#len == (as_num (u16-len #s)))";
+        "(#pos == (#zeroPrevious + 1.))";
+        "(#zeroPrevious < #pos)";
+        "((u16-len #s) i<= 9007199254740991i)";
+        "((u16-len #s) i<= (as_int (num_to_int (#zeroPrevious + 1.))))";
+        "((#zeroPrevious + 1.) < #len)";
+      ])
+  ] in
+  List.iter (fun (label, offset, full, lossy) ->
+    let s = Expr.LVar "#s" and p = Expr.LVar "#zeroPrevious" in
+    let length = Expr.UnOp (Utf16Len, s) in
+    let index = if offset = 0 then p else bin FPlus p (Expr.num 1.) in
+    let converted = Expr.UnOp (NumToInt, Expr.UnOp (ToIntOp, index)) in
+    let failed = bin ILessThanEqual length converted in
+    assert (Expr.Set.mem failed full && Expr.Set.subset lossy full);
+    let facts = Expr.Set.remove failed full in
+    let fresh_gamma () =
+      let g = Gamma.init () in
+      Gamma.update g "#s" Type.Utf16Type;
+      List.iter (fun n -> Gamma.update g n Type.NumberType)
+        ["#count"; "#pos"; "#len"; "#zeroPrevious"; "#zeroPreviousCount"];
+      g
+    in
+    let entail fs goal = Solver.check_entailment Utils.Containers.SS.empty
+      (Engine.PFS.of_list (Expr.Set.elements fs)) [goal] (fresh_gamma ()) in
+    let goal = bin ILessThan converted length in
+    let queries () = if Sys.file_exists "gillian_smt_queries" then
+      Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+    let before = queries () and saved = !Config.dump_smt in
+    Config.dump_smt := true;
+    Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+      Alcotest.(check bool) (label ^ " complete contradiction proves goal") true
+        (entail facts goal);
+      let fresh = List.filter (fun n -> not (List.mem n before)) (queries ()) in
+      let lossy_prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) lossy in
+      List.iter (fun n ->
+        let ch = open_in_bin (Filename.concat "gillian_smt_queries" n) in
+        let text = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        Alcotest.(check bool) (label ^ " no lossy focused query") false
+          (String.starts_with ~prefix:lossy_prefix text)) fresh;
+      Printf.printf "UTF16_FOCUSED_LENGTH_QUERIES=%s:%d\n%!" label (List.length fresh));
+    (* A satisfiable state with index equal to length must not prove index <
+       length. Concrete values make this a genuine original-domain witness. *)
+    let concrete = Expr.Set.of_list
+      [ bin ValueEqual p (Expr.num 0.);
+        bin Equal s (original_core_literal (List.init offset (fun _ -> 65))) ] in
+    Alcotest.(check bool) (label ^ " false bound retains counterexample") false
+      (entail concrete goal)) cases
+
+(* Native caller rank query337. The printed bound is restored from its
+   captured binary64 bits 433fffffffffffff, not rounded decimal diagnostics. *)
+let simplified_rank_goal () =
+  let module L = Logging in
+  L.Mode.set_mode (Enabled Normal);
+  L.initialize [ L.file_reporter ];
+  Fun.protect ~finally:(fun () ->
+    L.wrap_up (); L.initialize []; L.Mode.set_mode (Enabled Verbose))
+    (fun () ->
+  let facts = parse_gil_set [
+      "(! (56319. < u16-code(#s, (num_to_int #lvar_463))))";
+      "(! (#len v== -0.))";
+      "(! (#lvar_463 v== -0.))";
+      "(! (#lvar_464 == none))";
+      "(! ((num_to_int #lvar_463) < 0.))";
+      "(! ((num_to_int (#lvar_463 + 1.)) < 0.))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int #lvar_463)))";
+      "(! ((as_num (u16-len #s)) <= (num_to_int (#lvar_463 + 1.))))";
+      "(! (u16-code(#s, (num_to_int #lvar_463)) < 55296.))";
+      "(is_int #len)";
+      "(is_int #lvar_462)";
+      "(is_int #lvar_463)";
+      "(is_int #next_pos)";
+      "(is_int (#lvar_462 + 1.))";
+      "(0. <= #lvar_462)";
+      "(0. <= (#lvar_462 + 1.))";
+      "(#len v== (as_num (u16-len #s)))";
+      "(#len == #len)";
+      "(#len == (as_num (u16-len #s)))";
+      "(#len <= 9007199254740991.)";
+      "(#lvar_461 v== (9007199254740991. - #lvar_463))";
+      "(#lvar_462 <= #lvar_463)";
+      "(#lvar_463 == #lvar_463)";
+      "(#lvar_463 < #len)";
+      "(#lvar_js_13 v== #lvar_js_21)";
+      "(#lvar_js_13 v== #lvar_js_25)";
+      "(#lvar_js_14 v== #lvar_js_22)";
+      "(#lvar_js_14 v== #lvar_js_26)";
+      "(#lvar_js_15 v== #lvar_js_23)";
+      "(#lvar_js_15 v== #lvar_js_27)";
+      "(#lvar_js_21 v== #lvar_js_13)";
+      "(#lvar_js_22 v== #lvar_js_14)";
+      "(#lvar_js_23 v== #lvar_js_15)";
+      "(#lvar_js_25 v== #lvar_js_13)";
+      "(#lvar_js_26 v== #lvar_js_14)";
+      "(#lvar_js_27 v== #lvar_js_15)";
+      "(#next_pos v== ((#lvar_463 + 1.) + 1.))";
+      "((u16-len #s) i<= 9007199254740991i)";
+      "((#lvar_462 + 1.) <= #next_pos)";
+      "((#lvar_463 + 1.) == (#lvar_463 + 1.))";
+      "((#lvar_463 + 1.) < #len)";
+      "(u16-code(#s, (num_to_int #lvar_463)) == u16-code(#s, (num_to_int #lvar_463)))";
+      "(((num_to_int32 u16-code(#s, (num_to_int (#lvar_463 + 1.)))) &f 64512.) == 56320.)";
+  ] in
+  let gamma () =
+    let g = Gamma.init () in
+    Gamma.update g "#s" Type.Utf16Type;
+    List.iter (fun n -> Gamma.update g n Type.NumberType)
+      [ "#len"; "#lvar_461"; "#lvar_462"; "#lvar_463"; "#next_pos" ];
+    g
+  in
+  let rank = bin FMinus (Expr.num 9007199254740991.) (Expr.LVar "#next_pos") in
+  let goals = [ Expr.UnOp (IsInt, rank);
+                bin FLessThanEqual (Expr.num 0.) rank;
+                bin FLessThan rank (Expr.LVar "#lvar_461") ] in
+  let before = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) "captured rank conjunction is proved" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+         (Engine.PFS.of_list (Expr.Set.elements facts)) goals (gamma ()));
+    let fresh = Array.to_list (Sys.readdir "gillian_smt_queries")
+      |> List.filter (fun n -> not (List.mem n before)) in
+    Printf.printf "NORMALIZED_RANK_QUERIES=%d\n%!" (List.length fresh);
+    Alcotest.(check bool) "rank proof used actual native queries" true
+      (List.length fresh > 0));
+  (* Removing the true rank claims cannot let an unrelated false conjunct
+     pass: a concrete numeric state supplies a satisfiable counterexample. *)
+  let concrete = parse_gil_set [
+    "(#lvar_463 v== 0.)"; "(#len v== 2.)";
+    "(#next_pos v== 2.)"; "(#lvar_461 v== 9007199254740991.)" ] in
+  Alcotest.(check bool) "false rank conjunct remains rejected" false
+    (Solver.check_entailment Utils.Containers.SS.empty
+       (Engine.PFS.of_list (Expr.Set.elements concrete))
+       [bin FLessThanEqual (Expr.LVar "#lvar_461") rank] (gamma ()));
+  let ch = open_in_bin "file.log" in
+  let log = Fun.protect ~finally:(fun () -> close_in ch)
+    (fun () -> really_input_string ch (in_channel_length ch)) in
+  Alcotest.(check bool) "rank checks have no SMT unknown" false
+    (List.mem "The solver returned: unknown" (String.split_on_char '\n' log)))
+
+let check_array_counter_witness ?(fixed = []) zero label facts gamma =
+  let g = Gamma.as_hashtbl gamma in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before = queries () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) "complete array feasibility has a native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let seed = Expr.Set.add
+        (bin ValueEqual (Expr.LVar "#index") (Expr.num (if zero then 0. else 1.)))
+        (Expr.Set.add (bin Equal (Expr.UnOp (Utf16Len, Expr.LVar "#confidence"))
+          (Expr.int 1)) facts) in
+    let seed = List.fold_left (fun fs (name, value) -> Expr.Set.add
+        (bin ValueEqual (Expr.LVar name) (Expr.num value)) fs) seed fixed in
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let fresh = List.filter (fun n -> not (List.mem n before)) (queries ()) in
+    let observed = List.filter (fun name ->
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) fresh in
+    Alcotest.(check int) "native witness retains every original assertion" 1
+      (List.length observed);
+    Printf.printf "ARRAY_STEP_NATIVE_QUERY=%s:%s\n%!"
+      label (List.hd observed));
+  let impossible = Expr.Set.add
+      (bin ValueEqual (Expr.LVar "#failingLen") (Expr.num 0.)) facts in
+  Alcotest.(check bool) "complete contradictory query remains UNSAT" true
+    (Option.is_none (Smt.check_sat impossible g))
+
+let array_counter_witness zero () =
+  (* Complete feasibility query from the original AJV string-array loop.
+     No assumptions are removed; the seed is only a native model search. *)
+  let facts = parse_gil_set [
+    "(! (#key == none))";
+    "(! (#lvar_464 < 1.))";
+    "(! (#lvar_473 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_473)";
+    "(is_int (4294967295. - (#index + 1.)))";
+    "(is_int (#index + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #before))";
+    "(0i i<= (l-len #tail))";
+    "(0. < #index)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_473)";
+    "(0. <= (4294967295. - (#index + 1.)))";
+    "(0. <= (#index + 1.))";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == #index)";
+    "(#index < #failingLen)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_175)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_176)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_178)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_179)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_175 v== #lvar_142)";
+    "(#lvar_176 v== #lvar_143)";
+    "(#lvar_178 v== #lvar_145)";
+    "(#lvar_179 v== #lvar_146)";
+    "(#lvar_473 == #lvar_473)";
+    "(#lvar_473 <= (as_num (u16-len #confidence)))";
+    "(#lvar_477 v== (4294967295. - #index))";
+    "(#lvar_478 v== #item)";
+    "(#lvar_479 v== #tail)";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_17 v== #lvar_js_45)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_18 v== #lvar_js_46)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#lvar_js_45 v== #lvar_js_17)";
+    "(#lvar_js_46 v== #lvar_js_18)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #item) i<= 9007199254740991i)";
+    "((u16-len #previous) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((4294967295. - (#index + 1.)) < (4294967295. - #index))";
+    "((#index + 1.) <= 4294967295.)";
+    "((#lvar_464 == 0.) or (#lvar_464 == 1.))";
+    "(((#index + 1.) - 1.) == #index)";
+    "(((#lvar_464 == 0.) and (#key == undefined)) or ((#lvar_464 == 1.) and (#key == u16\"classification\")))";
+    "(((#lvar_473 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_473) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = if not zero then facts else
+    let remove = parse_gil_set ["(0. < #index)";
+      "(0i i<= (l-len #before))";
+      "((u16-len #previous) i<= 9007199254740991i)"] in
+    let add = parse_gil_set ["(! (0. < #index))";
+      "(0. <= #index)"; "(#index == 0.)"] in
+    Expr.Set.union add (Expr.Set.diff facts remove) in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#lvar_477" Type.NumberType;
+  Gamma.update gamma "#before" Type.ListType;
+  Gamma.update gamma "#previous" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#tail" Type.ListType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#item" Type.Utf16Type;
+  Gamma.update gamma "#lvar_464" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_473" Type.NumberType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  if zero then List.iter (Gamma.remove gamma) ["#before"; "#previous"];
+  check_array_counter_witness zero (if zero then "zero" else "positive") facts gamma
+
+let array_predecessor_witness () =
+  (* Complete captured feasibility query after the checked prefix inverse. *)
+  let facts = parse_gil_set [
+    "(! (#key == none))";
+    "(! (#lvar_466 < 1.))";
+    "(! (#lvar_475 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_475)";
+    "(is_int (#index - 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #before))";
+    "(0i i<= (l-len #lvar_481))";
+    "(0i i<= (l-len #tail))";
+    "(0. < #index)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_475)";
+    "(0. <= (#index - 1.))";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == #index)";
+    "(#index < #failingLen)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_175)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_176)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_178)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_179)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_175 v== #lvar_142)";
+    "(#lvar_176 v== #lvar_143)";
+    "(#lvar_178 v== #lvar_145)";
+    "(#lvar_179 v== #lvar_146)";
+    "(#lvar_475 == #lvar_475)";
+    "(#lvar_475 <= (as_num (u16-len #confidence)))";
+    "(#lvar_479 v== (4294967295. - #index))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_17 v== #lvar_js_45)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_18 v== #lvar_js_46)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#lvar_js_45 v== #lvar_js_17)";
+    "(#lvar_js_46 v== #lvar_js_18)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #lvar_480) i<= 9007199254740991i)";
+    "((u16-len #previous) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((#index - 1.) < 4294967295.)";
+    "((#lvar_466 == 0.) or (#lvar_466 == 1.))";
+    "(((#index - 1.) + 1.) == #index)";
+    "(((#lvar_466 == 0.) and (#key == undefined)) or ((#lvar_466 == 1.) and (#key == u16\"classification\")))";
+    "(((#lvar_475 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_475) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#lvar_479" Type.NumberType;
+  Gamma.update gamma "#before" Type.ListType;
+  Gamma.update gamma "#previous" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_475" Type.NumberType;
+  Gamma.update gamma "#tail" Type.ListType;
+  Gamma.update gamma "#lvar_480" Type.Utf16Type;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#lvar_466" Type.NumberType;
+  Gamma.update gamma "#item" Type.Utf16Type;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#lvar_481" Type.ListType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  check_array_counter_witness false "predecessor" facts gamma
+
+let independent_array_counters () =
+  (* Complete target-loop query: the earlier index is positive, target index zero. *)
+  let facts = parse_gil_set [
+    "(! (0. < #targetIndex))";
+    "(! (#index < #failingLen))";
+    "(! (#key == none))";
+    "(! (#lvar_468 < 1.))";
+    "(! (#lvar_477 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_477)";
+    "(is_int #targetIndex)";
+    "(is_int #targetLen)";
+    "(is_int (4294967295. - (#targetIndex + 1.)))";
+    "(is_int (#index - 1.))";
+    "(is_int (#targetIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #before))";
+    "(0i i<= (l-len #targetTail))";
+    "(0. < #index)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_477)";
+    "(0. <= #targetIndex)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#targetIndex + 1.)))";
+    "(0. <= (#index - 1.))";
+    "(0. <= (#targetIndex + 1.))";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == #failingLen)";
+    "(#index == #index)";
+    "(#index <= #failingLen)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_175)";
+    "(#lvar_142 v== #lvar_575)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_176)";
+    "(#lvar_143 v== #lvar_576)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_178)";
+    "(#lvar_145 v== #lvar_578)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_179)";
+    "(#lvar_146 v== #lvar_579)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_175 v== #lvar_142)";
+    "(#lvar_176 v== #lvar_143)";
+    "(#lvar_178 v== #lvar_145)";
+    "(#lvar_179 v== #lvar_146)";
+    "(#lvar_477 == #lvar_477)";
+    "(#lvar_477 <= (as_num (u16-len #confidence)))";
+    "(#lvar_481 v== (4294967295. - #index))";
+    "(#lvar_587 v== (4294967295. - #targetIndex))";
+    "(#lvar_588 v== #targetItem)";
+    "(#lvar_589 v== #targetTail)";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_17 v== #lvar_js_45)";
+    "(#lvar_js_17 v== #lvar_js_53)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_18 v== #lvar_js_46)";
+    "(#lvar_js_18 v== #lvar_js_54)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#lvar_js_45 v== #lvar_js_17)";
+    "(#lvar_js_46 v== #lvar_js_18)";
+    "(#lvar_js_53 v== #lvar_js_17)";
+    "(#lvar_js_54 v== #lvar_js_18)";
+    "(#targetIndex == 0.)";
+    "(#targetIndex == #targetIndex)";
+    "(#targetIndex < #targetLen)";
+    "(#targetLen == #targetLen)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #previous) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((u16-len #targetItem) i<= 9007199254740991i)";
+    "((4294967295. - (#targetIndex + 1.)) < (4294967295. - #targetIndex))";
+    "((#index - 1.) < 4294967295.)";
+    "((#lvar_468 == 0.) or (#lvar_468 == 1.))";
+    "((#targetIndex + 1.) <= 4294967295.)";
+    "(((#index - 1.) + 1.) == #index)";
+    "(((#lvar_468 == 0.) and (#key == undefined)) or ((#lvar_468 == 1.) and (#key == u16\"classification\")))";
+    "(((#lvar_477 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_477) and (0. < (as_num (u16-len #confidence)))))";
+    "(((#targetIndex + 1.) - 1.) == #targetIndex)";
+  ] in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#targetIndex" Type.NumberType;
+  Gamma.update gamma "#lvar_477" Type.NumberType;
+  Gamma.update gamma "#before" Type.ListType;
+  Gamma.update gamma "#lvar_580" Type.ObjectType;
+  Gamma.update gamma "#previous" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_468" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#targetItem" Type.Utf16Type;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#lvar_587" Type.NumberType;
+  Gamma.update gamma "#lvar_581" Type.ObjectType;
+  Gamma.update gamma "#targetTail" Type.ListType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#lvar_481" Type.NumberType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  check_array_counter_witness ~fixed:[("#targetIndex", 0.)] false "independent" facts gamma
+
+let carried_counter_witness () =
+  (* Complete captured evidence-loop feasibility query, including the original
+     aliases, numeric constraints and UTF16 facts. The model guess is optional. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == (#lvar_518 + 1.))";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 <= (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  (* The dump prints both EList [] and literal LList [] as {{ }}. Rebuild
+     this node as EList [], matching the captured native seq.empty encoding. *)
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_519" Type.NumberType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_518" Type.NumberType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before_facts = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "optional carried-counter seed has a native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+      (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "AA")))) facts in
+    let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+      (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+      [ ("#lvar_518", 0.); ("#lvar_517", 1.); ("#lvar_480", 1.);
+        ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.);
+        ("#evidenceLen", 1.); ("#lvar_516", 1.); ("#lvar_489", 2.) ] in
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "native witness includes every captured assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "SAT seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "CARRIED_COUNTER_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "original facts unchanged" true
+    (before_facts = Expr.Set.elements facts);
+  Alcotest.(check bool) "original gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let impossible = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#evidenceLen") (Expr.num 0.)) facts in
+  Alcotest.(check bool) "contradictory complete query has no witness" true
+    (Option.is_none (Smt.check_sat impossible g))
+
+let singleton_surrogate_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(! ((#lvar_517 + 1.) < (as_num (u16-len #confidence))))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_517)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(55296. <= u16-code(#confidence, (num_to_int #lvar_517)))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == 0.)";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 == 0.)";
+    "(#lvar_517 < (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((as_num (u16-len #confidence)) == (#lvar_517 + 1.))";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "(u16-code(#confidence, (num_to_int #lvar_517)) <= 56319.)";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical
+    (Gillian.Utils.Utf16.of_code_units [0xd800]) in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.);
+      ("#lvar_516", 0.); ("#lvar_517", 0.); ("#evidenceLen", 1.);
+      ("#lvar_489", 1.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete singleton-surrogate query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "singleton native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "singleton seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "SINGLETON_SURROGATE_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "singleton facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "singleton gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "A")))) seed in
+  Alcotest.(check bool) "ASCII witness cannot satisfy high-surrogate query" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+let fixed_pair_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_517)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == 0.)";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 == 0.)";
+    "(#lvar_517 < (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((as_num (u16-len #confidence)) == ((#lvar_517 + 1.) + 1.))";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "((#lvar_517 + 1.) < (as_num (u16-len #confidence)))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical "AA" in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.);
+      ("#lvar_516", 0.); ("#lvar_517", 0.); ("#evidenceLen", 1.);
+      ("#lvar_489", 1.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete fixed-pair query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    (* Multiple search shapes may submit the same complete witness. Require
+       its actual native submission; duplicate submissions add no proof. *)
+    Alcotest.(check bool) "fixed pair native query retains every original assertion" true
+      (List.length observed >= 1);
+    (* Query counts depend on cache hits and overlapping witness shapes.
+       Check the actual required fallback was not submitted, rather than
+       treating a count as a proof-phase signal. *)
+    let original_prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) facts in
+    let submitted_original = queries () |> List.exists (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix:original_prefix text) in
+    Alcotest.(check bool) "fixed pair seed returns before required fallback" false
+      submitted_original;
+    Printf.printf "FIXED_PAIR_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "fixed pair facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "fixed pair gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "A")))) seed in
+  Alcotest.(check bool) "single-unit witness cannot satisfy two-unit query" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+let paired_surrogate_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_517)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(55296. <= u16-code(#confidence, (num_to_int #lvar_517)))";
+    "(56320. <= u16-code(#confidence, (num_to_int (#lvar_517 + 1.))))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == 0.)";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 == 0.)";
+    "(#lvar_517 < (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((as_num (u16-len #confidence)) == ((#lvar_517 + 1.) + 1.))";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "(u16-code(#confidence, (num_to_int #lvar_517)) <= 56319.)";
+    "(u16-code(#confidence, (num_to_int (#lvar_517 + 1.))) <= 57343.)";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "((#lvar_517 + 1.) < (as_num (u16-len #confidence)))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical (Gillian.Utils.Utf16.of_code_units [0xd800; 0xdc00]) in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.);
+      ("#lvar_516", 0.); ("#lvar_517", 0.); ("#evidenceLen", 1.);
+      ("#lvar_489", 1.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete paired-surrogate query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "paired surrogate native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "paired surrogate seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "PAIRED_SURROGATE_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "paired surrogate facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "paired surrogate gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "AA")))) seed in
+  Alcotest.(check bool) "ASCII pair cannot satisfy surrogate bounds" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+
+let ordinary_singleton_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_517)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == 0.)";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 == 0.)";
+    "(#lvar_517 < (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((as_num (u16-len #confidence)) == (#lvar_517 + 1.))";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "((u16-code(#confidence, (num_to_int #lvar_517)) < 55296.) or (56319. < u16-code(#confidence, (num_to_int #lvar_517))))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical "A" in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.);
+      ("#lvar_516", 0.); ("#lvar_517", 0.); ("#evidenceLen", 1.);
+      ("#lvar_489", 1.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete ordinary-singleton query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "ordinary singleton native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "ordinary singleton seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "ORDINARY_SINGLETON_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "ordinary singleton facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "ordinary singleton gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical (Gillian.Utils.Utf16.of_code_units [0xd800]))))) seed in
+  Alcotest.(check bool) "high surrogate cannot satisfy ordinary-unit query" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+
+let carried_bounds_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #lvar_518)";
+    "(is_int #lvar_519)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_518)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == (#lvar_518 + 1.))";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 <= (as_num (u16-len #confidence)))";
+    "(#lvar_518 == (#lvar_520 + 1.))";
+    "(#lvar_518 <= #lvar_519)";
+    "(#lvar_519 <= (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_519" Type.NumberType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_520" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#lvar_521" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_518" Type.NumberType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical "AAA" in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.); ("#lvar_520", 0.); ("#lvar_518", 1.); ("#lvar_519", 1.); ("#lvar_516", 2.); ("#lvar_517", 2.); ("#evidenceLen", 1.); ("#lvar_489", 3.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete carried-bounds query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "carried bounds native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "carried bounds seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "CARRIED_BOUNDS_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "carried bounds facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "carried bounds gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "AA")))) seed in
+  Alcotest.(check bool) "short string cannot satisfy carried count" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+
+let fixed_chain_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #lvar_516)";
+    "(is_int #lvar_517)";
+    "(is_int #lvar_518)";
+    "(is_int #lvar_519)";
+    "(is_int #targetLen)";
+    "(is_int (as_num (u16-len #confidence)))";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #lvar_516)";
+    "(0. <= #lvar_518)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_501)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_502)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_504)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_505)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 == (#lvar_516 + 1.))";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_516 == (#lvar_518 + 1.))";
+    "(#lvar_516 <= #lvar_517)";
+    "(#lvar_517 <= (as_num (u16-len #confidence)))";
+    "(#lvar_518 == 0.)";
+    "(#lvar_518 <= #lvar_519)";
+    "(#lvar_519 == 0.)";
+    "(#lvar_519 <= (as_num (u16-len #confidence)))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_506" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_519" Type.NumberType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#lvar_516" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_518" Type.NumberType;
+  Gamma.update gamma "#lvar_517" Type.NumberType;
+  Gamma.update gamma "#lvar_507" Type.ObjectType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical "AA" in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 0.); ("#failingLen", 0.); ("#targetLen", 0.); ("#lvar_518", 0.); ("#lvar_519", 0.); ("#lvar_516", 1.); ("#lvar_517", 1.); ("#evidenceLen", 1.); ("#lvar_489", 2.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete fixed-chain query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "fixed chain native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "fixed chain seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "FIXED_CHAIN_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "fixed chain facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "fixed chain gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "A")))) seed in
+  Alcotest.(check bool) "short string cannot satisfy fixed count" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+
+let bounded_counter_witness () =
+  (* Complete captured last-unit query, without dropping aliases or contents. *)
+  let facts = parse_gil_set [
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #lvar_489)";
+    "(is_int #targetLen)";
+    "(is_int (4294967295. - (#evidenceIndex + 1.)))";
+    "(is_int (#evidenceIndex + 1.))";
+    "(is_int (#evidenceIndex - 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #evidenceBefore))";
+    "(0i i<= (l-len #lvar_744))";
+    "(0i i<= (l-len #lvar_765))";
+    "(0. == #failingLen)";
+    "(0. == #targetLen)";
+    "(0. < #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_489)";
+    "(0. <= #targetLen)";
+    "(0. <= (4294967295. - (#evidenceIndex + 1.)))";
+    "(0. <= (#evidenceIndex + 1.))";
+    "(0. <= (#evidenceIndex - 1.))";
+    "(1. < #evidenceIndex)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex < #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen <= 4294967295.)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_142 v== #lvar_748)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_143 v== #lvar_749)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_145 v== #lvar_751)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_146 v== #lvar_752)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#targetLen <= 4294967295.)";
+    "((l-len #evidenceBefore) == (l-len #lvar_744))";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((4294967295. - (#evidenceIndex + 1.)) < (4294967295. - #evidenceIndex))";
+    "((#evidenceIndex + 1.) == #evidenceLen)";
+    "((#evidenceIndex + 1.) <= 4294967295.)";
+    "((#evidenceIndex - 1.) < 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#evidenceIndex + 1.) - 1.) == #evidenceIndex)";
+    "(((#evidenceIndex - 1.) + 1.) == #evidenceIndex)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+    "(l+ (#evidenceBefore, {{ {{ #loc_193, #loc_192 }} }}) == l+ ({{ {{ #loc_223,\n                                                             #loc_222 }} }},\n                                                             #lvar_744))";
+  ] in
+  let facts = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_494") (Expr.EList [])) facts in
+  let locations = object
+    inherit [_] Visitors.endo as super
+    method! visit_expr () e = match e with
+      | Expr.LVar name when String.starts_with ~prefix:"#loc_" name -> Expr.ALoc name
+      | _ -> super#visit_expr () e
+  end in
+  let facts = Expr.Set.fold (fun e acc -> Expr.Set.add
+    (locations#visit_expr () e) acc) facts Expr.Set.empty in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_763" Type.ObjectType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_765" Type.ListType;
+  Gamma.update gamma "#lvar_753" Type.ObjectType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_754" Type.ObjectType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#evidenceBefore" Type.ListType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_764" Type.ObjectType;
+  Gamma.update gamma "#lvar_744" Type.ListType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let gamma_entries () = Hashtbl.fold (fun n t acc -> (n, t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_gamma = gamma_entries () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  let value = Gillian.Utils.Utf16.of_canonical "A" in
+  let seed = Expr.Set.add (bin Equal (Expr.LVar "#confidence")
+    (Expr.Lit (Utf16String value))) facts in
+  let seed = List.fold_left (fun acc (n, v) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar n) (Expr.num v)) acc) seed
+    [ ("#evidenceIndex", 2.); ("#failingLen", 0.); ("#targetLen", 0.); ("#evidenceLen", 3.); ("#lvar_489", 1.); ("#lvar_480", 1.) ] in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete bounded-counter query has native SAT model" true
+      (Option.is_some (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seed in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let text = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix text) in
+    Alcotest.(check int) "bounded counter native query retains every original assertion" 1
+      (List.length observed);
+    (* Cached prechecks need not emit another native query. The exact
+       complete witness above is still required once, without fallback. *)
+    let count = List.length
+      (List.filter (fun n -> not (List.mem n before_queries)) (queries ())) in
+    Alcotest.(check bool) "bounded counter seed returns before required fallback" true
+      (count >= 1 && count <= 3);
+    Printf.printf "BOUNDED_COUNTER_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "bounded counter facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "bounded counter gamma unchanged" true
+    (before_gamma = gamma_entries ());
+  let wrong = Expr.Set.add (bin ValueEqual (Expr.LVar "#evidenceIndex")
+    (Expr.num 1.)) seed in
+  Alcotest.(check bool) "one cannot satisfy the strict lower counter bound" true
+    (Option.is_none (Smt.check_sat wrong g))
+
+
+let rank_case_split () =
+  let facts = parse_gil_set [
+    "(! (56319. < u16-code(#s, (num_to_int #lvar_434))))";
+    "(! (#len v== -0.))";
+    "(! (#lvar_434 v== -0.))";
+    "(! (#lvar_435 == none))";
+    "(! ((num_to_int #lvar_434) < 0.))";
+    "(! ((num_to_int (#lvar_434 + 1.)) < 0.))";
+    "(! ((as_num (u16-len #s)) <= (num_to_int #lvar_434)))";
+    "(! ((as_num (u16-len #s)) <= (num_to_int (#lvar_434 + 1.))))";
+    "(! (u16-code(#s, (num_to_int #lvar_434)) < 55296.))";
+    "(is_int #len)";
+    "(is_int #lvar_433)";
+    "(is_int #lvar_434)";
+    "(is_int #next_pos)";
+    "(is_int (#lvar_433 + 1.))";
+    "(0. <= #lvar_433)";
+    "(0. <= (#lvar_433 + 1.))";
+    "(#len v== (as_num (u16-len #s)))";
+    "(#len == #len)";
+    "(#len == (as_num (u16-len #s)))";
+    "(#len <= 9007199254740991.)";
+    "(#lvar_432 v== (9007199254740991. - #lvar_434))";
+    "(#lvar_433 <= #lvar_434)";
+    "(#lvar_434 == #lvar_434)";
+    "(#lvar_434 < #len)";
+    "(#lvar_js_13 v== #lvar_js_21)";
+    "(#lvar_js_13 v== #lvar_js_25)";
+    "(#lvar_js_14 v== #lvar_js_22)";
+    "(#lvar_js_14 v== #lvar_js_26)";
+    "(#lvar_js_15 v== #lvar_js_23)";
+    "(#lvar_js_15 v== #lvar_js_27)";
+    "(#lvar_js_21 v== #lvar_js_13)";
+    "(#lvar_js_22 v== #lvar_js_14)";
+    "(#lvar_js_23 v== #lvar_js_15)";
+    "(#lvar_js_25 v== #lvar_js_13)";
+    "(#lvar_js_26 v== #lvar_js_14)";
+    "(#lvar_js_27 v== #lvar_js_15)";
+    "(#next_pos v== ((#lvar_434 + 1.) + 1.))";
+    "((u16-len #s) i<= 9007199254740991i)";
+    "((#lvar_433 + 1.) <= #next_pos)";
+    "((#lvar_434 + 1.) == (#lvar_434 + 1.))";
+    "((#lvar_434 + 1.) < #len)";
+    "(u16-code(#s, (num_to_int #lvar_434)) == u16-code(#s, (num_to_int #lvar_434)))";
+    "(((! (is_int (9007199254740991. - #next_pos))) or (! (0. <= (9007199254740991. - #next_pos)))) or (! ((9007199254740991. - #next_pos) < #lvar_432)))";
+    "(((num_to_int32 u16-code(#s, (num_to_int (#lvar_434 + 1.)))) &f 64512.) == 56320.)";
+  ] in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#s" Type.Utf16Type;
+  Gamma.update gamma "#len" Type.NumberType;
+  Gamma.update gamma "#lvar_433" Type.NumberType;
+  Gamma.update gamma "#lvar_434" Type.NumberType;
+  Gamma.update gamma "#lvar_432" Type.NumberType;
+  Gamma.update gamma "#next_pos" Type.NumberType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_types = types () in
+  let premises = parse_gil_set [
+    "(! (#len v== -0.))";
+    "(! (#lvar_434 v== -0.))";
+    "(is_int #len)";
+    "(is_int #lvar_433)";
+    "(is_int #lvar_434)";
+    "(is_int #next_pos)";
+    "(is_int (#lvar_433 + 1.))";
+    "(0. <= #lvar_433)";
+    "(0. <= (#lvar_433 + 1.))";
+    "(#len == #len)";
+    "(#len <= 9007199254740991.)";
+    "(#lvar_432 v== (9007199254740991. - #lvar_434))";
+    "(#lvar_433 <= #lvar_434)";
+    "(#lvar_434 == #lvar_434)";
+    "(#lvar_434 < #len)";
+    "(#next_pos v== ((#lvar_434 + 1.) + 1.))";
+    "((#lvar_433 + 1.) <= #next_pos)";
+    "((#lvar_434 + 1.) == (#lvar_434 + 1.))";
+    "((#lvar_434 + 1.) < #len)";
+  ] in
+  let failed = [
+    Expr.Set.choose (parse_gil_set [ "(! (is_int (9007199254740991. - #next_pos)))" ]);
+    Expr.Set.choose (parse_gil_set [ "(! (0. <= (9007199254740991. - #next_pos)))" ]);
+    Expr.Set.choose (parse_gil_set [ "(! ((9007199254740991. - #next_pos) < #lvar_432))" ]);
+  ] in
+  let cases = List.map (fun failed -> Expr.Set.add failed premises) failed in
+  Alcotest.(check bool) "numeric premises belong to original query" true
+    (Expr.Set.subset premises facts);
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "captured rank failure is impossible" true
+      (Option.is_none (Smt.check_sat facts g));
+    List.iteri (fun index branch ->
+      let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) branch in
+      let observed = queries () |> List.filter (fun name ->
+        if List.mem name before_queries then false else
+        let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+        let content = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        String.starts_with ~prefix content) in
+      Alcotest.(check bool) "every rank branch has real native proof" true
+        (observed <> []);
+      Printf.printf "RANK_BRANCH_NATIVE_QUERY=%d:%s\n%!" index (List.hd observed)) cases);
+  Alcotest.(check bool) "rank facts unchanged" true (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "rank gamma unchanged" true (before_types = types ());
+  let bound = bin FLessThanEqual (Expr.LVar "#len") (Expr.num 9007199254740991.) in
+  Alcotest.(check bool) "captured maximum bound is original" true
+    (Expr.Set.mem bound facts);
+  let weak_cases = List.map (Expr.Set.remove bound) cases in
+  Alcotest.(check bool) "missing maximum cannot prove all rank cases" false
+    (List.for_all (fun branch -> Smt.proves_unsat branch g) weak_cases);
+  let descent = List.nth weak_cases 2 in
+  Alcotest.(check bool) "missing maximum has native binary64 counterexample" true
+    (Option.is_some (Smt.exec_sat descent g))
+
+let list_prefix_restore () =
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (0. < #index))";
+    "(! (#evidenceIndex < #evidenceLen))";
+    "(! (#index < #failingLen))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(! ({{ #lvar_1023, #lvar_1109,\n   #lvar_1211 }} == l+ (l-sub(l+ (#targetBefore, {{ #targetPrevious,\n                                  #targetItem }}, #targetTail), 0i, (3i i+ (-1i i* (l-len #targetTail)))),\n                        #targetTail)))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_1348)";
+    "(is_int #lvar_489)";
+    "(is_int (4294967295. - (#lvar_1348 + 1.)))";
+    "(is_int (#lvar_1348 + 1.))";
+    "(is_int (#lvar_1348 - 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #targetBefore))";
+    "(0i i<= (l-len #targetTail))";
+    "(0. == #failingLen)";
+    "(0. < #lvar_1348)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #index)";
+    "(0. <= #lvar_489)";
+    "(0. <= (4294967295. - (#lvar_1348 + 1.)))";
+    "(0. <= (#lvar_1348 + 1.))";
+    "(0. <= (#lvar_1348 - 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex == #evidenceLen)";
+    "(#evidenceIndex <= #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == 0.)";
+    "(#index == #failingLen)";
+    "(#index == #index)";
+    "(#index <= #failingLen)";
+    "(#lvar_1024 v== {{ #lvar_1109,\n#lvar_1211 }})";
+    "(#lvar_1110 v== {{ #lvar_1211 }})";
+    "(#lvar_1324 v== (4294967295. - #index))";
+    "(#lvar_1339 v== (4294967295. - #lvar_1348))";
+    "(#lvar_1340 v== #targetItem)";
+    "(#lvar_1341 v== #targetTail)";
+    "(#lvar_1348 == #lvar_1348)";
+    "(#lvar_1348 < 3.)";
+    "(#lvar_142 v== #lvar_1010)";
+    "(#lvar_142 v== #lvar_1327)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_143 v== #lvar_1011)";
+    "(#lvar_143 v== #lvar_1328)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_145 v== #lvar_1013)";
+    "(#lvar_145 v== #lvar_1330)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_146 v== #lvar_1014)";
+    "(#lvar_146 v== #lvar_1331)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_17 v== #lvar_js_45)";
+    "(#lvar_js_17 v== #lvar_js_53)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_18 v== #lvar_js_46)";
+    "(#lvar_js_18 v== #lvar_js_54)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#lvar_js_45 v== #lvar_js_17)";
+    "(#lvar_js_46 v== #lvar_js_18)";
+    "(#lvar_js_53 v== #lvar_js_17)";
+    "(#lvar_js_54 v== #lvar_js_18)";
+    "((u16-len #confidence) == 1i)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #lvar_1023) i<= 9007199254740991i)";
+    "((u16-len #lvar_1109) i<= 9007199254740991i)";
+    "((u16-len #lvar_1211) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((u16-len #targetItem) i<= 9007199254740991i)";
+    "((u16-len #targetPrevious) i<= 9007199254740991i)";
+    "((4294967295. - (#lvar_1348 + 1.)) < (4294967295. - #lvar_1348))";
+    "((#lvar_1348 + 1.) <= 4294967295.)";
+    "((#lvar_1348 - 1.) < 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#lvar_1348 + 1.) - 1.) == #lvar_1348)";
+    "(((#lvar_1348 - 1.) + 1.) == #lvar_1348)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+    "({{ #lvar_1023, #lvar_1109,\n#lvar_1211 }} == l+ (#targetBefore, {{ #targetPrevious, #targetItem }},\n                     #targetTail))";
+  ] |> Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_1212") (Expr.EList [])) in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#lvar_1339" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_1109" Type.Utf16Type;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_1023" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_1324" Type.NumberType;
+  Gamma.update gamma "#lvar_1348" Type.NumberType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_1211" Type.Utf16Type;
+  Gamma.update gamma "#targetItem" Type.Utf16Type;
+  Gamma.update gamma "#targetBefore" Type.ListType;
+  Gamma.update gamma "#targetTail" Type.ListType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#targetPrevious" Type.Utf16Type;
+  let g = Gamma.as_hashtbl gamma in
+  let failed = Expr.Set.choose (parse_gil_set [ "(! ({{ #lvar_1023, #lvar_1109,\n   #lvar_1211 }} == l+ (l-sub(l+ (#targetBefore, {{ #targetPrevious,\n                                  #targetItem }}, #targetTail), 0i, (3i i+ (-1i i* (l-len #targetTail)))),\n                        #targetTail)))" ]) in
+  let link = Expr.Set.choose (parse_gil_set [ "({{ #lvar_1023, #lvar_1109,\n#lvar_1211 }} == l+ (#targetBefore, {{ #targetPrevious, #targetItem }},\n                     #targetTail))" ]) in
+  let selected = Expr.Set.of_list [ failed; link ] in
+  Alcotest.(check bool) "prefix core consists only of original assertions" true
+    (Expr.Set.subset selected facts);
+  let before = Expr.Set.elements facts in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_types = types () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "captured failed prefix restoration is impossible" true
+      (Option.is_none (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) selected in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let content = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix content) in
+    Alcotest.(check bool) "prefix core has real native proof" true (observed <> []);
+    Printf.printf "LIST_PREFIX_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "prefix facts unchanged" true (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "prefix gamma unchanged" true (before_types = types ());
+  Alcotest.(check bool) "without decomposition permits native counterexample" true
+    (Option.is_some (Smt.exec_sat (Expr.Set.singleton failed) g));
+  Alcotest.(check bool) "without failed goal permits native counterexample" true
+    (Option.is_some (Smt.exec_sat (Expr.Set.singleton link) g))
+
+let list_prefix_only_restore () =
+  let facts = parse_gil_set [
+    "(! (0. < #evidenceIndex))";
+    "(! (0. < #index))";
+    "(! (#evidenceIndex < #evidenceLen))";
+    "(! (#index < #failingLen))";
+    "(! (#key == none))";
+    "(! (#lvar_480 < 1.))";
+    "(! (#lvar_489 < 1.))";
+    "(! (#previousErrors == empty))";
+    "(! (#previousErrors == none))";
+    "(! ((typeOf #previousErrors) == List))";
+    "(! (l+ (#targetBefore, {{ #targetPrevious, #targetItem }}) == l-sub(l+ \n   (#targetBefore, {{ #targetPrevious, #targetItem }}, #targetTail), 0i, (3i i+ (-1i i* (l-len #targetTail))))))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_1348)";
+    "(is_int #lvar_489)";
+    "(is_int (4294967295. - (#lvar_1348 + 1.)))";
+    "(is_int (#lvar_1348 + 1.))";
+    "(is_int (#lvar_1348 - 1.))";
+    "(0i i< (u16-len #confidence))";
+    "(0i i<= (l-len #targetBefore))";
+    "(0i i<= (l-len #targetTail))";
+    "(0. == #failingLen)";
+    "(0. < #lvar_1348)";
+    "(0. <= #evidenceIndex)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #index)";
+    "(0. <= #lvar_489)";
+    "(0. <= (4294967295. - (#lvar_1348 + 1.)))";
+    "(0. <= (#lvar_1348 + 1.))";
+    "(0. <= (#lvar_1348 - 1.))";
+    "(#evidenceIndex == 0.)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex == #evidenceLen)";
+    "(#evidenceIndex <= #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == 0.)";
+    "(#index == #failingLen)";
+    "(#index == #index)";
+    "(#index <= #failingLen)";
+    "(#lvar_1024 v== {{ #lvar_1109,\n#lvar_1211 }})";
+    "(#lvar_1110 v== {{ #lvar_1211 }})";
+    "(#lvar_1324 v== (4294967295. - #index))";
+    "(#lvar_1339 v== (4294967295. - #lvar_1348))";
+    "(#lvar_1340 v== #targetItem)";
+    "(#lvar_1341 v== #targetTail)";
+    "(#lvar_1348 == #lvar_1348)";
+    "(#lvar_1348 < 3.)";
+    "(#lvar_142 v== #lvar_1010)";
+    "(#lvar_142 v== #lvar_1327)";
+    "(#lvar_142 v== #lvar_164)";
+    "(#lvar_143 v== #lvar_1011)";
+    "(#lvar_143 v== #lvar_1328)";
+    "(#lvar_143 v== #lvar_165)";
+    "(#lvar_145 v== #lvar_1013)";
+    "(#lvar_145 v== #lvar_1330)";
+    "(#lvar_145 v== #lvar_167)";
+    "(#lvar_146 v== #lvar_1014)";
+    "(#lvar_146 v== #lvar_1331)";
+    "(#lvar_146 v== #lvar_168)";
+    "(#lvar_164 v== #lvar_142)";
+    "(#lvar_165 v== #lvar_143)";
+    "(#lvar_167 v== #lvar_145)";
+    "(#lvar_168 v== #lvar_146)";
+    "(#lvar_489 == #lvar_489)";
+    "(#lvar_489 <= (as_num (u16-len #confidence)))";
+    "(#lvar_491 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_js_17 v== #lvar_142)";
+    "(#lvar_js_17 v== #lvar_js_37)";
+    "(#lvar_js_17 v== #lvar_js_41)";
+    "(#lvar_js_17 v== #lvar_js_45)";
+    "(#lvar_js_17 v== #lvar_js_53)";
+    "(#lvar_js_18 v== #lvar_143)";
+    "(#lvar_js_18 v== #lvar_js_38)";
+    "(#lvar_js_18 v== #lvar_js_42)";
+    "(#lvar_js_18 v== #lvar_js_46)";
+    "(#lvar_js_18 v== #lvar_js_54)";
+    "(#lvar_js_37 v== #lvar_js_17)";
+    "(#lvar_js_38 v== #lvar_js_18)";
+    "(#lvar_js_41 v== #lvar_js_17)";
+    "(#lvar_js_42 v== #lvar_js_18)";
+    "(#lvar_js_45 v== #lvar_js_17)";
+    "(#lvar_js_46 v== #lvar_js_18)";
+    "(#lvar_js_53 v== #lvar_js_17)";
+    "(#lvar_js_54 v== #lvar_js_18)";
+    "((u16-len #confidence) == 1i)";
+    "((u16-len #confidence) i<= 9007199254740991i)";
+    "((u16-len #lvar_1023) i<= 9007199254740991i)";
+    "((u16-len #lvar_1109) i<= 9007199254740991i)";
+    "((u16-len #lvar_1211) i<= 9007199254740991i)";
+    "((u16-len #summary) i<= 9007199254740991i)";
+    "((u16-len #targetItem) i<= 9007199254740991i)";
+    "((u16-len #targetPrevious) i<= 9007199254740991i)";
+    "((4294967295. - (#lvar_1348 + 1.)) < (4294967295. - #lvar_1348))";
+    "((#lvar_1348 + 1.) <= 4294967295.)";
+    "((#lvar_1348 - 1.) < 4294967295.)";
+    "((#lvar_480 == 0.) or (#lvar_480 == 1.))";
+    "(((#lvar_1348 + 1.) - 1.) == #lvar_1348)";
+    "(((#lvar_1348 - 1.) + 1.) == #lvar_1348)";
+    "(((#lvar_480 == 0.) and (#key == undefined)) or ((#lvar_480 == 1.) and \n(#key == u16\"classification\")))";
+    "(((#lvar_489 == 0.) and ((u16-len #confidence) == 0i)) or ((1. <= #lvar_489) and (0. < (as_num (u16-len #confidence)))))";
+    "({{ #lvar_1023, #lvar_1109,\n#lvar_1211 }} == l+ (#targetBefore, {{ #targetPrevious, #targetItem }},\n                     #targetTail))";
+  ] |> Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#lvar_1212") (Expr.EList [])) in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#lvar_1339" Type.NumberType;
+  Gamma.update gamma "#lvar_480" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_1109" Type.Utf16Type;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_1023" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_1324" Type.NumberType;
+  Gamma.update gamma "#lvar_1348" Type.NumberType;
+  Gamma.update gamma "#lvar_489" Type.NumberType;
+  Gamma.update gamma "#lvar_1211" Type.Utf16Type;
+  Gamma.update gamma "#targetItem" Type.Utf16Type;
+  Gamma.update gamma "#targetBefore" Type.ListType;
+  Gamma.update gamma "#targetTail" Type.ListType;
+  Gamma.update gamma "#lvar_491" Type.NumberType;
+  Gamma.update gamma "#targetPrevious" Type.Utf16Type;
+  let g = Gamma.as_hashtbl gamma in
+  let failed = Expr.Set.choose (parse_gil_set [ "(! (l+ (#targetBefore, {{ #targetPrevious, #targetItem }}) == l-sub(l+ \n   (#targetBefore, {{ #targetPrevious, #targetItem }}, #targetTail), 0i, (3i i+ (-1i i* (l-len #targetTail))))))" ]) in
+  let link = Expr.Set.choose (parse_gil_set [ "({{ #lvar_1023, #lvar_1109,\n#lvar_1211 }} == l+ (#targetBefore, {{ #targetPrevious, #targetItem }},\n                     #targetTail))" ]) in
+  let selected = Expr.Set.of_list [ failed; link ] in
+  Alcotest.(check bool) "prefix core consists only of original assertions" true
+    (Expr.Set.subset selected facts);
+  let before = Expr.Set.elements facts in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_types = types () in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before_queries = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "captured failed prefix restoration is impossible" true
+      (Option.is_none (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) selected in
+    let observed = queries () |> List.filter (fun name ->
+      if List.mem name before_queries then false else
+      let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+      let content = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      String.starts_with ~prefix content) in
+    Alcotest.(check bool) "prefix core has real native proof" true (observed <> []);
+    Printf.printf "PREFIX_ONLY_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "prefix facts unchanged" true (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "prefix gamma unchanged" true (before_types = types ());
+  Alcotest.(check bool) "without decomposition permits native counterexample" true
+    (Option.is_some (Smt.exec_sat (Expr.Set.singleton failed) g));
+  Alcotest.(check bool) "without failed goal permits native counterexample" true
+    (Option.is_some (Smt.exec_sat (Expr.Set.singleton link) g))
+
+let natural_counter_query () =
+  (* Original caller feasibility query; capture SHA256: 76623267e07e1752b2373970bccb281ed770d27761170d70c392337537fb4b37. *)
+  let facts = parse_gil_set [
+    "(! (#evidenceIndex < #evidenceLen))";
+    "(! (#index < #failingLen))";
+    "(! (#lvar_473 < 1.))";
+    "(! (#lvar_873 < 1.))";
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_873)";
+    "(is_int #targetIndex)";
+    "(is_int #targetLen)";
+    "(is_int (#evidenceIndex - 1.))";
+    "(is_int (#index - 1.))";
+    "(0. < #evidenceIndex)";
+    "(0. < #index)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_873)";
+    "(0. <= #targetIndex)";
+    "(0. <= #targetLen)";
+    "(0. <= (#evidenceIndex - 1.))";
+    "(0. <= (#index - 1.))";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex == #evidenceLen)";
+    "(#evidenceIndex <= #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == #failingLen)";
+    "(#index == #index)";
+    "(#index <= #failingLen)";
+    "(#lvar_1057 v== (4294967295. - #targetIndex))";
+    "(#lvar_873 == #lvar_873)";
+    "(#lvar_875 v== (4294967295. - #evidenceIndex))";
+    "(#lvar_985 v== (4294967295. - #index))";
+    "(#targetIndex == #targetIndex)";
+    "(#targetIndex <= #targetLen)";
+    "(#targetLen <= 4294967295.)";
+    "((#evidenceIndex - 1.) < 4294967295.)";
+    "((#index - 1.) < 4294967295.)";
+    "((#lvar_473 == 0.) or (#lvar_473 == 1.))";
+    "(((#evidenceIndex - 1.) + 1.) == #evidenceIndex)";
+    "(((#index - 1.) + 1.) == #index)";
+  ] in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#targetIndex" Type.NumberType;
+  Gamma.update gamma "#before" Type.ListType;
+  Gamma.update gamma "#previous" Type.Utf16Type;
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#lvar_1057" Type.NumberType;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#targetSuffix" Type.ListType;
+  Gamma.update gamma "#lvar_873" Type.NumberType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_875" Type.NumberType;
+  Gamma.update gamma "#evidenceBefore" Type.ListType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#lvar_473" Type.NumberType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#targetPrefix" Type.ListType;
+  Gamma.update gamma "#lvar_985" Type.NumberType;
+  let g = Gamma.as_hashtbl gamma in
+  let before = Expr.Set.elements facts in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t) :: acc) g []
+    |> List.sort Stdlib.compare in
+  let before_types = types () in
+  let saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    let counters = ["#evidenceLen"; "#failingLen"; "#targetLen"] in
+    let seeded = List.fold_left (fun acc name -> Expr.Set.add
+      (bin ValueEqual (Expr.LVar name) (Expr.num 1.)) acc) facts counters in
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) seeded in
+    Alcotest.(check bool) "original bounded-counter query has native full SAT witness" true
+      (Option.is_some (Smt.check_sat facts g));
+    let observed = Array.to_list (Sys.readdir "gillian_smt_queries")
+      |> List.filter (fun name ->
+        let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+        let content = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        String.starts_with ~prefix content) in
+    Alcotest.(check bool) "native hint retains every original assertion" true
+      (observed <> []);
+    Printf.printf "NATURAL_COUNTER_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "counter hint does not mutate facts" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "counter hint does not mutate gamma" true
+    (before_types = types ());
+  Hashtbl.add g "#counter_list" Type.ListType;
+  let len = Expr.UnOp (LstLen, Expr.LVar "#counter_list") in
+  let conflict = Expr.Set.add (bin Equal len (Expr.int 1))
+    (Expr.Set.add (bin Equal len (Expr.int 2)) facts) in
+  Alcotest.(check bool) "non-numeric contradiction cannot become a counter witness" true
+    (Option.is_none (Smt.check_sat conflict g));
+  let zero = Expr.Set.add (bin ValueEqual (Expr.LVar "#targetLen") (Expr.num 0.)) facts in
+  Alcotest.(check bool) "original zero binding survives the candidate hint" true
+    (Option.is_some (Smt.check_sat zero g));
+  let rounding = Expr.LVar "#rounding_counter" in
+  Hashtbl.add g "#rounding_counter" Type.NumberType;
+  let rounded = Expr.Set.of_list [Expr.UnOp (IsInt, rounding);
+    bin FLessThanEqual (Expr.num 0.) rounding;
+    bin ValueEqual rounding (Expr.num 9007199254740992.);
+    not_ (bin ValueEqual (bin FPlus rounding (Expr.num 1.)) rounding)] in
+  Alcotest.(check bool) "binary64 rounded increment remains impossible" true
+    (Option.is_none (Smt.check_sat (Expr.Set.union facts rounded) g))
+
+let ordered_natural_counter_query () =
+  (* Exact Skip209 Append feasibility queries168/170, SHAs
+     17ce900ae645ecf80bde08fd5235626c1e92b8ca1a41e74351a4be096abe6611
+     and b232a3a6b783aeaf2b7b9d2ddab69827733735b05d28f210c83212cd214a39e1. *)
+  let base = parse_gil_set [
+    "(is_int #end)"; "(is_int #start)"; "(is_int (#end + 1.))";
+    "(0i i<= (l-len #tailValues))";
+    "(0i i<= (as_int (4294967295. - (#end + 1.))))";
+    "(0i i<= (as_int (#end - #start)))";
+    "(0. <= #end)"; "(0. <= #start)";
+    "(#end <= 4294967294.)"; "(#end <= 4294967295.)";
+    "(#start < #end)";
+    "((as_int (4294967295. - (#end + 1.))) i< (as_int (4294967295. - #end)))";
+    "((as_int (#end + 1.)) == (1i i+ (as_int #end)))";
+    "((#end + 1.) <= 4294967295.)"
+  ] in
+  let gamma = Gamma.init () in
+  List.iter (fun (name,typ) -> Gamma.update gamma name typ)
+    ["#cell",Type.Utf16Type; "#tailKeys",Type.SetType;
+     "#start",Type.NumberType; "#a",Type.ObjectType;
+     "#item",Type.Utf16Type; "#end",Type.NumberType;
+     "#tailValues",Type.ListType];
+  let g = Gamma.as_hashtbl gamma in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t)::acc) g []
+    |> List.sort Stdlib.compare in
+  let before_types = types () in
+  let start, finish = Expr.LVar "#start", Expr.LVar "#end" in
+  let seed facts lower upper = facts
+    |> Expr.Set.add (bin ValueEqual start (Expr.num lower))
+    |> Expr.Set.add (bin ValueEqual finish (Expr.num upper)) in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let query_text name =
+    let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+    Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+  let prefix facts = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+    (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) facts in
+  let observe label facts expected =
+    let before = Expr.Set.elements facts and old_queries = queries () in
+    Printf.printf "ORDERED_COUNTER_BEGIN=%s\n%!" label;
+    let model = Smt.check_sat facts g in
+    let fresh = queries () |> List.filter (fun name -> not (List.mem name old_queries))
+      |> List.sort (fun a b ->
+        Int.compare (Scanf.sscanf a "query_%d.smt2" Fun.id)
+          (Scanf.sscanf b "query_%d.smt2" Fun.id)) in
+    Alcotest.(check int) (label ^ " exact native query sequence")
+      (List.length expected) (List.length fresh);
+    List.iter2 (fun want name ->
+      Alcotest.(check bool) (label ^ " complete native query retained") true
+        (String.starts_with ~prefix:(prefix want) (query_text name))) expected fresh;
+    Printf.printf "ORDERED_COUNTER_NATIVE_QUERY=%s:%s\n%!" label
+      (String.concat "," fresh);
+    Alcotest.(check bool) (label ^ " facts unchanged") true
+      (before = Expr.Set.elements facts);
+    Alcotest.(check bool) (label ^ " gamma unchanged") true
+      (before_types = types ());
+    let model = match model with Some model -> model
+      | None -> Alcotest.fail (label ^ " missing native SAT model") in
+    Printf.printf "ORDERED_COUNTER_NATIVE_MODEL=%s:%s\n%!" label
+      (Fmt.str "%a" Smt.pp_model model);
+    let lifted = Hashtbl.create 2 in
+    Smt.lift_model model g (Hashtbl.add lifted) (Expr.Set.of_list [start;finish]);
+    let number name = match Hashtbl.find_opt lifted name with
+      | Some (Expr.Lit (Literal.Num value)) -> value
+      | _ -> Alcotest.fail (label ^ " missing native counter " ^ name) in
+    let lower, upper = number "#start", number "#end" in
+    Printf.printf "ORDERED_COUNTER_NATIVE_VALUES=%s:%.17g,%.17g\n%!" label lower upper;
+    lower,upper in
+  let saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    List.iter (fun (label,facts) ->
+      let lower,upper = observe label facts [seed facts 0. 1.] in
+      Alcotest.(check bool) (label ^ " selected seed is the actual native model") true
+        (lower = 0. && upper = 1.))
+      ["q168",base; "q170",Expr.Set.add (not_ (bin Equal start finish)) base];
+    let literal = seed base 5. 7. in
+    let lower,upper = observe "literal-5-7" literal [literal] in
+    Alcotest.(check bool) "existing literal bindings survive witness selection" true
+      (lower = 5. && upper = 7.);
+    let positive_lower = parse_gil_set [
+      "(is_int #start)"; "(is_int #end)"; "(0. < #start)";
+      "(0. <= #end)"; "(#end <= 100.)"; "(#start < #end)"
+    ] in
+    let lower,upper = observe "incompatible-zero" positive_lower
+      [seed positive_lower 0. 1.;positive_lower] in
+    Alcotest.(check bool) "incompatible zero seed falls back to full satisfiable query" true
+      (lower > 0. && lower < upper);
+    let inconsistent = Expr.Set.add (bin FLessThanEqual finish start) base in
+    Printf.printf "ORDERED_COUNTER_BEGIN=inconsistent\n%!";
+    Alcotest.(check bool) "inconsistent full query cannot receive SAT from a hint" true
+      (Option.is_none (Smt.check_sat inconsistent g));
+    Printf.printf "ORDERED_COUNTER_NATIVE_RESULT=inconsistent:UNSAT\n%!")
+
+let literal_counter_contradiction () =
+  (* Original caller query SHA256: 7c71c39111f11a4db5d198c537a90dbeab3ee116eb4c539ef93daef47e0b6a90. *)
+  let facts = parse_gil_set [
+    "(is_int #evidenceIndex)";
+    "(is_int #evidenceLen)";
+    "(is_int #failingLen)";
+    "(is_int #index)";
+    "(is_int #lvar_873)";
+    "(is_int #targetLen)";
+    "(0. < #evidenceIndex)";
+    "(0. < #index)";
+    "(0. <= #evidenceLen)";
+    "(0. <= #failingLen)";
+    "(0. <= #lvar_873)";
+    "(0. <= #targetLen)";
+    "(#evidenceIndex == #evidenceIndex)";
+    "(#evidenceIndex == #evidenceLen)";
+    "(#evidenceIndex <= #evidenceLen)";
+    "(#evidenceLen == #evidenceLen)";
+    "(#evidenceLen <= 4294967295.)";
+    "(#failingLen == #failingLen)";
+    "(#failingLen <= 4294967295.)";
+    "(#index == 0.)";
+    "(#index == #index)";
+    "(#index < #failingLen)";
+    "(#lvar_873 == #lvar_873)";
+    "(#targetLen <= 4294967295.)";
+  ] in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#summary" Type.Utf16Type;
+  Gamma.update gamma "#evidenceIndex" Type.NumberType;
+  Gamma.update gamma "#prototype" Type.ObjectType;
+  Gamma.update gamma "#lvar_873" Type.NumberType;
+  Gamma.update gamma "#suffix" Type.ListType;
+  Gamma.update gamma "#targetValues" Type.ListType;
+  Gamma.update gamma "#failingLen" Type.NumberType;
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#evidenceLen" Type.NumberType;
+  Gamma.update gamma "#lvar_1171" Type.NumberType;
+  Gamma.update gamma "#lvar_875" Type.NumberType;
+  Gamma.update gamma "#evidenceBefore" Type.ListType;
+  Gamma.update gamma "#lvar_148" Type.ObjectType;
+  Gamma.update gamma "#targetLen" Type.NumberType;
+  Gamma.update gamma "#retryable" Type.BooleanType;
+  Gamma.update gamma "#lvar_473" Type.NumberType;
+  Gamma.update gamma "#confidence" Type.Utf16Type;
+  Gamma.update gamma "#lvar_147" Type.ObjectType;
+  let g = Gamma.as_hashtbl gamma in
+  let comparison = Expr.Set.choose (parse_gil_set ["(0. < #index)"]) in
+  let binding = Expr.Set.choose (parse_gil_set ["(#index == 0.)"]) in
+  let core = Expr.Set.of_list [ comparison; binding ] in
+  let original_facts = Expr.Set.elements facts in
+  let original_gamma = Hashtbl.fold (fun n t acc -> (n,t)::acc) g []
+    |> List.sort Stdlib.compare in
+  let saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    Alcotest.(check bool) "complete original literal contradiction is UNSAT" true
+      (Option.is_none (Smt.check_sat facts g));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) core in
+    let observed = Array.to_list (Sys.readdir "gillian_smt_queries")
+      |> List.filter (fun name ->
+        let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+        let content = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        String.starts_with ~prefix content) in
+    Alcotest.(check bool) "native contradiction query is exactly two original atoms" true
+      (observed <> []);
+    Printf.printf "LITERAL_COUNTER_NATIVE_QUERY=%s\n%!" (List.hd observed));
+  Alcotest.(check bool) "literal core does not mutate original facts" true
+    (original_facts = Expr.Set.elements facts);
+  Alcotest.(check bool) "literal core does not mutate original gamma" true
+    (original_gamma = (Hashtbl.fold (fun n t acc -> (n,t)::acc) g []
+      |> List.sort Stdlib.compare));
+  Alcotest.(check bool) "removing original literal binding permits native SAT" true
+    (Option.is_some (Smt.check_sat (Expr.Set.singleton comparison) g));
+  Alcotest.(check bool) "removing original comparison permits native SAT" true
+    (Option.is_some (Smt.check_sat (Expr.Set.singleton binding) g));
+  let possible = parse_gil_set ["(#index v== 1.)"; "(0. < #index)"] in
+  Alcotest.(check bool) "consistent literal comparison remains native SAT" true
+    (Option.is_some (Smt.check_sat possible g));
+  let signed_zero = parse_gil_set ["(#index == -0.)"; "(0. < #index)"] in
+  Alcotest.(check bool) "signed zero cannot satisfy positive comparison" true
+    (Option.is_none (Smt.check_sat signed_zero g))
+
+
+let integer_order_count_core () =
+  let names = Expr.LVar "#core_names" and values = Expr.LVar "#core_values" in
+  let n = Expr.LVar "#core_length" in
+  let len = Expr.UnOp (LstLen, names) and count = Expr.UnOp (NumToInt, n) in
+  let g = Gamma.init () in
+  List.iter (fun name -> Gamma.update g name Type.ListType)
+    ["#core_names"; "#core_values"];
+  Gamma.update g "#core_length" Type.NumberType;
+  let gt = Gamma.as_hashtbl g in
+  let is_int = Expr.UnOp (IsInt,n) in
+  let link = bin Equal len count in
+  let bound = bin ILessThanEqual count (Expr.int 4294967294) in
+  let position = bin KeyInsertIndex
+    (Expr.NOp (LstCat,[names; Expr.EList [Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "length"))]]))
+    (Expr.UnOp (NumberToUtf16,n)) in
+  let placement = bin Equal position len in
+  let facts = Expr.Set.of_list [
+    is_int; link; bound; placement;
+    Expr.UnOp (LstAllUtf16,names);
+    bin ILessThanEqual (Expr.int 0) len;
+    bin ILessThanEqual (Expr.int 0) count;
+    bin Equal len (Expr.UnOp (LstLen,values));
+    bin FLessThanEqual (Expr.num 0.) n;
+    bin FLessThan n (Expr.num 4294967295.);
+    not_ (bin ValueEqual n (Expr.num (-0.)));
+    not_ (bin LstContains names (Expr.Lit (Utf16String (Gillian.Utils.Utf16.of_canonical "length"))));
+    not_ (bin LstContains names (Expr.UnOp (NumberToUtf16,n)));
+  ] in
+  let saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    let core fs failed =
+      let fs = Expr.Set.add failed fs in
+      match Solver.integer_order_core fs gt failed with
+      | None -> failwith "expected original integer core"
+      | Some selected ->
+          Alcotest.(check bool) "integer core contains only original assertions" true
+            (Expr.Set.mem failed selected && Expr.Set.subset selected fs);
+          selected
+    in
+    List.iter (fun limit ->
+      let failed = bin ILessThanEqual (Expr.Lit (Int limit)) len in
+      let selected = core facts failed in
+      Alcotest.(check bool) "count core keeps both alias and bound" true
+        (Expr.Set.mem link selected && Expr.Set.mem bound selected);
+      Alcotest.(check bool) "host bound core omits unrelated scan machinery" false
+        (Expr.Set.mem placement selected);
+      Alcotest.(check bool) "original full-range list bound has native UNSAT core" true
+        (Smt.proves_unsat selected gt);
+      Alcotest.(check bool) "full entailment uses the checked bound" true
+        (Solver.check_entailment Utils.Containers.SS.empty
+           (Engine.PFS.of_list (Expr.Set.elements facts)) [not_ failed] g)
+    ) [Z.of_int 4294967295; Z.of_int max_int; Z.pred (Z.of_int max_int)];
+    List.iter (fun failed ->
+      let selected = core facts failed in
+      Alcotest.(check bool) "position core retains actual placement equality" true
+        (Expr.Set.mem placement selected);
+      Alcotest.(check bool) "actual insertion position guard has native UNSAT core" true
+        (Smt.proves_unsat selected gt)
+    ) [bin ILessThan position (Expr.int 0);
+       bin ILessThanEqual (bin IPlus len (Expr.int 2)) position];
+    (* Small bounds give actual SAT models, without asking the solver to
+       materialize a host-sized concrete list for a negative control. *)
+    let small_bound = bin ILessThanEqual count (Expr.int 3) in
+    let failed = bin ILessThanEqual (Expr.int 4) len in
+    let small = facts |> Expr.Set.remove bound |> Expr.Set.remove placement
+      |> Expr.Set.add small_bound in
+    List.iter (fun omitted ->
+      let selected = core (Expr.Set.remove omitted small) failed in
+      Alcotest.(check bool) "omitting count alias or bound permits native SAT" true
+        (Option.is_some (Smt.check_sat selected gt))
+    ) [link; small_bound];
+    let full = Expr.Set.add failed small in
+    List.iter (fun name ->
+      let missing = Hashtbl.copy gt in
+      Hashtbl.remove missing name;
+      let selected = Solver.integer_order_core full missing failed in
+      Alcotest.(check bool) "missing original count/list type cannot prove UNSAT" false
+        (match selected with Some selected -> Smt.proves_unsat selected missing | None -> false)
+    ) ["#core_names"; "#core_length"];
+    let selected = core (Expr.Set.remove is_int small) failed in
+    Alcotest.(check bool) "omitting integrality leaves a native countermodel" true
+      (Option.is_some (Smt.check_sat selected gt));
+    let partial = Expr.UnOp (LstLen,Expr.LstSub(names,Expr.int (-1),Expr.int 1)) in
+    let unsafe = bin ILessThanEqual partial (Expr.int 3) in
+    Alcotest.(check bool) "a partial length cannot authorize a core" true
+      (Option.is_none (Solver.integer_order_core (Expr.Set.singleton unsafe) gt unsafe));
+    let flag = Expr.LVar "#core_flag" in
+    Gamma.update g "#core_flag" Type.BooleanType;
+    let premises = [bin ILessThanEqual count (Expr.int 3); is_int; flag;
+      not_ (bin Equal count (Expr.int 2))] in
+    let goal = bin Or (bin ILessThan count (Expr.int 0)) flag in
+    Alcotest.(check bool) "inconclusive integer subset retains complete fallback" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+        (Engine.PFS.of_list premises) [goal] g);
+    Printf.printf "INTEGER_ORDER_COUNT_CORE_NATIVE_CONTROLS_COMPLETE\n%!"
+  )
+
+let uint32_alias_complete_query () =
+  (* Original AP_push query171 premises: formatter links and signed-zero-safe
+     conversion facts must stay with the complete counterquery. *)
+  let g = Gamma.init () in
+  List.iter (fun n -> Gamma.update g n Type.NumberType)
+    ["#uint32_count"; "#uint32_length"];
+  Gamma.update g "#uint32_values" Type.ListType;
+  let facts = parse_gil_set [
+    "(is_int #uint32_count)";
+    "(0. <= #uint32_count)";
+    "(#uint32_count < 4294967295.)";
+    "(#uint32_length == #uint32_count)";
+    "((num_to_int #uint32_count) v== #uint32_count)";
+    "((num_to_uint32 #uint32_count) v== (#uint32_count + 0.))";
+    "((num_to_uint32 (#uint32_count + 0.)) v== (#uint32_count + 0.))";
+    "((num_to_uint32 (#uint32_count + 1.)) v== (#uint32_count + 1.))";
+    "(((num_to_uint32 (#uint32_count + 0.)) + 1.) v== (#uint32_count + 1.))";
+    "((num_to_utf16 (num_to_uint32 (#uint32_count + 0.))) == (num_to_utf16 #uint32_count))";
+    "((num_to_utf16 (num_to_uint32 (#uint32_length + 0.))) == (num_to_utf16 #uint32_length))";
+    "(0i i<= (l-len #uint32_values))";
+  ] in
+  let goal = bin FLessThan
+    (Expr.UnOp (ToUint32Op, bin FPlus (Expr.LVar "#uint32_length") (Expr.num 0.)))
+    (Expr.UnOp (ToUint32Op, Expr.LVar "#uint32_count")) in
+  let check name expected facts goal =
+    Alcotest.(check bool) name expected
+      (Solver.check_entailment Utils.Containers.SS.empty
+        (Engine.PFS.of_list (Expr.Set.elements facts)) [goal] g) in
+  let before = Expr.Set.elements facts in
+  let module L = Logging in
+  L.Mode.set_mode (Enabled Normal);
+  L.initialize [ L.file_reporter ];
+  Fun.protect
+    ~finally:(fun () ->
+      L.wrap_up ();
+      L.initialize [];
+      L.Mode.set_mode (Enabled Verbose))
+    (fun () ->
+  check "Uint32 same-length false goal retains a complete SAT witness" false facts goal;
+  check "Uint32 same-length ordering remains proved" true facts (not_ goal);
+  let plain_goal = bin Equal
+    (bin FPlus (Expr.LVar "#uint32_length") (Expr.num 1.))
+    (Expr.LVar "#uint32_count") in
+  check "Uint32 context with plain false goal retains a complete SAT witness"
+    false facts plain_goal;
+  check "Uint32 context with plain goal proves the original count separation"
+    true facts (not_ plain_goal);
+  let zero = bin ValueEqual (Expr.LVar "#uint32_count") (Expr.num (-0.)) in
+  check "Uint32 signed-zero alias ordering remains proved" true
+    (Expr.Set.add zero facts) (not_ goal);
+  let alias = bin Equal (Expr.LVar "#uint32_length") (Expr.LVar "#uint32_count") in
+  let no_alias = Expr.Set.remove alias facts in
+  check "missing length alias cannot prove the ordering" false no_alias (not_ goal);
+  Alcotest.(check bool) "Uint32 eligibility leaves original facts unchanged" true
+    (before = Expr.Set.elements facts);
+  Printf.printf "UINT32_COMPLETE_QUERY_CONTROLS_FINISHED\n%!")
+
+let integer_comparison_boolean_values () =
+  let g = gamma () in
+  Gamma.update g "#comparison_flag" Type.BooleanType;
+  let flag = Expr.LVar "#comparison_flag" in
+  let native_sat label expected facts =
+    Alcotest.(check bool) label expected
+      (Option.is_some (Smt.check_sat (Expr.Set.of_list facts) (Gamma.as_hashtbl g)))
+  in
+  List.iter (fun (name, op, compare) ->
+    let comparison = bin op x y in
+    List.iter (fun (left, right) ->
+      let expected = compare left right in
+      let prefix = Printf.sprintf "%s(%d,%d) " name left right in
+      let context = [bin Equal x (Expr.int left); bin Equal y (Expr.int right);
+        bin Equal flag comparison] in
+      native_sat (prefix ^ "Boolean-valued comparison admits a model") true context;
+      native_sat (prefix ^ "correct Boolean claim admits a model") true
+        (bin Equal flag (Expr.bool expected) :: context);
+      native_sat (prefix ^ "false Boolean claim has no model") false
+        (bin Equal flag (Expr.bool (not expected)) :: context);
+      native_sat (prefix ^ "negated comparison remains Boolean") true
+        (bin Equal (not_ comparison) (Expr.bool (not expected)) :: context)
+    ) [2,3; 3,2; 3,3];
+    native_sat (name ^ "symbolic true comparison contradicts its negation") false
+      [bin Equal comparison (Expr.bool true); not_ comparison];
+    native_sat (name ^ "symbolic false comparison retains its countermodel") true
+      [bin Equal comparison (Expr.bool false); not_ comparison]
+  ) ["less", ILessThan, ( < ); "less_equal", ILessThanEqual, ( <= )];
+  let target = Expr.LVar "#comparison_target" in
+  Gamma.update g "#comparison_target" Type.IntType;
+  let capacity = Expr.int 4294967295 in
+  let exceeded = bin ILessThan capacity target in
+  native_sat "original normal capacity partition retains a model" true
+    [bin Equal exceeded (Expr.bool false); bin Equal target capacity];
+  native_sat "original error capacity partition retains a model" true
+    [bin Equal exceeded (Expr.bool true); bin ILessThan capacity target];
+  native_sat "false capacity partition is rejected" false
+    [bin Equal exceeded (Expr.bool false); bin ILessThan capacity target];
+  Printf.printf "INTEGER_COMPARISON_BOOL_CONTROLS_FINISHED\n%!"
+
+(* Native complete-query regressions for the guarded binary64 difference.
+   Do not route these through reduction, sufficient cores or witness guesses. *)
+let index_difference_native_query label facts gamma =
+  let queries () =
+    if Sys.file_exists "gillian_smt_queries" then
+      Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let before = queries () and saved_dump = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+    let model = Smt.exec_sat facts gamma in
+    let fresh = queries () |> List.filter (fun name -> not (List.mem name before)) in
+    Alcotest.(check int) (label ^ " has one actual native query") 1 (List.length fresh);
+    let query_path = Filename.concat "gillian_smt_queries" (List.hd fresh) in
+    let ch = open_in_bin query_path in
+    let raw = Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) facts in
+    Alcotest.(check bool) (label ^ " retains the complete original query") true
+      (String.starts_with ~prefix raw);
+    let marker = "Encoded as SMT Query:\n" in
+    let rec find_marker i =
+      if i + String.length marker > String.length raw then
+        Alcotest.fail "Missing native encoding section"
+      else if String.sub raw i (String.length marker) = marker then
+        i + String.length marker else find_marker (i + 1) in
+    let offset = find_marker 0 in
+    let encoded = Sexplib.Sexp.scan_sexps (Lexing.from_string
+      (String.sub raw offset (String.length raw - offset))) in
+    let rec contains_subtraction = function
+      | Sexplib.Sexp.List (Sexplib.Sexp.Atom "fp.sub" :: _) -> true
+      | Sexplib.Sexp.List xs -> List.exists contains_subtraction xs
+      | _ -> false in
+    let rec guarded_subtraction = function
+      | Sexplib.Sexp.List [Sexplib.Sexp.Atom "ite";
+          Sexplib.Sexp.List (Sexplib.Sexp.Atom "and" :: _);
+          Sexplib.Sexp.List [Sexplib.Sexp.Atom "-"; _; _]; fallback]
+          when contains_subtraction fallback -> true
+      | Sexplib.Sexp.List xs -> List.exists guarded_subtraction xs
+      | _ -> false in
+    Alcotest.(check bool) (label ^ " observes the guarded encoding, not a no-op")
+      true (List.exists guarded_subtraction encoded);
+    Printf.printf "INDEX_DIFFERENCE_NATIVE_QUERY[%s]=%s\n%!" label query_path;
+    (match model with
+     | None -> Printf.printf "INDEX_DIFFERENCE_NATIVE_RESULT[%s]=UNSAT\n%!" label
+     | Some model -> Printf.printf "INDEX_DIFFERENCE_NATIVE_MODEL[%s]=%s\n%!"
+         label (Fmt.str "%a" Smt.pp_model model));
+    model)
+
+let index_difference_context names =
+  let g = Gamma.init () in
+  List.iter (fun name -> Gamma.update g name Type.NumberType) names;
+  g
+
+let index_difference_uint32 value =
+  [Expr.UnOp (IsInt, value);
+   bin FLessThanEqual (Expr.num 0.) value;
+   bin FLessThanEqual value (Expr.num 4294967295.)]
+
+let index_difference_strict_descent () =
+  let i = Expr.LVar "#difference_i" and n = Expr.LVar "#difference_n" in
+  let g = index_difference_context ["#difference_i"; "#difference_n"] in
+  let cast e = Expr.UnOp (NumToInt, e) in
+  let goal = bin ILessThan (cast (bin FMinus n (bin FPlus i (Expr.num 1.))))
+    (cast (bin FMinus n i)) in
+  let facts = index_difference_uint32 i @ index_difference_uint32 n
+    @ [bin FLessThan i n] in
+  Alcotest.(check bool) "full intrinsic strict descent has native UNSAT counterquery"
+    true (Option.is_none (index_difference_native_query "strict-descent"
+      (Expr.Set.of_list (not_ goal :: facts)) (Gamma.as_hashtbl g)))
+
+let index_difference_signed () =
+  let a = Expr.LVar "#difference_a" and b = Expr.LVar "#difference_b" in
+  let g = index_difference_context ["#difference_a"; "#difference_b"] in
+  let cast e = Expr.UnOp (NumToInt, e) in
+  let difference = cast (bin FMinus a b) in
+  let goal = bin Equal difference (bin IMinus (cast a) (cast b)) in
+  let facts = index_difference_uint32 a @ index_difference_uint32 b
+    @ [bin FLessThan a b] in
+  Alcotest.(check bool) "negative signed uint32 difference retains exact integer identity"
+    true (Option.is_none (index_difference_native_query "signed-difference"
+      (Expr.Set.of_list (not_ goal :: facts)) (Gamma.as_hashtbl g)));
+  Gamma.update g "#difference_result" Type.IntType;
+  let result = Expr.LVar "#difference_result" in
+  let observed = facts @ [bin ValueEqual a (Expr.num 0.);
+    bin ValueEqual b (Expr.num 4294967295.); bin Equal result difference] in
+  let model = match index_difference_native_query "signed-boundary-model"
+    (Expr.Set.of_list observed) (Gamma.as_hashtbl g) with
+    | Some model -> model | None -> Alcotest.fail "Missing signed boundary model" in
+  let lifted = Hashtbl.create 3 in
+  Smt.lift_model model (Gamma.as_hashtbl g) (Hashtbl.add lifted)
+    (Expr.Set.of_list [a; b; result]);
+  let expect name expected = Alcotest.(check bool) ("native signed model " ^ name)
+    true (match Hashtbl.find_opt lifted name with
+      | Some value -> Expr.equal value expected | None -> false) in
+  expect "#difference_a" (Expr.num 0.);
+  expect "#difference_b" (Expr.num 4294967295.);
+  expect "#difference_result" (Expr.Lit (Literal.Int (Z.of_string "-4294967295")))
+
+let index_difference_fallback label left right expected_actual expected_linear =
+  let a = Expr.LVar ("#difference_" ^ label ^ "_a") in
+  let b = Expr.LVar ("#difference_" ^ label ^ "_b") in
+  let actual_name = "#difference_" ^ label ^ "_actual" in
+  let linear_name = "#difference_" ^ label ^ "_linear" in
+  let actual = Expr.LVar actual_name and linear = Expr.LVar linear_name in
+  let g = index_difference_context
+    ["#difference_" ^ label ^ "_a"; "#difference_" ^ label ^ "_b"] in
+  List.iter (fun name -> Gamma.update g name Type.IntType) [actual_name; linear_name];
+  let cast e = Expr.UnOp (NumToInt, e) in
+  let facts = Expr.Set.of_list [bin ValueEqual a (Expr.num left);
+    bin ValueEqual b (Expr.num right);
+    bin Equal actual (cast (bin FMinus a b));
+    bin Equal linear (bin IMinus (cast a) (cast b)); not_ (bin Equal actual linear)] in
+  let model = match index_difference_native_query label facts (Gamma.as_hashtbl g) with
+    | Some model -> model | None -> Alcotest.fail ("Missing fallback model " ^ label) in
+  let lifted = Hashtbl.create 4 in
+  Smt.lift_model model (Gamma.as_hashtbl g) (Hashtbl.add lifted)
+    (Expr.Set.of_list [a; b; actual; linear]);
+  let expect name expected = Alcotest.(check bool) (label ^ " native model " ^ name)
+    true (match Hashtbl.find_opt lifted name with
+      | Some value -> Expr.equal value expected | None -> false) in
+  expect ("#difference_" ^ label ^ "_a") (Expr.num left);
+  expect ("#difference_" ^ label ^ "_b") (Expr.num right);
+  expect actual_name (Expr.Lit (Literal.Int (Z.of_string expected_actual)));
+  expect linear_name (Expr.Lit (Literal.Int (Z.of_string expected_linear)));
+  Alcotest.(check bool) (label ^ " rejects replacing the fallback by integer subtraction")
+    true (Option.is_none (index_difference_native_query (label ^ "-wrong-equality")
+      (Expr.Set.add (bin Equal actual linear) facts) (Gamma.as_hashtbl g)))
+
+let index_difference_fractional () =
+  index_difference_fallback "fractional-left" 1.5 2. "0" "-1";
+  index_difference_fallback "fractional-right" 2. 1.5 "0" "1"
+
+let index_difference_outside_uint32 () =
+  index_difference_fallback "outside-left" 9007199254740994. 1.
+    "9007199254740992" "9007199254740993";
+  index_difference_fallback "outside-right" 1. 9007199254740994.
+    "-9007199254740992" "-9007199254740993";
+  index_difference_fallback "outside-negative-left" (-9007199254740994.) 1.
+    "-9007199254740996" "-9007199254740995";
+  index_difference_fallback "outside-negative-right" 1. (-9007199254740994.)
+    "9007199254740996" "9007199254740995"
+
+(* Conditional checked-state descent and concrete native guard controls for
+   the nested subtraction/successor encoding. Expected values are source
+   mathematics; every observation still comes from the complete native query. *)
+let index_difference_nested_model label n_value i_value
+    expected_actual expected_linear wrong_result =
+  let n_name = "#nested_" ^ label ^ "_n" in
+  let i_name = "#nested_" ^ label ^ "_i" in
+  let actual_name = "#nested_" ^ label ^ "_actual" in
+  let linear_name = "#nested_" ^ label ^ "_linear" in
+  let n = Expr.LVar n_name and i = Expr.LVar i_name in
+  let actual = Expr.LVar actual_name and linear = Expr.LVar linear_name in
+  let g = index_difference_context [n_name; i_name] in
+  List.iter (fun name -> Gamma.update g name Type.IntType) [actual_name; linear_name];
+  let cast e = Expr.UnOp (NumToInt, e) in
+  let nested = cast (bin FMinus n (bin FPlus i (Expr.num 1.))) in
+  let integer = bin IMinus (cast n) (bin IPlus (cast i) (Expr.int 1)) in
+  let base = [bin ValueEqual n (Expr.num n_value);
+    bin ValueEqual i (Expr.num i_value); bin Equal actual nested;
+    bin Equal linear integer] in
+  let facts = match wrong_result with
+    | Some _ -> base
+    | None -> not_ (bin Equal actual linear) :: base in
+  Printf.printf "INDEX_DIFFERENCE_NESTED_EXPECTED[%s]=actual:%s,linear:%s\n%!"
+    label expected_actual expected_linear;
+  let model = match index_difference_native_query label (Expr.Set.of_list facts)
+    (Gamma.as_hashtbl g) with
+    | Some model -> model | None -> Alcotest.fail ("Missing nested model " ^ label) in
+  let lifted = Hashtbl.create 4 in
+  Smt.lift_model model (Gamma.as_hashtbl g) (Hashtbl.add lifted)
+    (Expr.Set.of_list [n; i; actual; linear]);
+  let expect_number name expected =
+    match Hashtbl.find_opt lifted name with
+    | Some (Expr.Lit (Literal.Num value)) ->
+        Alcotest.(check int64) (label ^ " native Number bits " ^ name)
+          (Int64.bits_of_float expected) (Int64.bits_of_float value)
+    | _ -> Alcotest.fail ("Missing native Number " ^ name) in
+  let expect_integer name expected =
+    Alcotest.(check bool) (label ^ " native integer " ^ name) true
+      (match Hashtbl.find_opt lifted name with
+       | Some value -> Expr.equal value (Expr.Lit (Literal.Int (Z.of_string expected)))
+       | None -> false) in
+  expect_number n_name n_value;
+  expect_number i_name i_value;
+  expect_integer actual_name expected_actual;
+  expect_integer linear_name expected_linear;
+  (* Keep the false claim independent of the SAT-only inequality and of the
+     expected result: the original result definitions must refute it. *)
+  let false_claim = match wrong_result with
+    | Some wrong -> bin Equal actual (Expr.Lit (Literal.Int (Z.of_string wrong)))
+    | None -> bin Equal actual linear in
+  Alcotest.(check bool) (label ^ " false result has native UNSAT counterquery") true
+    (Option.is_none (index_difference_native_query (label ^ "-false-result")
+      (Expr.Set.of_list (false_claim :: base)) (Gamma.as_hashtbl g)))
+
+let index_difference_nested_checked () =
+  let i = Expr.LVar "#nested_checked_i" and n = Expr.LVar "#nested_checked_n" in
+  let g = index_difference_context ["#nested_checked_i"; "#nested_checked_n"] in
+  let cast e = Expr.UnOp (NumToInt, e) in
+  let successor = bin FPlus i (Expr.num 1.) in
+  let next_difference = cast (bin FMinus n successor) in
+  let goal = bin ILessThan next_difference (cast (bin FMinus n i)) in
+  (* Exactly the five already checked S05IndexStep observations, with the
+     original intrinsic premises. This is not an assumption in that lemma. *)
+  let checked = [bin FLessThanEqual i (Expr.num 4294967294.);
+    Expr.UnOp (IsInt, successor);
+    bin Equal (cast successor) (bin IPlus (cast i) (Expr.int 1));
+    bin FLessThanEqual successor n;
+    bin ILessThanEqual (Expr.int 0) next_difference] in
+  let facts = index_difference_uint32 i @ index_difference_uint32 n
+    @ [bin FLessThan i n] @ checked in
+  Alcotest.(check bool) "complete checked-state nested strict descent is native UNSAT"
+    true (Option.is_none (index_difference_native_query "nested-checked-descent"
+      (Expr.Set.of_list (not_ goal :: facts)) (Gamma.as_hashtbl g)));
+  index_difference_nested_model "nested-signed-zero" 0. (-0.) "-1" "-1" (Some "0");
+  index_difference_nested_model "nested-successor-limit" 4294967295. 4294967294.
+    "0" "0" (Some "1");
+  index_difference_nested_model "nested-negative-difference" 0. 4294967294.
+    "-4294967295" "-4294967295" (Some "-4294967294")
+
+let index_difference_nested_fallbacks () =
+  index_difference_nested_model "nested-fractional-n" 1.5 1. "0" "-1" None;
+  index_difference_nested_model "nested-fractional-i" 2. 0.5 "0" "1" None;
+  index_difference_nested_model "nested-upper-n" 9007199254740994. 0.
+    "9007199254740992" "9007199254740993" None;
+  index_difference_nested_model "nested-lower-n" (-9007199254740994.) 0.
+    "-9007199254740996" "-9007199254740995" None;
+  index_difference_nested_model "nested-upper-i" 1. 9007199254740992.
+    "-9007199254740991" "-9007199254740992" None;
+  index_difference_nested_model "nested-lower-i" 1. (-9007199254740994.)
+    "9007199254740992" "9007199254740994" None
+
+let index_difference_sign_query ?(direct = false) label facts gamma =
+  let queries () = Array.to_list (Sys.readdir "gillian_smt_queries") in
+  let old = if Sys.file_exists "gillian_smt_queries" then queries () else [] in
+  let model = index_difference_native_query label facts gamma in
+  let fresh = queries () |> List.filter (fun name -> not (List.mem name old)) in
+  let ch = open_in_bin (Filename.concat "gillian_smt_queries" (List.hd fresh)) in
+  let raw = Fun.protect ~finally:(fun () -> close_in ch)
+    (fun () -> really_input_string ch (in_channel_length ch)) in
+  let marker = "Encoded as SMT Query:\n" in
+  let rec offset at =
+    if at + String.length marker > String.length raw then Alcotest.fail "Missing SMT section"
+    else if String.sub raw at (String.length marker) = marker then at + String.length marker
+    else offset (at + 1) in
+  let at = offset 0 in
+  let encoded = Sexplib.Sexp.scan_sexps (Lexing.from_string
+    (String.sub raw at (String.length raw - at))) in
+  let rec guarded_sign = function
+    | Sexplib.Sexp.List [Sexplib.Sexp.Atom "ite";
+        Sexplib.Sexp.List (Sexplib.Sexp.Atom "and" :: _);
+        Sexplib.Sexp.List [Sexplib.Sexp.Atom "fp.lt"; _;
+          Sexplib.Sexp.List (Sexplib.Sexp.Atom "fp.add" :: _)];
+        Sexplib.Sexp.List [Sexplib.Sexp.Atom "<"; _; Sexplib.Sexp.Atom "0"]] when not direct -> true
+    | Sexplib.Sexp.List [Sexplib.Sexp.Atom "ite";
+        Sexplib.Sexp.List (Sexplib.Sexp.Atom "and" :: _);
+        Sexplib.Sexp.List [Sexplib.Sexp.Atom "fp.lt"; Sexplib.Sexp.Atom _;
+          Sexplib.Sexp.Atom _];
+        Sexplib.Sexp.List [Sexplib.Sexp.Atom "<"; _; Sexplib.Sexp.Atom "0"]] when direct -> true
+    | Sexplib.Sexp.List xs -> List.exists guarded_sign xs
+    | _ -> false in
+  Alcotest.(check bool) (label ^ " actually encodes guarded sign with integer fallback")
+    true (List.exists guarded_sign encoded);
+  model
+
+(* The reached nonnegativity check is separate from strict descent: no
+   nonnegative difference is assumed in either of these counterqueries. *)
+let index_difference_nonnegative () =
+  let n = Expr.LVar "#sign_n" and i = Expr.LVar "#sign_i" in
+  let g = index_difference_context ["#sign_n"; "#sign_i"] in
+  let cast e = Expr.UnOp (NumToInt, e) in
+  let successor = bin FPlus i (Expr.num 1.) in
+  let negative = bin ILessThan (cast (bin FMinus n successor)) (Expr.int 0) in
+  let original = Expr.Set.of_list
+    (index_difference_uint32 n @ index_difference_uint32 i @
+      [Expr.UnOp (IsInt, successor); bin FLessThan i n;
+       bin FLessThanEqual i (Expr.num 4294967294.);
+       bin Equal (cast successor) (bin IPlus (cast i) (Expr.int 1));
+       bin FLessThanEqual successor n; negative]) in
+  Alcotest.(check int) "all twelve reached original atoms are retained" 12
+    (Expr.Set.cardinal original);
+  Alcotest.(check bool) "full reached nonnegative counterquery is native UNSAT" true
+    (Option.is_none (index_difference_sign_query "nonnegative-full" original
+      (Gamma.as_hashtbl g)));
+  let core = Expr.Set.of_list
+    [Expr.UnOp (IsInt, i); Expr.UnOp (IsInt, n);
+     bin FLessThanEqual (Expr.num 0.) i; bin FLessThanEqual (Expr.num 0.) n;
+     bin FLessThanEqual i (Expr.num 4294967294.);
+     bin FLessThanEqual n (Expr.num 4294967295.);
+     negative; bin FLessThanEqual successor n] in
+  Alcotest.(check bool) "nonnegative core is a proper original subset" true
+    (Expr.Set.subset core original && not (Expr.Set.equal core original));
+  Alcotest.(check bool) "reached original subset is native UNSAT" true
+    (Option.is_none (index_difference_sign_query "nonnegative-core" core
+      (Gamma.as_hashtbl g)));
+  let weakened = Expr.Set.remove (bin FLessThanEqual successor n) core
+    |> Expr.Set.add (bin ValueEqual i (Expr.num 1.))
+    |> Expr.Set.add (bin ValueEqual n (Expr.num 0.)) in
+  Alcotest.(check bool) "without successor ordering a negative model is admitted"
+    true (Option.is_some (index_difference_sign_query "nonnegative-no-order"
+      weakened (Gamma.as_hashtbl g)))
+
+let index_difference_sign_models () =
+  List.iter (fun (label, n_value, i_value, expected_count, expected_sign) ->
+    let n_name = "#sign_" ^ label ^ "_n" and i_name = "#sign_" ^ label ^ "_i" in
+    let count_name = "#sign_" ^ label ^ "_count" in
+    let flag_name = "#sign_" ^ label ^ "_flag" in
+    let n = Expr.LVar n_name and i = Expr.LVar i_name in
+    let count = Expr.LVar count_name and flag = Expr.LVar flag_name in
+    let g = index_difference_context [n_name; i_name] in
+    Gamma.update g count_name Type.IntType;
+    Gamma.update g flag_name Type.BooleanType;
+    let difference = Expr.UnOp (NumToInt, bin FMinus n (bin FPlus i (Expr.num 1.))) in
+    let sign = bin ILessThan difference (Expr.int 0) in
+    let base = [bin ValueEqual n (Expr.num n_value);
+      bin ValueEqual i (Expr.num i_value); bin Equal count difference;
+      bin Equal flag sign] in
+    let model = match index_difference_sign_query ("sign-" ^ label)
+      (Expr.Set.of_list base) (Gamma.as_hashtbl g) with
+      | Some model -> model | None -> Alcotest.fail ("Missing sign model " ^ label) in
+    let lifted = Hashtbl.create 4 in
+    Smt.lift_model model (Gamma.as_hashtbl g) (Hashtbl.add lifted)
+      (Expr.Set.of_list [n; i; count; flag]);
+    List.iter (fun (name, expected) -> match Hashtbl.find_opt lifted name with
+      | Some (Expr.Lit (Literal.Num actual)) ->
+          Alcotest.(check int64) (label ^ " retains exact Number bits " ^ name)
+            (Int64.bits_of_float expected) (Int64.bits_of_float actual)
+      | _ -> Alcotest.fail ("Missing Number model " ^ name))
+      [n_name,n_value; i_name,i_value];
+    Alcotest.(check bool) (label ^ " retains the original integer count") true
+      (match Hashtbl.find_opt lifted count_name with
+       | Some value -> Expr.equal value
+           (Expr.Lit (Literal.Int (Z.of_string expected_count))) | None -> false);
+    Alcotest.(check bool) (label ^ " has the correct Boolean sign") true
+      (match Hashtbl.find_opt lifted flag_name with
+       | Some value -> Expr.equal value (Expr.bool expected_sign) | None -> false);
+    Alcotest.(check bool) (label ^ " genuinely rejects the wrong Boolean sign") true
+      (Option.is_none (index_difference_sign_query ("sign-" ^ label ^ "-wrong")
+        (Expr.Set.of_list (bin Equal flag (Expr.bool (not expected_sign)) :: base))
+        (Gamma.as_hashtbl g)))
+  ) ["signed-zero",0.,(-0.),"-1",true;
+     "cancellation",1.,0.,"0",false;
+     "successor-limit",4294967295.,4294967294.,"0",false;
+     "negative-extreme",0.,4294967294.,"-4294967295",true;
+     "width-transition",65536.,65535.,"0",false;
+     "fractional-i",1.,0.5,"0",false;
+     "fractional-n",1.5,1.,"0",false;
+     "negative-fallback",(-2.),0.,"-3",true;
+     "upper-fallback",4294967296.,4294967295.,"0",false]
+
+(* Exact five original empty-branch atoms from skip208/query109; no
+   nonnegative count or second endpoint bounds are added as premises. *)
+let index_difference_direct_bounds () =
+  let n = Expr.LVar "#direct_end" and i = Expr.LVar "#direct_start" in
+  let g = index_difference_context ["#direct_end"; "#direct_start"] in
+  let negative = bin ILessThan (Expr.UnOp (NumToInt, bin FMinus n i))
+    (Expr.int 0) in
+  let equality = bin Equal i n in
+  let empty = Expr.Set.of_list (index_difference_uint32 i @ [equality; negative]) in
+  Alcotest.(check int) "exact five original empty-branch atoms retained" 5
+    (Expr.Set.cardinal empty);
+  Alcotest.(check bool) "original empty-branch nonnegativity is native UNSAT" true
+    (Option.is_none (index_difference_sign_query ~direct:true "direct-empty"
+      empty (Gamma.as_hashtbl g)));
+  let ordering = bin FLessThanEqual i n in
+  let ordered = Expr.Set.of_list (index_difference_uint32 i @
+    index_difference_uint32 n @ [ordering; negative]) in
+  Alcotest.(check bool) "full uint32 ordered difference is native UNSAT" true
+    (Option.is_none (index_difference_sign_query ~direct:true "direct-ordered"
+      ordered (Gamma.as_hashtbl g)));
+  let weakened = Expr.Set.remove ordering ordered
+    |> Expr.Set.add (bin ValueEqual i (Expr.num 1.))
+    |> Expr.Set.add (bin ValueEqual n (Expr.num 0.)) in
+  Alcotest.(check bool) "without ordering a negative direct model is admitted" true
+    (Option.is_some (index_difference_sign_query ~direct:true "direct-no-order"
+      weakened (Gamma.as_hashtbl g)))
+
+let index_difference_direct_models () =
+  List.iter (fun (label, n_value, i_value, expected_count, expected_sign) ->
+    let n_name = "#direct_" ^ label ^ "_n" and i_name = "#direct_" ^ label ^ "_i" in
+    let count_name = "#direct_" ^ label ^ "_count" in
+    let flag_name = "#direct_" ^ label ^ "_flag" in
+    let n = Expr.LVar n_name and i = Expr.LVar i_name in
+    let count = Expr.LVar count_name and flag = Expr.LVar flag_name in
+    let g = index_difference_context [n_name; i_name] in
+    Gamma.update g count_name Type.IntType;
+    Gamma.update g flag_name Type.BooleanType;
+    let difference = Expr.UnOp (NumToInt, bin FMinus n i) in
+    let sign = bin ILessThan difference (Expr.int 0) in
+    let base = [bin ValueEqual n (Expr.num n_value);
+      bin ValueEqual i (Expr.num i_value); bin Equal count difference;
+      bin Equal flag sign] in
+    let model = match index_difference_sign_query ~direct:true ("direct-sign-" ^ label)
+      (Expr.Set.of_list base) (Gamma.as_hashtbl g) with
+      | Some model -> model | None -> Alcotest.fail ("Missing sign model " ^ label) in
+    let lifted = Hashtbl.create 4 in
+    Smt.lift_model model (Gamma.as_hashtbl g) (Hashtbl.add lifted)
+      (Expr.Set.of_list [n; i; count; flag]);
+    List.iter (fun (name, expected) -> match Hashtbl.find_opt lifted name with
+      | Some (Expr.Lit (Literal.Num actual)) ->
+          Alcotest.(check int64) (label ^ " retains exact Number bits " ^ name)
+            (Int64.bits_of_float expected) (Int64.bits_of_float actual)
+      | _ -> Alcotest.fail ("Missing Number model " ^ name))
+      [n_name,n_value; i_name,i_value];
+    Alcotest.(check bool) (label ^ " retains the original integer count") true
+      (match Hashtbl.find_opt lifted count_name with
+       | Some value -> Expr.equal value
+           (Expr.Lit (Literal.Int (Z.of_string expected_count))) | None -> false);
+    Alcotest.(check bool) (label ^ " has the correct Boolean sign") true
+      (match Hashtbl.find_opt lifted flag_name with
+       | Some value -> Expr.equal value (Expr.bool expected_sign) | None -> false);
+    Alcotest.(check bool) (label ^ " genuinely rejects the wrong Boolean sign") true
+      (Option.is_none (index_difference_sign_query ~direct:true ("direct-sign-" ^ label ^ "-wrong")
+        (Expr.Set.of_list (bin Equal flag (Expr.bool (not expected_sign)) :: base))
+        (Gamma.as_hashtbl g)))
+  ) ["signed-zero",0.,(-0.),"0",false;
+     "cancellation",1.,1.,"0",false;
+     "uint32-limit",4294967295.,0.,"4294967295",false;
+     "negative-extreme",0.,4294967295.,"-4294967295",true;
+     "width-transition",65536.,65535.,"1",false;
+     "fractional-i",1.,1.5,"0",false;
+     "fractional-n",1.5,2.,"0",false;
+     "negative-fallback",(-0.5),0.,"0",false;
+     "upper-fallback",4294967296.,4294967295.,"1",false]
+
+let finite_difference_original_cores () =
+  let n = Expr.LVar "#finite_end" and i = Expr.LVar "#finite_start" in
+  let g = index_difference_context ["#finite_end"; "#finite_start"] in
+  let gt = Gamma.as_hashtbl g in
+  let difference = bin FMinus n i in
+  let integral = [Expr.UnOp (IsInt,n); Expr.UnOp (IsInt,i)] in
+  let ordering = bin FLessThanEqual i n in
+  let nonnegative = bin FLessThanEqual (Expr.num 0.) i in
+  let facts = integral @ [bin ILessThanEqual (Expr.int 0)
+      (Expr.UnOp (NumToInt,difference)); nonnegative;
+    bin FLessThanEqual n (Expr.num 4294967294.);
+    bin FLessThanEqual n (Expr.num 4294967295.); ordering] in
+  let before = facts in
+  let queries () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    List.iter (fun (label, goal, required, start, finish) ->
+      let failed = not_ goal in
+      let core = Expr.Set.of_list (failed :: required :: integral) in
+      let old = queries () in
+      Alcotest.(check bool) (label ^ " full actual entailment is proved") true
+        (Solver.check_entailment Utils.Containers.SS.empty
+          (Engine.PFS.of_list facts) [goal] g);
+      let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) core in
+      let found = queries () |> List.filter (fun name ->
+        if List.mem name old then false else
+        let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+        let raw = Fun.protect ~finally:(fun () -> close_in ch)
+          (fun () -> really_input_string ch (in_channel_length ch)) in
+        String.starts_with ~prefix raw) in
+      Alcotest.(check int) (label ^ " uses one actual original-subset native query")
+        1 (List.length found);
+      Printf.printf "FINITE_DIFFERENCE_NATIVE_QUERY[%s]=%s\n%!" label (List.hd found);
+      let weakened = Expr.Set.of_list (failed :: integral)
+        |> Expr.Set.add (bin ValueEqual i (Expr.num start))
+        |> Expr.Set.add (bin ValueEqual n (Expr.num finish)) in
+      Alcotest.(check bool) (label ^ " missing premise fails the actual entailment") false
+        (Solver.check_entailment Utils.Containers.SS.empty
+          (Engine.PFS.of_list (Expr.Set.elements (Expr.Set.remove failed weakened)))
+          [goal] g);
+      let model = match Smt.exec_sat weakened gt with
+        | Some model -> model | None -> Alcotest.fail ("Missing finite witness " ^ label) in
+      Printf.printf "FINITE_DIFFERENCE_NATIVE_MODEL[%s]=%s\n%!"
+        label (Fmt.str "%a" Smt.pp_model model);
+      let lifted = Hashtbl.create 2 in
+      Smt.lift_model model gt (Hashtbl.add lifted) (Expr.Set.of_list [i;n]);
+      List.iter (fun (name, expected) -> match Hashtbl.find_opt lifted name with
+        | Some (Expr.Lit (Literal.Num actual)) ->
+            Alcotest.(check int64) (label ^ " actual countermodel " ^ name)
+              (Int64.bits_of_float expected) (Int64.bits_of_float actual)
+        | _ -> Alcotest.fail ("Missing finite endpoint " ^ name))
+        ["#finite_start",start; "#finite_end",finish]
+    ) ["lower",bin FLessThanEqual (Expr.num (-. Float.max_float)) difference,
+       ordering,Float.max_float,(-. Float.max_float);
+       "upper",bin FLessThanEqual difference (Expr.num Float.max_float),
+       nonnegative,(-. Float.max_float),Float.max_float]);
+  Alcotest.(check bool) "finite core leaves the caller facts unchanged" true
+    (facts = before)
+
+let nested_finite_difference_original_core () =
+  (* Original Skip210 query176. The printed decimal bound loses precision;
+     construct its exact encoded #xffefffffffffffff literal below. *)
+  let n = Expr.LVar "#end" and i = Expr.LVar "#start" in
+  let successor = bin FPlus i (Expr.num 1.) in
+  let difference = bin FMinus n successor in
+  let goal = bin FLessThanEqual (Expr.num (-. Float.max_float)) difference in
+  let failed = not_ goal in
+  let facts = parse_gil_set [
+    "(! (#start == #end))"; "(is_int #end)"; "(is_int #start)";
+    "(is_int (#end + 1.))"; "(is_int (#start + 1.))";
+    "(0i i<= (l-len #tailValues))";
+    "(0i i<= (as_int (4294967295. - (#end + 1.))))";
+    "(0i i<= (as_int (#end - #start)))";
+    "(0. <= #end)"; "(0. <= #start)";
+    "(#end <= 4294967294.)"; "(#end <= 4294967295.)";
+    "(#start < #end)"; "(#start <= 4294967294.)";
+    "((as_int (4294967295. - (#end + 1.))) i< (as_int (4294967295. - #end)))";
+    "((as_int (#end + 1.)) == (1i i+ (as_int #end)))";
+    "((#end + 1.) <= 4294967295.)"; "((#start + 1.) <= #end)"
+  ] in
+  let g = Gamma.init () in
+  List.iter (fun (name,typ) -> Gamma.update g name typ)
+    ["#cell",Type.Utf16Type; "#tailKeys",Type.SetType;
+     "#start",Type.NumberType; "#end",Type.NumberType;
+     "#tailValues",Type.ListType];
+  let gt = Gamma.as_hashtbl g in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t)::acc) gt []
+    |> List.sort Stdlib.compare in
+  let before_types = types () and before = Expr.Set.elements facts in
+  let core = Expr.Set.of_list [failed; Expr.UnOp (IsInt,n);
+    Expr.UnOp (IsInt,successor); bin FLessThanEqual successor n] in
+  let files () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let read name = let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+    Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+  let old = files () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) "nested core full original entailment is proved" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+        (Engine.PFS.of_list before) [goal] g);
+    Alcotest.(check int) "nested core positive emits only one native query" 1
+      (List.length (files () |> List.filter (fun name -> not (List.mem name old))));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) core in
+    let observed = files () |> List.filter (fun name ->
+      not (List.mem name old) && String.starts_with ~prefix (read name)) in
+    Alcotest.(check int) "nested core actual four-original-atom native query" 1
+      (List.length observed);
+    Printf.printf "NESTED_FINITE_NATIVE_QUERY[original]=%s\n%!" (List.hd observed);
+    List.iter (fun (label,kept,start,finish) ->
+      let weakened = Expr.Set.of_list (failed :: kept)
+        |> Expr.Set.add (bin ValueEqual i (Expr.num start))
+        |> Expr.Set.add (bin ValueEqual n (Expr.num finish)) in
+      Alcotest.(check bool) (label ^ " rejects the actual false entailment") false
+        (Solver.check_entailment Utils.Containers.SS.empty
+          (Engine.PFS.of_list (Expr.Set.elements (Expr.Set.remove failed weakened)))
+          [goal] g);
+      let old = files () in
+      let model = match Smt.exec_sat weakened gt with
+        | Some model -> model | None -> Alcotest.fail ("Missing native countermodel " ^ label) in
+      let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) weakened in
+      let observed = files () |> List.filter (fun name ->
+        not (List.mem name old) && String.starts_with ~prefix (read name)) in
+      Alcotest.(check int) (label ^ " has one actual complete native counterquery") 1
+        (List.length observed);
+      Printf.printf "NESTED_FINITE_NATIVE_QUERY[%s]=%s\n%!" label (List.hd observed);
+      Printf.printf "NESTED_FINITE_NATIVE_MODEL[%s]=%s\n%!" label
+        (Fmt.str "%a" Smt.pp_model model);
+      let lifted = Hashtbl.create 2 in
+      Smt.lift_model model gt (Hashtbl.add lifted) (Expr.Set.of_list [i;n]);
+      List.iter (fun (name,expected) -> match Hashtbl.find_opt lifted name with
+        | Some (Expr.Lit (Literal.Num actual)) ->
+            Alcotest.(check int64) (label ^ " exact endpoint model " ^ name)
+              (Int64.bits_of_float expected) (Int64.bits_of_float actual)
+        | _ -> Alcotest.fail ("Missing native Number endpoint " ^ name))
+        ["#start",start; "#end",finish]
+    ) ["without-order",[Expr.UnOp (IsInt,n);Expr.UnOp (IsInt,successor)],
+         Float.max_float,(-. Float.max_float);
+       "without-finiteness",[bin FLessThanEqual successor n],infinity,infinity]);
+  Alcotest.(check bool) "nested core retains original facts" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "nested core retains original gamma" true
+    (before_types = types ())
+
+let nested_upper_finite_difference_original_core () =
+  (* Original Skip211 query172. The printed decimal bound loses precision;
+     construct its exact encoded #x7fefffffffffffff literal below. *)
+  let n = Expr.LVar "#end" and i = Expr.LVar "#start" in
+  let successor = bin FPlus i (Expr.num 1.) in
+  let difference = bin FMinus n successor in
+  let goal = bin FLessThanEqual difference (Expr.num Float.max_float) in
+  let failed = not_ goal in
+  let facts = parse_gil_set [
+    "(! (#start == #end))"; "(is_int #end)"; "(is_int #start)";
+    "(is_int (#end + 1.))"; "(is_int (#start + 1.))";
+    "(0i i<= (l-len #tailValues))";
+    "(0i i<= (as_int (4294967295. - (#end + 1.))))";
+    "(0i i<= (as_int (#end - #start)))";
+    "(0. <= #end)"; "(0. <= #start)";
+    "(#end <= 4294967294.)"; "(#end <= 4294967295.)";
+    "(#start < #end)"; "(#start <= 4294967294.)";
+    "((as_int (4294967295. - (#end + 1.))) i< (as_int (4294967295. - #end)))";
+    "((as_int (#end + 1.)) == (1i i+ (as_int #end)))";
+    "((#end + 1.) <= 4294967295.)"; "((#start + 1.) <= #end)"
+  ] in
+  let g = Gamma.init () in
+  List.iter (fun (name,typ) -> Gamma.update g name typ)
+    ["#cell",Type.Utf16Type; "#tailKeys",Type.SetType;
+     "#start",Type.NumberType; "#end",Type.NumberType;
+     "#tailValues",Type.ListType];
+  let gt = Gamma.as_hashtbl g in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t)::acc) gt []
+    |> List.sort Stdlib.compare in
+  let before_types = types () and before = Expr.Set.elements facts in
+  let core = Expr.Set.of_list [failed; Expr.UnOp (IsInt,n);
+    Expr.UnOp (IsInt,successor); bin FLessThanEqual (Expr.num 0.) i] in
+  let files () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let read name = let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+    Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+  let old = files () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) "nested upper core full original entailment is proved" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+        (Engine.PFS.of_list before) [goal] g);
+    Alcotest.(check int) "nested upper core positive emits only one native query" 1
+      (List.length (files () |> List.filter (fun name -> not (List.mem name old))));
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) core in
+    let observed = files () |> List.filter (fun name ->
+      not (List.mem name old) && String.starts_with ~prefix (read name)) in
+    Alcotest.(check int) "nested upper core actual four-original-atom native query" 1
+      (List.length observed);
+    Printf.printf "NESTED_UPPER_FINITE_NATIVE_QUERY[original]=%s\n%!" (List.hd observed);
+    List.iter (fun (label,kept,start,finish) ->
+      let weakened = Expr.Set.of_list (failed :: kept)
+        |> Expr.Set.add (bin ValueEqual i (Expr.num start))
+        |> Expr.Set.add (bin ValueEqual n (Expr.num finish)) in
+      Alcotest.(check bool) (label ^ " rejects the actual false entailment") false
+        (Solver.check_entailment Utils.Containers.SS.empty
+          (Engine.PFS.of_list (Expr.Set.elements (Expr.Set.remove failed weakened)))
+          [goal] g);
+      let old = files () in
+      let model = match Smt.exec_sat weakened gt with
+        | Some model -> model | None -> Alcotest.fail ("Missing native countermodel " ^ label) in
+      let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) weakened in
+      let observed = files () |> List.filter (fun name ->
+        not (List.mem name old) && String.starts_with ~prefix (read name)) in
+      Alcotest.(check int) (label ^ " has one actual complete native counterquery") 1
+        (List.length observed);
+      Printf.printf "NESTED_UPPER_FINITE_NATIVE_QUERY[%s]=%s\n%!" label (List.hd observed);
+      Printf.printf "NESTED_UPPER_FINITE_NATIVE_MODEL[%s]=%s\n%!" label
+        (Fmt.str "%a" Smt.pp_model model);
+      let lifted = Hashtbl.create 2 in
+      Smt.lift_model model gt (Hashtbl.add lifted) (Expr.Set.of_list [i;n]);
+      List.iter (fun (name,expected) -> match Hashtbl.find_opt lifted name with
+        | Some (Expr.Lit (Literal.Num actual)) ->
+            Alcotest.(check int64) (label ^ " exact endpoint model " ^ name)
+              (Int64.bits_of_float expected) (Int64.bits_of_float actual)
+        | _ -> Alcotest.fail ("Missing native Number endpoint " ^ name))
+        ["#start",start; "#end",finish]
+    ) ["without-nonnegativity",[Expr.UnOp (IsInt,n);Expr.UnOp (IsInt,successor)],
+         (-. Float.max_float),Float.max_float;
+       "without-finiteness",[bin FLessThanEqual (Expr.num 0.) i],0.,infinity]);
+  Alcotest.(check bool) "nested upper core retains original facts" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "nested upper core retains original gamma" true
+    (before_types = types ())
+
+let trimmed_natural_counter_query () =
+  (* Exact original Skip212 query233; all facts and gamma are retained below.
+     SAT must come from the complete native query, never from the seed alone. *)
+  let facts = parse_gil_set [
+    "(! (#output == #loc_1))";
+    "(is_int #k)";
+    "(is_int #n)";
+    "(is_int #to)";
+    "(is_int (#k + 1.))";
+    "(0i i<= (l-len #chosen))";
+    "(0i i<= (l-len #dhTailValues))";
+    "(0i i<= (l-len #locals))";
+    "(0i i<= (l-len #prefix))";
+    "(0i i<= (as_int (#k - 0.)))";
+    "(0i i<= (as_int (#n - (#k + 1.))))";
+    "(0. <= #k)";
+    "(0. <= #to)";
+    "(#k < #n)";
+    "(#k <= 4294967294.)";
+    "(#k <= 4294967295.)";
+    "(#n <= 4294967295.)";
+    "(#to <= 4294967295.)";
+    "(#to <= #k)";
+    "((u16-len #dhHead) i<= 9007199254740991i)";
+    "((u16-trim #dhHead) == u16\"\")";
+    "((as_int #k) == (l-len #prefix))";
+    "((as_int #to) == (l-len #chosen))";
+    "((as_int (#k + 1.)) == (1i i+ (as_int #k)))";
+    "((as_int (#n - (#k + 1.))) i< (as_int (#n - #k)))";
+    "((#k + 1.) <= #n)";
+  ] in
+  (* Exact original Number-only subset selected by the inherited precheck. *)
+  let numeric = parse_gil_set [
+    "(is_int #k)";
+    "(is_int #n)";
+    "(is_int #to)";
+    "(is_int (#k + 1.))";
+    "(0. <= #k)";
+    "(0. <= #to)";
+    "(#k < #n)";
+    "(#k <= 4294967294.)";
+    "(#k <= 4294967295.)";
+    "(#n <= 4294967295.)";
+    "(#to <= 4294967295.)";
+    "(#to <= #k)";
+    "((#k + 1.) <= #n)";
+  ] in
+  let gamma = Gamma.init () in
+  List.iter (fun (name,typ) -> Gamma.update gamma name typ) [
+    "#outKeys",Type.SetType;
+    "#env",Type.ObjectType;
+    "#chosen",Type.ListType;
+    "#dhTailValues",Type.ListType;
+    "#dhHead",Type.Utf16Type;
+    "#prefix",Type.ListType;
+    "#output",Type.ObjectType;
+    "#dhTailKeys",Type.SetType;
+    "#dhPrefixKeys",Type.SetType;
+    "#to",Type.NumberType;
+    "#k",Type.NumberType;
+    "#n",Type.NumberType;
+    "#locals",Type.ListType;
+  ];
+  let g = Gamma.as_hashtbl gamma in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t)::acc) g []
+    |> List.sort Stdlib.compare in
+  let before_types = types () in
+  let files () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let read name = let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+    Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+  let prefix facts = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+    (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) facts in
+  let seed facts k n target head = List.fold_left (fun acc (name,value) ->
+    Expr.Set.add (bin ValueEqual (Expr.LVar name) value) acc) facts
+    ["#k",Expr.num k;"#n",Expr.num n;"#to",Expr.num target;
+     "#dhHead",Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical head))] in
+  let fresh old = files () |> List.filter (fun name -> not (List.mem name old))
+    |> List.sort (fun a b -> Int.compare
+      (Scanf.sscanf a "query_%d.smt2" Fun.id) (Scanf.sscanf b "query_%d.smt2" Fun.id)) in
+  let observe label facts inherited expected k n target head =
+    let before = Expr.Set.elements facts and old = files () in
+    Printf.printf "TRIMMED_COUNTER_BEGIN=%s\n%!" label;
+    let model = Smt.check_sat facts g in
+    let emitted = fresh old in
+    Alcotest.(check int) (label ^ " native inherited probe and complete witness accounting") 2
+      (List.length emitted);
+    Alcotest.(check bool) (label ^ " exact inherited original numeric-subset probe") true
+      (String.starts_with ~prefix:(prefix inherited) (read (List.hd emitted)));
+    Alcotest.(check int) (label ^ " exactly one native complete witness query") 1
+      (List.length (List.filter (fun name -> String.starts_with
+        ~prefix:(prefix expected) (read name)) emitted));
+    Alcotest.(check bool) (label ^ " exact complete native query including every premise") true
+      (String.starts_with ~prefix:(prefix expected) (read (List.nth emitted 1)));
+    Printf.printf "TRIMMED_COUNTER_INHERITED_QUERY[%s]=%s\n%!" label (List.hd emitted);
+    Printf.printf "TRIMMED_COUNTER_NATIVE_QUERY[%s]=%s\n%!" label (List.nth emitted 1);
+    let model = match model with Some model -> model
+      | None -> Alcotest.fail (label ^ " missing actual native SAT model") in
+    Printf.printf "TRIMMED_COUNTER_NATIVE_MODEL[%s]=%s\n%!" label
+      (Fmt.str "%a" Smt.pp_model model);
+    let lifted = Hashtbl.create 4 in
+    Smt.lift_model model g (Hashtbl.add lifted)
+      (Expr.Set.of_list (List.map (fun x -> Expr.LVar x) ["#k";"#n";"#to";"#dhHead"]));
+    List.iter (fun (name,want) -> match Hashtbl.find_opt lifted name with
+      | Some (Expr.Lit (Literal.Num actual)) ->
+          Alcotest.(check int64) (label ^ " actual native Number " ^ name)
+            (Int64.bits_of_float want) (Int64.bits_of_float actual)
+      | _ -> Alcotest.fail (label ^ " missing Number model " ^ name))
+      ["#k",k;"#n",n;"#to",target];
+    (match Hashtbl.find_opt lifted "#dhHead" with
+      | Some (Expr.Lit (Literal.Utf16String actual)) ->
+          Alcotest.(check bool) (label ^ " actual UTF16 witness") true
+            (actual = Utils.Utf16.of_canonical head)
+      | _ -> Alcotest.fail (label ^ " missing UTF16 model"));
+    Alcotest.(check bool) (label ^ " retains original facts") true
+      (before = Expr.Set.elements facts);
+    Alcotest.(check bool) (label ^ " retains original gamma") true
+      (before_types = types ()) in
+  let saved = !Config.dump_smt in Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    observe "original" facts numeric (seed facts 0. 1. 0. "") 0. 1. 0. "";
+    let literal = seed facts 2. 3. 1. " " in
+    let literal_numeric = List.fold_left (fun acc (name,value) ->
+      Expr.Set.add (bin ValueEqual (Expr.LVar name) (Expr.num value)) acc) numeric
+      ["#k",2.;"#n",3.;"#to",1.] in
+    observe "literal-counters-and-space" literal literal_numeric literal 2. 3. 1. " ";
+    let conflict = facts |> Expr.Set.add
+      (bin Equal (Expr.UnOp (LstLen,Expr.LVar "#prefix")) (Expr.int 0))
+      |> Expr.Set.add (bin Equal (Expr.UnOp (LstLen,Expr.LVar "#prefix")) (Expr.int 1)) in
+    let before = Expr.Set.elements conflict and old = files () in
+    Printf.printf "TRIMMED_COUNTER_BEGIN=list-conflict\n%!";
+    Alcotest.(check bool) "complete non-numeric contradiction rejects an always-SAT seed" true
+      (Option.is_none (Smt.check_sat conflict g));
+    let emitted = fresh old in
+    Alcotest.(check bool) "actual full conflict witness query was checked natively" true
+      (List.exists (fun name -> String.starts_with
+        ~prefix:(prefix (seed conflict 0. 1. 0. "")) (read name)) emitted);
+    Printf.printf "TRIMMED_COUNTER_NATIVE_RESULT[list-conflict]=UNSAT:%s\n%!"
+      (String.concat "," emitted);
+    Alcotest.(check bool) "conflict retains original facts" true
+      (before = Expr.Set.elements conflict);
+    Alcotest.(check bool) "conflict retains original gamma" true
+      (before_types = types ()))
+
+
+let successor_order_original_core () =
+  (* Exact original Skip213 query243; omit only its negated conclusion when
+     passing the complete original premises through ordinary entailment. *)
+  let original = parse_gil_set [
+    "(! (#output == #loc_1))";
+    "(! (#to <= (#k + 1.)))";
+    "(is_int #k)";
+    "(is_int #n)";
+    "(is_int #to)";
+    "(is_int (#k + 1.))";
+    "(0i i<= (l-len #chosen))";
+    "(0i i<= (l-len #dhTailValues))";
+    "(0i i<= (l-len #locals))";
+    "(0i i<= (l-len #prefix))";
+    "(0i i<= (as_int (#k - 0.)))";
+    "(0i i<= (as_int (#n - (#k + 1.))))";
+    "(0. <= #k)";
+    "(0. <= #to)";
+    "(#k < #n)";
+    "(#k <= 4294967294.)";
+    "(#k <= 4294967295.)";
+    "(#n <= 4294967295.)";
+    "(#to <= 4294967295.)";
+    "(#to <= #k)";
+    "((u16-len #dhHead) i<= 9007199254740991i)";
+    "((u16-trim #dhHead) == u16\"\")";
+    "((as_int #k) == (l-len #prefix))";
+    "((as_int #to) == (l-len #chosen))";
+    "((as_int (#k + 1.)) == (1i i+ (as_int #k)))";
+    "((as_int (#n - (#k + 1.))) i< (as_int (#n - #k)))";
+    "((#k + 1.) <= #n)";
+  ] in
+  let start = Expr.LVar "#k" and position = Expr.LVar "#to" in
+  let goal = bin FLessThanEqual position (bin FPlus start (Expr.num 1.)) in
+  let failed = not_ goal in
+  Alcotest.(check bool) "saved query contains the exact failed conclusion" true
+    (Expr.Set.mem failed original);
+  let facts = Expr.Set.remove failed original in
+  let g = Gamma.init () in
+  List.iter (fun (name,typ) -> Gamma.update g name typ) [
+    "#chosen",Type.ListType;
+    "#dhTailValues",Type.ListType;
+    "#dhHead",Type.Utf16Type;
+    "#prefix",Type.ListType;
+    "#output",Type.ObjectType;
+    "#dhTailKeys",Type.SetType;
+    "#dhPrefixKeys",Type.SetType;
+    "#to",Type.NumberType;
+    "#k",Type.NumberType;
+    "#n",Type.NumberType;
+    "#locals",Type.ListType;
+  ];
+  let gt = Gamma.as_hashtbl g in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t)::acc) gt []
+    |> List.sort Stdlib.compare in
+  let before_types = types () and before = Expr.Set.elements facts in
+  let core = Expr.Set.of_list [failed;bin FLessThanEqual position start] in
+  let files () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let read name = let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+    Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+  let prefix fs = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+    (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs in
+  let old = files () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved) (fun () ->
+    Alcotest.(check bool) "successor order full original entailment is proved" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+        (Engine.PFS.of_list before) [goal] g);
+    let produced = files () |> List.filter (fun n -> not (List.mem n old)) in
+    Alcotest.(check int) "cold positive emits only one actual native query" 1
+      (List.length produced);
+    let observed = List.filter (fun n ->
+      String.starts_with ~prefix:(prefix core) (read n)) produced in
+    Alcotest.(check int) "positive native query contains exactly two original atoms" 1
+      (List.length observed);
+    Printf.printf "SUCCESSOR_ORDER_NATIVE_QUERY[original]=%s\n%!" (List.hd observed);
+    List.iter (fun (label,control_goal,kept,k,to_) ->
+      let premises = Expr.Set.of_list kept
+        |> Expr.Set.add (bin ValueEqual start (Expr.num k))
+        |> Expr.Set.add (bin ValueEqual position (Expr.num to_)) in
+      Alcotest.(check bool) (label ^ " rejects the actual false entailment") false
+        (Solver.check_entailment Utils.Containers.SS.empty
+          (Engine.PFS.of_list (Expr.Set.elements premises)) [control_goal] g);
+      let counterquery = Expr.Set.add (not_ control_goal) premises in
+      let old = files () in
+      let model = match Smt.exec_sat counterquery gt with
+        | Some model -> model
+        | None -> Alcotest.fail ("Missing actual native countermodel " ^ label) in
+      let produced = files () |> List.filter (fun n -> not (List.mem n old)) in
+      Alcotest.(check int) (label ^ " emits one complete native counterquery") 1
+        (List.length produced);
+      let observed = List.filter (fun n ->
+        String.starts_with ~prefix:(prefix counterquery) (read n)) produced in
+      Alcotest.(check int) (label ^ " counterquery preserves all control atoms") 1
+        (List.length observed);
+      Printf.printf "SUCCESSOR_ORDER_NATIVE_QUERY[%s]=%s\n%!" label (List.hd observed);
+      Printf.printf "SUCCESSOR_ORDER_NATIVE_MODEL[%s]=%s\n%!" label
+        (Fmt.str "%a" Smt.pp_model model);
+      let lifted = Hashtbl.create 2 in
+      Smt.lift_model model gt (Hashtbl.add lifted)
+        (Expr.Set.of_list [start;position]);
+      List.iter (fun (name,expected) -> match Hashtbl.find_opt lifted name with
+        | Some (Expr.Lit (Literal.Num actual)) ->
+            Alcotest.(check int64) (label ^ " exact binary64 model " ^ name)
+              (Int64.bits_of_float expected) (Int64.bits_of_float actual)
+        | _ -> Alcotest.fail ("Missing actual Number countermodel " ^ name))
+        ["#k",k;"#to",to_]
+    ) ["without-order",goal,[],0.,2.;
+       "wrong-increment",bin FLessThanEqual position
+         (bin FPlus start (Expr.num (-1.))),
+         [bin FLessThanEqual position start],0.,0.]);
+  Alcotest.(check bool) "successor order retains original facts" true
+    (before = Expr.Set.elements facts);
+  Alcotest.(check bool) "successor order retains original gamma" true
+    (before_types = types ())
+
+
+let aliased_counter_original_witness () =
+  (* Exact saved Skip215 candidate query ASTs/Gamma, not an attribution of the
+     normal log's three unknowns to query IDs. Only fresh native models count. *)
+  let originals = [
+    ("q133", parse_gil_set [
+      "(is_int #end)";
+      "(is_int #start)";
+      "(is_int (#end + 1.))";
+      "(0i i<= (as_int (4294967295. - (#end + 1.))))";
+      "(0i i<= (as_int (#end - #start)))";
+      "(0. <= #end)";
+      "(0. <= #start)";
+      "(#end <= 4294967294.)";
+      "(#end <= 4294967295.)";
+      "(#start == #end)";
+      "(#start <= #end)";
+      "((as_int (4294967295. - (#end + 1.))) i< (as_int (4294967295. - #end)))";
+      "((as_int (#end + 1.)) == (1i i+ (as_int #end)))";
+      "((#end + 1.) <= 4294967295.)";
+    ], [ "#start",Type.NumberType; "#a",Type.ObjectType; "#item",Type.Utf16Type; "#end",Type.NumberType ]);
+    ("q143", parse_gil_set [
+      "(! (#end v== (#end + 1.)))";
+      "(is_int #end)";
+      "(is_int #start)";
+      "(is_int (#end + 1.))";
+      "(0i i<= (as_int (4294967295. - (#end + 1.))))";
+      "(0i i<= (as_int (#end - #start)))";
+      "(0. <= #end)";
+      "(0. <= #start)";
+      "(#end <= 4294967294.)";
+      "(#end <= 4294967295.)";
+      "(#start == #end)";
+      "(#start <= #end)";
+      "((as_int (4294967295. - (#end + 1.))) i< (as_int (4294967295. - #end)))";
+      "((as_int (#end + 1.)) == (1i i+ (as_int #end)))";
+      "((#end + 1.) <= 4294967295.)";
+    ], [ "#start",Type.NumberType; "#end",Type.NumberType ]);
+    ("q144", parse_gil_set [
+      "(! (#start v== (#end + 1.)))";
+      "(is_int #end)";
+      "(is_int #start)";
+      "(is_int (#end + 1.))";
+      "(0i i<= (as_int (4294967295. - (#end + 1.))))";
+      "(0i i<= (as_int (#end - #start)))";
+      "(0. <= #end)";
+      "(0. <= #start)";
+      "(#end <= 4294967294.)";
+      "(#end <= 4294967295.)";
+      "(#start == #end)";
+      "(#start <= #end)";
+      "((as_int (4294967295. - (#end + 1.))) i< (as_int (4294967295. - #end)))";
+      "((as_int (#end + 1.)) == (1i i+ (as_int #end)))";
+      "((#end + 1.) <= 4294967295.)";
+    ], [ "#start",Type.NumberType; "#end",Type.NumberType ])
+  ] in
+  let files () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let read name = let ch = open_in_bin (Filename.concat "gillian_smt_queries" name) in
+    Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+  let compact text = String.to_seq text
+    |> Seq.filter (fun c -> not (List.mem c [' ';'\t';'\r';'\n']))
+    |> String.of_seq in
+  let prefix fs gamma = compact (Fmt.str
+    "GIL query:\nFS: %a\nGAMMA: %a\nEncoded as SMT Query:"
+    (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs Fmt.(Dump.hashtbl string (of_to_string Type.str)) gamma) in
+  let model_values label model gamma value =
+    Printf.printf "ALIASED_COUNTER_NATIVE_MODEL[%s]=%s\n%!" label
+      (Fmt.str "%a" Smt.pp_model model);
+    let lifted = Hashtbl.create 2 in
+    Smt.lift_model model gamma (Hashtbl.add lifted)
+      (Expr.Set.of_list [Expr.LVar "#start";Expr.LVar "#end"]);
+    List.iter (fun name -> match Hashtbl.find_opt lifted name with
+      | Some (Expr.Lit (Literal.Num actual)) ->
+          Alcotest.(check int64) (label ^ " actual binary64 " ^ name)
+            (Int64.bits_of_float value) (Int64.bits_of_float actual)
+      | _ -> Alcotest.fail (label ^ " missing native Number model"))
+      ["#start";"#end"] in
+  let gamma rows = let g=Hashtbl.create 4 in
+    List.iter (fun (n,t) -> Hashtbl.add g n t) rows; g in
+  let gamma_rows g = Hashtbl.fold (fun n t acc -> (n,t)::acc) g []
+    |> List.sort Stdlib.compare in
+  let strengthened fs = List.fold_left (fun acc name -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar name) (Expr.num 1.)) acc) fs ["#start";"#end"] in
+  let observe label old gamma expected count =
+    let produced=files () |> List.filter (fun n -> not (List.mem n old)) in
+    Alcotest.(check int) (label ^ " actual native sequence length") count (List.length produced);
+    List.iter (fun (tag,fs) ->
+      let matched=List.filter (fun n -> String.starts_with ~prefix:(prefix fs gamma) (compact (read n))) produced in
+      Alcotest.(check int) (label ^ " exact complete native " ^ tag) 1 (List.length matched);
+      Printf.printf "ALIASED_COUNTER_NATIVE_QUERY[%s:%s]=%s\n%!" label tag (List.hd matched)) expected in
+  let module L = Logging in
+  L.Mode.set_mode (Enabled Normal);
+  L.initialize [ L.file_reporter ];
+  L.normal (fun m -> m "ALIASED_COUNTER_NORMAL_BEGIN");
+  let saved = !Config.dump_smt in Config.dump_smt := true;
+  Fun.protect ~finally:(fun () ->
+    Config.dump_smt := saved;
+    L.wrap_up (); L.initialize []; L.Mode.set_mode (Enabled Verbose)) (fun () ->
+    List.iter (fun (label,fs,types) ->
+      let g=gamma types in let before=Expr.Set.elements fs and before_g=gamma_rows g in
+      let old=files () in
+      Alcotest.(check bool) (label ^ " native SAT cannot prove UNSAT") false (Smt.proves_unsat fs g);
+      observe label old g ["hint",strengthened fs] 1;
+      let model=match Smt.check_sat fs g with Some m -> m
+        | None -> Alcotest.fail (label ^ " missing original-key native SAT cache") in
+      model_values label model g 1.;
+      Alcotest.(check bool) (label ^ " original assertions unchanged") true (before=Expr.Set.elements fs);
+      Alcotest.(check bool) (label ^ " original Gamma unchanged") true (before_g=gamma_rows g)
+    ) originals;
+    let _,base,types=List.hd originals in let g=gamma types in
+    let bad_hint=Expr.Set.add (bin Equal (Expr.LVar "#end") (Expr.num 5.)) base in
+    let old=files () in
+    Alcotest.(check bool) "conflicting hint requires original SAT fallback" false
+      (Smt.proves_unsat bad_hint g);
+    observe "conflicting-hint" old g ["hint",strengthened bad_hint;"fallback",bad_hint] 2;
+    let model=match Smt.check_sat bad_hint g with Some m -> m
+      | None -> Alcotest.fail "Missing fallback SAT model" in
+    model_values "conflicting-hint" model g 5.;
+    let contradiction=Expr.Set.add (bin FLessThan (Expr.LVar "#start") (Expr.LVar "#end")) base in
+    let old=files () in
+    Alcotest.(check bool) "complete alias contradiction never yields SAT" true
+      (Smt.proves_unsat contradiction g);
+    observe "contradiction" old g ["hint",strengthened contradiction;"fallback",contradiction] 2;
+    (* Weaker eligibility diagnostics isolate the missing gate. They do not
+       replace the frozen heavy controls or establish their optional status. *)
+    let minimal = parse_gil_set [
+      "(is_int #start)"; "(is_int #end)";
+      "(0. <= #start)"; "(0. <= #end)";
+    ] in
+    let missing_alias = Expr.Set.add
+      (bin FLessThanEqual (Expr.LVar "#end") (Expr.num 4294967295.)) minimal in
+    let missing_bound = Expr.Set.add
+      (bin Equal (Expr.LVar "#start") (Expr.LVar "#end")) minimal in
+    List.iter (fun (label,fs) -> let old=files () in
+      let before=Expr.Set.elements fs and before_g=gamma_rows g in
+      Alcotest.(check bool) (label ^ " ineligible query remains feasible") false
+        (Smt.proves_unsat fs g);
+      observe label old g ["fallback",fs] 1;
+      let before_model=List.sort String.compare (files ()) in
+      let model=match Smt.check_sat fs g with Some m -> m
+        | None -> Alcotest.fail (label ^ " missing unhinted native SAT model") in
+      Alcotest.(check bool) (label ^ " native model retrieval adds no query") true
+        (before_model=List.sort String.compare (files ()));
+      Alcotest.(check bool) (label ^ " original assertions unchanged") true
+        (before=Expr.Set.elements fs);
+      Alcotest.(check bool) (label ^ " original Gamma unchanged") true
+        (before_g=gamma_rows g);
+      Printf.printf "ALIASED_COUNTER_NATIVE_MODEL[%s]=%s\n%!" label
+        (Fmt.str "%a" Smt.pp_model model))
+      ["without-alias",missing_alias; "without-bound",missing_bound];
+    L.normal (fun m -> m "ALIASED_COUNTER_NORMAL_END"))
+
+
+let nonempty_counter_original_witness () =
+  (* Saved Skip216 q175 FS/Gamma in full. Query/unknown attribution is
+     provisional; these tests require fresh native results, never the dump. *)
+  let fs = parse_gil_set [
+    "(! (#start == #end))";
+    "(is_int #end)";
+    "(is_int #start)";
+    "(is_int (#end + 1.))";
+    "(is_int (#start + 1.))";
+    "(0i i<= (l-len #tailValues))";
+    "(0i i<= (as_int (4294967295. - (#end + 1.))))";
+    "(0i i<= (as_int (#end - #start)))";
+    "(0i i<= (as_int (#end - (#start + 1.))))";
+    "(0. <= #end)";
+    "(0. <= #start)";
+    "(#end <= 4294967294.)";
+    "(#end <= 4294967295.)";
+    "(#start < #end)";
+    "(#start <= 4294967294.)";
+    "((as_int (4294967295. - (#end + 1.))) i< (as_int (4294967295. - #end)))";
+    "((as_int (#end + 1.)) == (1i i+ (as_int #end)))";
+    "((as_int (#end - (#start + 1.))) i< (as_int (#end - #start)))";
+    "((as_int (#start + 1.)) == (1i i+ (as_int #start)))";
+    "((#end + 1.) <= 4294967295.)";
+    "((#start + 1.) <= #end)";
+  ] in
+  let gamma = Hashtbl.create 8 in
+  List.iter (fun (name, typ) -> Hashtbl.add gamma name typ) [
+    "#cell",Type.Utf16Type; "#tailKeys",Type.SetType;
+    "#start",Type.NumberType; "#a",Type.ObjectType; "#item",Type.Utf16Type;
+    "#end",Type.NumberType; "#tailValues",Type.ListType
+  ];
+  let files () = if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else [] in
+  let read name = let ch=open_in_bin (Filename.concat "gillian_smt_queries" name) in
+    Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+  let compact text = String.to_seq text
+    |> Seq.filter (fun c -> not (List.mem c [' ';'\t';'\r';'\n'])) |> String.of_seq in
+  let prefix facts = compact (Fmt.str
+    "GIL query:\nFS: %a\nGAMMA: %a\nEncoded as SMT Query:"
+    (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) facts
+    Fmt.(Dump.hashtbl string (of_to_string Type.str)) gamma) in
+  let hints facts lower upper = List.fold_left (fun acc (name,value) ->
+    Expr.Set.add (bin ValueEqual (Expr.LVar name) (Expr.num value)) acc)
+    facts ["#start",lower; "#end",upper] in
+  let observe label old expected =
+    let produced=files () |> List.filter (fun n -> not (List.mem n old)) in
+    Alcotest.(check int) (label ^ " actual native sequence length")
+      (List.length expected) (List.length produced);
+    List.iter (fun (tag,facts) ->
+      let matches=List.filter (fun name ->
+        String.starts_with ~prefix:(prefix facts) (compact (read name))) produced in
+      Alcotest.(check int) (label ^ " exact complete native " ^ tag) 1 (List.length matches);
+      Printf.printf "NONEMPTY_COUNTER_NATIVE_QUERY[%s:%s]=%s\n%!"
+        label tag (List.hd matches)) expected in
+  let gamma_rows () = Hashtbl.fold (fun n t acc -> (n,t)::acc) gamma []
+    |> List.sort Stdlib.compare in
+  let check_model label model lower upper =
+    Printf.printf "NONEMPTY_COUNTER_NATIVE_MODEL[%s]=%s\n%!" label
+      (Fmt.str "%a" Smt.pp_model model);
+    let lifted=Hashtbl.create 2 in
+    Smt.lift_model model gamma (Hashtbl.add lifted)
+      (Expr.Set.of_list [Expr.LVar "#start";Expr.LVar "#end"]);
+    List.iter (fun (name,expected) -> match Hashtbl.find_opt lifted name with
+      | Some (Expr.Lit (Literal.Num actual)) ->
+          Alcotest.(check int64) (label ^ " actual binary64 " ^ name)
+            (Int64.bits_of_float expected) (Int64.bits_of_float actual)
+      | _ -> Alcotest.fail (label ^ " missing native Number model"))
+      ["#start",lower;"#end",upper] in
+  let cached_model label facts =
+    let old=List.sort String.compare (files ()) in
+    let result=Smt.check_sat facts gamma in
+    Alcotest.(check bool) (label ^ " native model retrieval adds no query") true
+      (old=List.sort String.compare (files ()));
+    match result with Some model -> model
+      | None -> Alcotest.fail (label ^ " missing cached native SAT model") in
+  let retained label before before_g facts =
+    Alcotest.(check bool) (label ^ " original assertions unchanged") true
+      (before=Expr.Set.elements facts);
+    Alcotest.(check bool) (label ^ " original Gamma unchanged") true
+      (before_g=gamma_rows ()) in
+  let module L=Logging in
+  L.Mode.set_mode (Enabled Normal);L.initialize [L.file_reporter];
+  L.normal (fun m -> m "NONEMPTY_COUNTER_NORMAL_BEGIN");
+  let saved= !Config.dump_smt in Config.dump_smt:=true;
+  Fun.protect ~finally:(fun () -> Config.dump_smt:=saved;
+    L.wrap_up ();
+    (* Later groups reset file.log. Preserve this group's actual native rows
+       in its selected output, including when an assertion fails. *)
+    let c=open_in_bin "file.log" in
+    Fun.protect ~finally:(fun () -> close_in c) (fun () ->
+      let rec capture () = match input_line c with
+        | line ->
+            if String.starts_with ~prefix:"SMT_QUERY_RESULT " line then
+              Printf.printf "NONEMPTY_COUNTER_NATIVE_RESULT %s\n%!" line;
+            capture ()
+        | exception End_of_file -> () in
+      capture ());
+    L.initialize [];L.Mode.set_mode (Enabled Verbose)) (fun () ->
+    let before=Expr.Set.elements fs and before_g=gamma_rows () in
+    let old=files () in
+    Alcotest.(check bool) "q175 native SAT cannot prove UNSAT" false
+      (Smt.proves_unsat fs gamma);
+    observe "q175" old ["hint",hints fs 0. 1.];
+    check_model "q175" (cached_model "q175" fs) 0. 1.;
+    retained "q175" before before_g fs;
+    (* Fresh key, with one genuine Boolean fact, checks required check_sat
+       directly without a preceding optional probe or inherited model cache. *)
+    Hashtbl.add gamma "#probe" Type.BooleanType;
+    let direct=Expr.Set.add (bin Equal (Expr.LVar "#probe") (Expr.Lit (Literal.Bool true))) fs in
+    let before=Expr.Set.elements direct and before_g=gamma_rows () in
+    let old=files () in
+    let model=match Smt.check_sat direct gamma with Some model -> model
+      | None -> Alcotest.fail "Missing direct full native SAT model" in
+    observe "direct" old ["hint",hints direct 0. 1.];
+    check_model "direct" model 0. 1.;
+    ignore (cached_model "direct" direct);retained "direct" before before_g direct;
+    (* This focused fallback control keeps the strict finite natural pair
+       and a genuine Boolean fact. Full q175/direct contexts above stay exact.
+       Native SAT must precede the unchanged cache-only/model assertions. *)
+    let conflict_base=parse_gil_set [
+      "(is_int #start)"; "(is_int #end)";
+      "(0. <= #start)"; "(0. <= #end)";
+      "(#start <= 4294967294.)"; "(#end <= 4294967294.)";
+      "(#start < #end)"; "(! (#start == #end))";
+      "(#probe == true)"
+    ] in
+    let conflict=Expr.Set.add (bin Equal (Expr.LVar "#start") (Expr.num 5.))
+      (Expr.Set.add (bin Equal (Expr.LVar "#end") (Expr.num 6.)) conflict_base) in
+    let before=Expr.Set.elements conflict and before_g=gamma_rows () in
+    let old=files () in
+    Alcotest.(check bool) "conflicting hint requires original SAT fallback" false
+      (Smt.proves_unsat conflict gamma);
+    observe "conflicting-hint" old ["hint",hints conflict 0. 1.;"fallback",conflict];
+    check_model "conflicting-hint" (cached_model "conflicting-hint" conflict) 5. 6.;
+    retained "conflicting-hint" before before_g conflict;
+    let contradiction=Expr.Set.add (bin Equal (Expr.LVar "#probe")
+      (Expr.Lit (Literal.Bool false))) direct in
+    let before=Expr.Set.elements contradiction and before_g=gamma_rows () in
+    let old=files () in
+    Alcotest.(check bool) "complete nonnumeric contradiction never yields SAT" true
+      (Smt.proves_unsat contradiction gamma);
+    observe "contradiction" old ["hint",hints contradiction 0. 1.;"fallback",contradiction];
+    retained "contradiction" before before_g contradiction;
+    (* Full retained q122 native FS/Gamma, distinct from caller provenance.
+       Lists remain unconstrained; hints bind only the two Number endpoints. *)
+    let span_base = parse_gil_set [
+      "(is_int #end)"; "(is_int #start)";
+      "(0i i<= (l-len #tailValues))"; "(0i i<= (l-len #values))";
+      "(0i i<= (as_int (#end - #start)))"; "(0. <= #start)";
+      "(#end <= 4294967294.)"; "(#end <= 4294967295.)"; "(#start < #end)"
+    ] in
+    let span_types = [
+      "#cell",Type.Utf16Type; "#tailKeys",Type.SetType; "#start",Type.NumberType;
+      "#a",Type.ObjectType; "#item",Type.Utf16Type; "#keys",Type.SetType;
+      "#values",Type.ListType; "#end",Type.NumberType; "#tailValues",Type.ListType
+    ] in
+    let span_command = "(check-sat)" in
+    let span_field name row =
+      let prefix = name ^ "=" in
+      match List.find_opt (String.starts_with ~prefix)
+        (String.split_on_char ' ' row) with
+      | Some value -> String.sub value (String.length prefix)
+          (String.length value - String.length prefix)
+      | None -> Alcotest.fail ("Missing strict-span native field " ^ name) in
+    let span_hint facts lower upper a b = List.fold_left
+      (fun acc (name,value) -> Expr.Set.add
+        (bin ValueEqual (Expr.LVar name) (Expr.num value)) acc)
+      facts [lower,a;upper,b] in
+    let span_fixture namespace reversed =
+      let lower = if namespace = "" then "#start" else
+        if reversed then "#z_span_lower" else "#" ^ namespace ^ "_start" in
+      let upper = if namespace = "" then "#end" else
+        if reversed then "#a_span_upper" else "#" ^ namespace ^ "_end" in
+      let names name = if name = "#start" then lower else
+        if name = "#end" then upper else if namespace = "" then name else
+          "#" ^ namespace ^ "_" ^ String.sub name 1 (String.length name - 1) in
+      let rename expression = Expr.map_opt (function
+        | Expr.LVar name -> Some (Expr.LVar (names name)),false
+        | expression -> Some expression,true) None expression |> Option.get in
+      let facts = Expr.Set.fold (fun expression acc ->
+        Expr.Set.add (rename expression) acc) span_base Expr.Set.empty in
+      Hashtbl.clear gamma;
+      List.iter (fun (name,typ) -> Hashtbl.add gamma (names name) typ)
+        (if reversed then List.rev span_types else span_types);
+      lower,upper,facts in
+    let span_observe label old expected =
+      let produced = files () |> List.filter (fun n -> not (List.mem n old)) in
+      Alcotest.(check int) (label ^ " actual native sequence length")
+        (List.length expected) (List.length produced);
+      let ch = open_in_bin "file.log" in
+      let log = Fun.protect ~finally:(fun () -> close_in ch)
+        (fun () -> really_input_string ch (in_channel_length ch)) in
+      let lines = String.split_on_char '\n' log in
+      let queries = List.map (fun (tag,facts,caller,result) ->
+        let matched = List.filter (fun n ->
+          String.starts_with ~prefix:(prefix facts) (compact (read n))) produced in
+        Alcotest.(check int) (label ^ " exact complete native " ^ tag)
+          1 (List.length matched);
+        let query = List.hd matched in
+        Printf.printf "NONEMPTY_COUNTER_NATIVE_QUERY[%s:%s]=%s\n%!" label tag query;
+        let start = "SMT_QUERY_RESULT query=" ^ query ^ " " in
+        let rows = List.filter (String.starts_with ~prefix:start) lines in
+        Alcotest.(check int) (label ^ " " ^ tag ^ " native result row")
+          1 (List.length rows);
+        let row = List.hd rows in
+        List.iter (fun (name,value) -> Alcotest.(check string)
+          (label ^ " " ^ tag ^ " " ^ name) value (span_field name row))
+          ["caller",caller;
+           "raw_unknown",(if caller = "required-complete" then "false" else "true");
+           "timeout_ms",(if caller = "required-complete" then "30000" else "1000");
+           "phase_selection","3"; "result",result];
+        Alcotest.(check bool) (label ^ " " ^ tag ^ " exact dispatch") true
+          (List.mem ("SMT_PRIMARY_CHECK_DISPATCH query=" ^ query ^
+            " command=" ^ span_command) lines);
+        query) expected in
+      let actual = lines |> List.filter
+        (String.starts_with ~prefix:"SMT_QUERY_RESULT ")
+        |> List.map (span_field "query") |> List.filter (fun n -> List.mem n queries) in
+      Alcotest.(check bool) (label ^ " ordered native result joins") true
+        (actual = queries) in
+    let span_run ?(via_proves=false) label lower upper facts expected wanted =
+      let original = Expr.Set.elements facts and original_types = gamma_rows () in
+      let old = files () in
+      let model = if via_proves then (
+        Alcotest.(check bool) (label ^ " native SAT cannot prove UNSAT") false
+          (Smt.proves_unsat facts gamma);
+        Smt.check_sat facts gamma) else Smt.check_sat facts gamma in
+      Alcotest.(check bool) (label ^ " native SAT result")
+        (Option.is_some wanted) (Option.is_some model);
+      span_observe label old expected;
+      (match model,wanted with
+       | Some model,Some (a,b) ->
+           Printf.printf "NONEMPTY_COUNTER_NATIVE_MODEL[%s]=%s\n%!" label
+             (Fmt.str "%a" Smt.pp_model model);
+           let lifted = Hashtbl.create 2 in
+           Smt.lift_model model gamma (Hashtbl.add lifted)
+             (Expr.Set.of_list [Expr.LVar lower;Expr.LVar upper]);
+           List.iter (fun (name,value) -> match Hashtbl.find_opt lifted name with
+             | Some (Expr.Lit (Literal.Num actual)) -> Alcotest.(check int64)
+                 (label ^ " actual binary64 " ^ name)
+                 (Int64.bits_of_float value) (Int64.bits_of_float actual)
+             | _ -> Alcotest.fail (label ^ " missing strict-span native model"))
+             [lower,a;upper,b]
+       | None,None -> ()
+       | _ -> Alcotest.fail (label ^ " inconsistent strict-span model status"));
+      let old = List.sort String.compare (files ()) in
+      let cached = Smt.check_sat facts gamma in
+      Alcotest.(check bool) (label ^ " cached SAT result")
+        (Option.is_some model) (Option.is_some cached);
+      Alcotest.(check bool) (label ^ " cached lookup adds no native query") true
+        (old = List.sort String.compare (files ()));
+      retained label original original_types facts in
+    List.iter (fun (label,namespace,reversed) ->
+      let lower,upper,facts = span_fixture namespace reversed in
+      span_run label lower upper facts
+        ["hint",span_hint facts lower upper 0. 1.,"optional-nonempty-counter","sat"]
+        (Some (0.,1.)))
+      ["q122-full","",false; "q122-renamed","q122_alpha",false;
+       "q122-role-order","q122_roles",true];
+    let lower,upper,facts = span_fixture "q122_conflict" false in
+    let facts = span_hint facts lower upper 5. 6. in
+    span_run "q122-conflicting-hint" lower upper facts
+      ["hint",span_hint facts lower upper 0. 1.,"optional-nonempty-counter","unsat";
+       "fallback",facts,"required-complete","sat"] (Some (5.,6.));
+    let lower,upper,facts = span_fixture "q122_contradiction" false in
+    let facts = Expr.Set.add (bin ValueEqual (Expr.LVar upper) (Expr.num 0.)) facts in
+    span_run "q122-original-contradiction" lower upper facts
+      ["hint",span_hint facts lower upper 0. 1.,"optional-nonempty-counter","unsat";
+       "fallback",facts,"required-complete","unsat"] None;
+    (* Easy full native fallback controls; these smaller frames do not replace q122. *)
+    List.iter (fun guard ->
+      let label = "strict-span-" ^ guard in
+      let lower = "#" ^ label ^ "_lower" and upper = "#" ^ label ^ "_upper" in
+      let a = Expr.LVar lower and b = Expr.LVar upper in
+      Hashtbl.clear gamma;
+      List.iter (fun name -> Hashtbl.add gamma name Type.NumberType) [lower;upper];
+      let upper_int = Expr.UnOp (IsInt,b)
+      and lower_zero = bin FLessThanEqual (Expr.num 0.) a
+      and upper_bound = bin FLessThanEqual b (Expr.num 10.)
+      and strict = bin FLessThan a b in
+      let facts = Expr.Set.of_list
+        [Expr.UnOp (IsInt,a);upper_int;lower_zero;upper_bound;strict;
+         bin ValueEqual a (Expr.num 5.);bin ValueEqual b (Expr.num 6.)] in
+      let facts = match guard with
+        | "no-upper-isint" -> Expr.Set.remove upper_int facts
+        | "no-lower-nonnegative" -> Expr.Set.remove lower_zero facts
+        | "no-upper-bound" -> Expr.Set.remove upper_bound facts
+        | "no-strict-link" -> Expr.Set.add (bin FLessThanEqual a b)
+            (Expr.Set.remove strict facts)
+        | "third-number" ->
+            let extra = "#" ^ label ^ "_extra" in
+            Hashtbl.add gamma extra Type.NumberType;
+            Expr.Set.add (bin ValueEqual (Expr.LVar extra) (Expr.num 7.)) facts
+        | _ -> Alcotest.fail "Unknown strict-span source control" in
+      let expected = if guard = "third-number" then
+        ["hint",span_hint facts lower upper 0. 1.,"optional-nonempty-counter","unsat";
+         "fallback",facts,"required-complete","sat"] else
+        ["fallback",facts,"required-complete","sat"] in
+      span_run label lower upper facts expected (Some (5.,6.)))
+      ["no-upper-isint";"no-lower-nonnegative";"no-upper-bound";
+       "no-strict-link";"third-number"];
+    (* Complete submitted q726 FS/Gamma; the unrelated Number remains an
+       original premise, never an added witness or an admission restriction. *)
+    let counter_base = parse_gil_set [
+      "(! (#lvar_461 == empty))";
+      "(is_int #index)";
+      "(is_int #length)";
+      "(is_int (#index + 1.))";
+      "(0i i<= (l-len #prefix))";
+      "(0i i<= (l-len #s05FilterRest))";
+      "(0i i<= (as_int (4294967295. - (#index + 1.))))";
+      "(0i i<= (as_int (#index - 0.)))";
+      "(0. <= #enumRank0)";
+      "(0. <= #index)";
+      "(0. <= #length)";
+      "(0. <= (#index + 1.))";
+      "(#before v== {{ u16\"d\", #old, true, true, true }})";
+      "(#enumRank0 == 0.)";
+      "(#enumRank0 <= 2.)";
+      "(#index == #index)";
+      "(#index < #length)";
+      "(#index <= 4294967294.)";
+      "(#index <= 4294967295.)";
+      "(#length == #length)";
+      "(#length <= 4294967295.)";
+      "(#lvar_462 v== {{ }})";
+      "((as_int (4294967295. - (#index + 1.))) i< (as_int (4294967295. - #index)))";
+      "((as_int (#index + 1.)) == (1i i+ (as_int #index)))";
+      "((#index + 1.) <= 4294967295.)";
+      "((#index + 1.) <= #length)";
+    ] in
+    let counter_types = [
+      "#lvar_582",Type.ObjectType;
+      "#lvar_574",Type.ObjectType;
+      "#lvar_573",Type.ObjectType;
+      "#length",Type.NumberType;
+      "#helperTdz",Type.ObjectType;
+      "#lvar_472",Type.ObjectType;
+      "#lvar_475",Type.ObjectType;
+      "#s05FilterItem",Type.Utf16Type;
+      "#lvar_444",Type.ObjectType;
+      "#prefixKeys",Type.SetType;
+      "#index",Type.NumberType;
+      "#lvar_448",Type.ObjectType;
+      "#s05FilterRestKeys",Type.SetType;
+      "#lvar_446",Type.ObjectType;
+      "#lvar_445",Type.ObjectType;
+      "#lvar_576",Type.ObjectType;
+      "#s05FilterRest",Type.ListType;
+      "#prefix",Type.ListType;
+      "#enumRank0",Type.NumberType;
+      "#lvar_473",Type.ObjectType;
+      "#lvar_561",Type.ObjectType;
+    ] in
+    let counter_fixture namespace reversed =
+      let lower = if namespace = "" then "#index" else
+        if reversed then "#z_pair_lower" else "#" ^ namespace ^ "_index" in
+      let upper = if namespace = "" then "#length" else
+        if reversed then "#a_pair_upper" else "#" ^ namespace ^ "_length" in
+      let names name = if name = "#index" then lower else
+        if name = "#length" then upper else if namespace = "" then name else
+          "#" ^ namespace ^ "_" ^ String.sub name 1 (String.length name - 1) in
+      let rename expression = Expr.map_opt (function
+        | Expr.LVar name -> Some (Expr.LVar (names name)),false
+        | expression -> Some expression,true) None expression |> Option.get in
+      let facts = Expr.Set.fold (fun expression acc ->
+        Expr.Set.add (rename expression) acc) counter_base Expr.Set.empty in
+      Hashtbl.clear gamma;
+      List.iter (fun (name,typ) -> Hashtbl.add gamma (names name) typ)
+        (if reversed then List.rev counter_types else counter_types);
+      lower,upper,facts in
+    List.iter (fun (label,namespace,reversed) ->
+      let lower,upper,facts = counter_fixture namespace reversed in
+      span_run label lower upper facts
+        ["hint",span_hint facts lower upper 0. 1.,"optional-nonempty-counter","sat"]
+        (Some (0.,1.)))
+      ["q726-full","",false; "q726-renamed","q726_alpha",false;
+       "q726-role-order","q726_roles",true];
+    let lower,upper,facts = counter_fixture "q726_proves" false in
+    Hashtbl.add gamma "#q726_proves_probe" Type.BooleanType;
+    let facts = Expr.Set.add (bin Equal (Expr.LVar "#q726_proves_probe")
+      (Expr.Lit (Literal.Bool true))) facts in
+    span_run ~via_proves:true "q726-proves-unsat" lower upper facts
+      ["hint",span_hint facts lower upper 0. 1.,"optional-nonempty-counter","sat"]
+      (Some (0.,1.));
+    let lower,upper,facts = counter_fixture "q726_conflict" false in
+    let facts = span_hint facts lower upper 5. 6. in
+    span_run "q726-conflicting-hint" lower upper facts
+      ["hint",span_hint facts lower upper 0. 1.,"optional-nonempty-counter","unsat";
+       "fallback",facts,"required-complete","sat"] (Some (5.,6.));
+    let lower,upper,facts = counter_fixture "q726_contradiction" false in
+    let contradiction = parse_gil_set ["(#q726_contradiction_before v== {{ }})"] in
+    let facts = Expr.Set.union facts contradiction in
+    span_run "q726-full-frame-contradiction" lower upper facts
+      ["hint",span_hint facts lower upper 0. 1.,"optional-nonempty-counter","unsat";
+       "fallback",facts,"required-complete","unsat"] None;
+    (* Smaller negative eligibility controls do not replace the full q726 frame. *)
+    List.iter (fun ambiguous ->
+      let label = if ambiguous then "pair-ambiguous" else "pair-no-lower-isint" in
+      let lower = "#" ^ label ^ "_lower" and upper = "#" ^ label ^ "_upper"
+      and extra = "#" ^ label ^ "_extra" in
+      let a = Expr.LVar lower and b = Expr.LVar upper and c = Expr.LVar extra in
+      Hashtbl.clear gamma;
+      List.iter (fun name -> Hashtbl.add gamma name Type.NumberType)
+        [lower;upper;extra];
+      let facts = Expr.Set.of_list
+        [Expr.UnOp (IsInt,b);bin FLessThanEqual (Expr.num 0.) a;
+         bin FLessThanEqual b (Expr.num 10.);bin FLessThan a b;
+         bin ValueEqual a (Expr.num 5.);bin ValueEqual b (Expr.num 6.);
+         bin ValueEqual c (Expr.num 7.)] in
+      let facts = if ambiguous then List.fold_left (fun fs fact ->
+        Expr.Set.add fact fs) facts
+        [Expr.UnOp (IsInt,a);Expr.UnOp (IsInt,c);
+         bin FLessThanEqual c (Expr.num 10.);bin FLessThan a c]
+        else facts in
+      span_run label lower upper facts ["fallback",facts,"required-complete","sat"]
+        (Some (5.,6.))) [true;false];
+    L.normal (fun m -> m "NONEMPTY_COUNTER_NORMAL_END"))
+
+
+(* Native result attribution is observational: actual dump filenames join each
+   solver result, and cache hits or disabled dumping must not invent a file. *)
+let smt_result_rows log =
+  String.split_on_char '\n' log
+  |> List.filter (String.starts_with ~prefix:"SMT_QUERY_RESULT ")
+
+let smt_result_field name row =
+  let prefix = name ^ "=" in
+  match List.find_opt (String.starts_with ~prefix) (String.split_on_char ' ' row) with
+  | Some field -> String.sub field (String.length prefix)
+      (String.length field - String.length prefix)
+  | None -> Alcotest.fail ("Missing native result field: " ^ name)
+
+let smt_causal_observability () =
+  let module L = Logging in
+  let saved_dump = !Config.dump_smt in
+  L.Mode.set_mode (Enabled Normal); L.initialize [L.file_reporter];
+  Config.dump_smt := true;
+  let read_log () =
+    let c = open_in_bin "file.log" in
+    Fun.protect ~finally:(fun () -> close_in c)
+      (fun () -> really_input_string c (in_channel_length c)) in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump;
+    L.wrap_up (); L.initialize []; L.Mode.set_mode (Enabled Verbose)) (fun () ->
+    L.normal (fun m -> m "SMT_CAUSAL_NORMAL_BEGIN");
+    let g = Hashtbl.create 1 in
+    Hashtbl.add g "#causal_x" Type.IntType;
+    let sat = Expr.Set.singleton (bin Equal (Expr.LVar "#causal_x") (Expr.int 7)) in
+    let unsat = Expr.Set.add (bin Equal (Expr.LVar "#causal_x") (Expr.int 8)) sat in
+    let before = Expr.Set.elements sat in
+    let model = match Smt.exec_sat ~caller_kind:"control-required-sat" sat g with
+      | Some model -> model | None -> Alcotest.fail "Native SAT model absent" in
+    let observed = ref None in
+    Smt.lift_model model g (fun name value ->
+      if name = "#causal_x" then observed := Some value)
+      (Expr.Set.singleton (Expr.LVar "#causal_x"));
+    Alcotest.(check bool) "actual native integer model" true
+      (!observed = Some (Expr.int 7));
+    Alcotest.(check bool) "optional native contradiction proves UNSAT" true
+      (Smt.proves_unsat ~caller_kind:"control-optional-unsat" unsat g);
+    let rows_before_cache = smt_result_rows (read_log ()) in
+    Alcotest.(check bool) "cached UNSAT remains true" true
+      (Smt.proves_unsat ~caller_kind:"control-cache-hit" unsat g);
+    Alcotest.(check bool) "cache hit invents no native result" true
+      (rows_before_cache = smt_result_rows (read_log ()));
+    Alcotest.(check bool) "required native contradiction proves UNSAT" true
+      (Option.is_none (Smt.exec_sat ~caller_kind:"control-required-unsat" unsat g));
+    Config.dump_smt := false;
+    Alcotest.(check bool) "disabled dump keeps native SAT" true
+      (Option.is_some (Smt.exec_sat ~caller_kind:"control-no-dump" sat g));
+    Config.dump_smt := true;
+    let rows = smt_result_rows (read_log ()) in
+    Alcotest.(check int) "four actual native results" 4 (List.length rows);
+    let expected = ["control-required-sat","false","sat";
+      "control-optional-unsat","true","unsat";
+      "control-required-unsat","false","unsat";
+      "control-no-dump","false","sat"] in
+    List.iter2 (fun row (caller,raw_unknown,result) ->
+      Alcotest.(check string) "native caller kind" caller (smt_result_field "caller" row);
+      Alcotest.(check string) "native unknown policy" raw_unknown (smt_result_field "raw_unknown" row);
+      Alcotest.(check string) "native result" result (smt_result_field "result" row);
+      Alcotest.(check string) "unchanged phase policy" "3" (smt_result_field "phase_selection" row);
+      let query = smt_result_field "query" row in
+      if caller = "control-no-dump" then
+        Alcotest.(check string) "no invented dump ID" "none" query
+      else (
+        let c = open_in_bin (Filename.concat "gillian_smt_queries" query) in
+        let contents = Fun.protect ~finally:(fun () -> close_in c)
+          (fun () -> really_input_string c (in_channel_length c)) in
+        let facts = if caller = "control-required-sat" then sat else unsat in
+        let fs_text = Fmt.str "%a" (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) facts in
+        Alcotest.(check bool) "actual dump retains exact original FS" true
+          (String.starts_with ~prefix:("GIL query:\nFS: " ^ fs_text ^ "\nGAMMA: ") contents);
+        Printf.printf "SMT_CAUSAL_NATIVE_QUERY[%s]=%s\n" caller query)) rows expected;
+    let ids = List.map (smt_result_field "query") (List.filter (fun row ->
+      smt_result_field "query" row <> "none") rows) in
+    Alcotest.(check int) "three unique actual dump IDs" 3
+      (List.length (List.sort_uniq String.compare ids));
+    Alcotest.(check bool) "original query unchanged" true
+      (before = Expr.Set.elements sat);
+    L.normal (fun m -> m "SMT_CAUSAL_NORMAL_END"))
+
+let numeric_contained_eligibility () =
+  let module L = Logging in
+  let saved_dump = !Config.dump_smt in
+  L.Mode.set_mode (Enabled Normal); L.initialize [L.file_reporter];
+  Config.dump_smt := true;
+  let read_log () =
+    let c = open_in_bin "file.log" in
+    Fun.protect ~finally:(fun () -> close_in c)
+      (fun () -> really_input_string c (in_channel_length c)) in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump;
+    L.wrap_up (); L.initialize []; L.Mode.set_mode (Enabled Verbose)) (fun () ->
+    L.normal (fun m -> m "NUMERIC_CONTAINED_BEGIN");
+    let x = Expr.LVar "#numeric_contained_x"
+    and bridge = Expr.LVar "#numeric_contained_bridge" in
+    let g = Gamma.init () in
+    List.iter (fun name -> Gamma.update g name Type.NumberType)
+      ["#numeric_contained_x"; "#numeric_contained_bridge"];
+    let facts = [bin FLessThanEqual (Expr.num 0.) x;
+      bin FLessThan x bridge; bin FLessThanEqual bridge (Expr.num 5.)] in
+    let before = Expr.Set.of_list facts in
+    let gamma_before = Hashtbl.copy (Gamma.as_hashtbl g) in
+    let positive = bin FLessThan x (Expr.num 5.)
+    and false_goal = bin FLessThan x (Expr.num 2.) in
+    let entails goal = Solver.check_entailment Utils.Containers.SS.empty
+      (Engine.PFS.of_list facts) [goal] g in
+    Alcotest.(check bool) "numeric bridge proves the original goal" true
+      (entails positive);
+    Alcotest.(check bool) "stronger false numeric goal retains countermodel" false
+      (entails false_goal);
+    let rows = smt_result_rows (read_log ()) in
+    Alcotest.(check int) "two actual complete native results" 2 (List.length rows);
+    List.iter2 (fun row (label, goal, result) ->
+      Alcotest.(check string) "complete native caller" "required-complete"
+        (smt_result_field "caller" row);
+      Alcotest.(check string) "required unknown policy retained" "false"
+        (smt_result_field "raw_unknown" row);
+      Alcotest.(check string) "actual native result" result
+        (smt_result_field "result" row);
+      let query = smt_result_field "query" row in
+      let c = open_in_bin (Filename.concat "gillian_smt_queries" query) in
+      let contents = Fun.protect ~finally:(fun () -> close_in c)
+        (fun () -> really_input_string c (in_channel_length c)) in
+      let full = Expr.Set.add (not_ goal) before in
+      let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) full in
+      Alcotest.(check bool) "complete query preserves the numeric bridge" true
+        (String.starts_with ~prefix contents);
+      Printf.printf "NUMERIC_CONTAINED_NATIVE_QUERY[%s]=%s\n" label query)
+      rows ["positive", positive, "unsat"; "false-goal", false_goal, "sat"];
+    Alcotest.(check bool) "no lossy contained probe submitted" true
+      (List.for_all (fun row -> smt_result_field "caller" row <>
+        "optional-entailment-contained") rows);
+    Alcotest.(check bool) "original premises unchanged" true
+      (Expr.Set.equal before (Expr.Set.of_list facts));
+    Alcotest.(check bool) "original Gamma unchanged" true
+      (Hashtbl.length gamma_before = Hashtbl.length (Gamma.as_hashtbl g)
+       && Hashtbl.fold (fun name typ ok -> ok &&
+          Hashtbl.find_opt (Gamma.as_hashtbl g) name = Some typ) gamma_before true);
+    L.normal (fun m -> m "NUMERIC_CONTAINED_END"))
+
+let numeric_cast_probe_eligibility () =
+  let module L = Logging in
+  let saved_dump = !Config.dump_smt in
+  L.Mode.set_mode (Enabled Normal); L.initialize [L.file_reporter];
+  Config.dump_smt := true;
+  let read_log () =
+    let c = open_in_bin "file.log" in
+    Fun.protect ~finally:(fun () -> close_in c)
+      (fun () -> really_input_string c (in_channel_length c)) in
+  let assert_unchanged g before facts =
+    Alcotest.(check bool) "original facts unchanged" true
+      (Expr.Set.equal before (Expr.Set.of_list facts));
+    let gamma_before = fst g and gamma = snd g in
+    Alcotest.(check bool) "caller Gamma unchanged" true
+      (Hashtbl.length gamma_before = Hashtbl.length (Gamma.as_hashtbl gamma)
+       && Hashtbl.fold (fun name typ ok -> ok &&
+          Hashtbl.find_opt (Gamma.as_hashtbl gamma) name = Some typ)
+          gamma_before true) in
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump;
+    L.wrap_up (); L.initialize []; L.Mode.set_mode (Enabled Verbose)) (fun () ->
+    L.normal (fun m -> m "NUMERIC_CAST_PROBES_BEGIN");
+    let cast = fun e -> Expr.UnOp (NumToInt, e) in
+    let successor e = bin FPlus e (Expr.num 1.) in
+    let run label kind expected =
+      let start_name = "#cast_" ^ label ^ "_start"
+      and end_name = "#cast_" ^ label ^ "_end"
+      and cell_name = "#cast_" ^ label ^ "_cell" in
+      let start = Expr.LVar start_name and finish = Expr.LVar end_name
+      and cell = Expr.LVar cell_name in
+      let g = Gamma.init () in
+      List.iter (fun name -> Gamma.update g name Type.NumberType)
+        [start_name; end_name];
+      Gamma.update g cell_name Type.Utf16Type;
+      let difference = bin FMinus finish start in
+      let remaining = bin FMinus (Expr.num 4294967295.) (successor finish) in
+      (* Original numeric cast/bound shapes observed in Skip220 q156/q174/q194.
+         The unrelated symbolic UTF16 bound keeps the full query mixed. No
+         endpoint equality or fixed length restricts the entailment domain. *)
+      let facts = [Expr.UnOp (IsInt, start); Expr.UnOp (IsInt, finish);
+        Expr.UnOp (IsInt, successor start); Expr.UnOp (IsInt, successor finish);
+        bin FLessThanEqual (Expr.num 0.) start;
+        bin FLessThanEqual (Expr.num 0.) finish;
+        bin FLessThanEqual start (Expr.num 4294967294.);
+        bin FLessThanEqual finish (Expr.num 4294967294.);
+        bin FLessThan start finish;
+        bin FLessThanEqual (successor start) finish;
+        bin FLessThanEqual (successor finish) (Expr.num 4294967295.);
+        bin ILessThanEqual (Expr.int 0) (cast difference);
+        bin ILessThanEqual (Expr.int 0) (cast remaining);
+        bin ILessThan (cast remaining)
+          (cast (bin FMinus (Expr.num 4294967295.) finish));
+        bin Equal (cast (successor finish))
+          (bin IPlus (Expr.int 1) (cast finish));
+        bin ILessThanEqual (Expr.UnOp (Utf16Len, cell)) (Expr.int 5)] in
+      let upper = bin FLessThanEqual remaining (Expr.num max_float)
+      and lower = bin FLessThanEqual (Expr.num (-. max_float)) difference
+      and order = bin FLessThan start (successor finish) in
+      let goals = if not expected then
+          (match kind with
+           | "upper" -> [bin FLessThanEqual remaining (Expr.num 0.)]
+           | "lower" -> [bin FLessThanEqual (Expr.num 2.) difference]
+           | "order" -> [bin FLessThanEqual (successor (successor start)) finish]
+           | "disjunctive" ->
+               [upper; bin FLessThanEqual (successor (successor start)) finish]
+           | _ -> failwith "invalid cast eligibility control")
+        else match kind with
+        | "upper" -> [upper] | "lower" -> [lower] | "order" -> [order]
+        | "disjunctive" -> [upper; order]
+        | _ -> failwith "invalid cast eligibility control" in
+      let before = Expr.Set.of_list facts in
+      let gamma_before = Hashtbl.copy (Gamma.as_hashtbl g) in
+      let old_rows = List.length (smt_result_rows (read_log ())) in
+      Alcotest.(check bool) (label ^ " retains native entailment outcome") expected
+        (Solver.check_entailment Utils.Containers.SS.empty
+          (Engine.PFS.of_list facts) goals g);
+      let rows = smt_result_rows (read_log ()) |> List.mapi (fun i r -> i,r)
+        |> List.filter_map (fun (i,r) -> if i >= old_rows then Some r else None) in
+      Alcotest.(check bool) (label ^ " emits a native result") true (rows <> []);
+      Alcotest.(check bool) (label ^ " excludes only the lossy entailment probes") true
+        (List.for_all (fun row -> not (List.mem (smt_result_field "caller" row)
+          ["optional-entailment-numeric"; "optional-entailment-numeric-piece";
+           "optional-entailment-focused"])) rows);
+      let required = List.filter (fun row ->
+        smt_result_field "caller" row = "required-complete") rows in
+      (* The same caller can witness a weakened informational probe.
+         Only the actual full-query dump licenses false-case evidence. *)
+      let complete_witness row =
+        let full = Expr.Set.add (Expr.disjunct (List.map Expr.negate goals)) before
+          |> Expr.Set.add (bin ValueEqual start (Expr.num 0.))
+          |> Expr.Set.add (bin ValueEqual finish (Expr.num 1.)) in
+        let query = smt_result_field "query" row in
+        let c = open_in_bin (Filename.concat "gillian_smt_queries" query) in
+        let contents = Fun.protect ~finally:(fun () -> close_in c)
+          (fun () -> really_input_string c (in_channel_length c)) in
+        let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+          (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) full in
+        String.starts_with ~prefix contents
+      in
+      let witnessed = if expected then [] else List.filter (fun row ->
+        smt_result_field "caller" row = "optional-nonempty-counter"
+        && smt_result_field "result" row = "sat"
+        && complete_witness row) rows in
+      let evidence = required @ witnessed in
+      Alcotest.(check bool) (label ^ " has complete native evidence") true
+        (evidence <> []);
+      List.iter (fun row ->
+        Alcotest.(check string) (label ^ " complete result")
+          (if expected then "unsat" else "sat") (smt_result_field "result" row);
+        let hinted = smt_result_field "caller" row = "optional-nonempty-counter" in
+        Alcotest.(check string) (label ^ " native unknown policy")
+          (if hinted then "true" else "false") (smt_result_field "raw_unknown" row);
+        let original = Expr.Set.add (Expr.disjunct (List.map Expr.negate goals)) before in
+        (* A SAT witness must preserve every original assertion and add only
+           the two exact endpoint equalities; it cannot prove an UNSAT goal. *)
+        let full = if hinted then original
+          |> Expr.Set.add (bin ValueEqual start (Expr.num 0.))
+          |> Expr.Set.add (bin ValueEqual finish (Expr.num 1.)) else original in
+        let query = smt_result_field "query" row in
+        let c = open_in_bin (Filename.concat "gillian_smt_queries" query) in
+        let contents = Fun.protect ~finally:(fun () -> close_in c)
+          (fun () -> really_input_string c (in_channel_length c)) in
+        let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+          (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) full in
+        Alcotest.(check bool) (label ^ " actual complete FS remains exact") true
+          (String.starts_with ~prefix contents);
+        Printf.printf "NUMERIC_CAST_NATIVE_QUERY[%s]=%s\n" label
+          (smt_result_field "query" row)) evidence;
+      assert_unchanged (gamma_before,g) before facts;
+      if not expected then (
+        (* A fixed witness is a countercontrol, not an entailment premise.
+           Its complete original facts and failed goal remain in the query. *)
+        let full = Expr.Set.add (Expr.disjunct (List.map Expr.negate goals)) before
+          |> Expr.Set.add (bin ValueEqual start (Expr.num 0.))
+          |> Expr.Set.add (bin ValueEqual finish (Expr.num 1.)) in
+        let model = match Smt.exec_sat ~caller_kind:"control-cast-false-goal"
+          full (Gamma.as_hashtbl g) with
+          | Some model -> model | None -> Alcotest.fail "missing false-goal model" in
+        let lifted = Hashtbl.create 2 in
+        Smt.lift_model model (Gamma.as_hashtbl g) (Hashtbl.add lifted)
+          (Expr.Set.of_list [start;finish]);
+        List.iter (fun (name,value) -> match Hashtbl.find_opt lifted name with
+          | Some (Expr.Lit (Literal.Num actual)) ->
+              Alcotest.(check int64) (label ^ " actual endpoint model " ^ name)
+                (Int64.bits_of_float value) (Int64.bits_of_float actual)
+          | _ -> Alcotest.fail "missing endpoint in native model")
+          [start_name,0.;end_name,1.];
+        Printf.printf "NUMERIC_CAST_MODEL[%s]: start=0 end=1\n%s\n" label
+          (Fmt.str "%a" Smt.pp_model model))
+    in
+    List.iter (fun kind -> run (kind ^ "-positive") kind true;
+      run (kind ^ "-false") kind false) ["upper";"lower";"order";"disjunctive"];
+    (* Cast-free Number goals still reach the original richer numeric probe. *)
+    let x = Expr.LVar "#cast_free_x" and y = Expr.LVar "#cast_free_y"
+    and s = Expr.LVar "#cast_free_s" in
+    let g = Gamma.init () in
+    List.iter (fun name -> Gamma.update g name Type.NumberType)
+      ["#cast_free_x";"#cast_free_y"];
+    Gamma.update g "#cast_free_s" Type.Utf16Type;
+    let old_rows = List.length (smt_result_rows (read_log ())) in
+    Alcotest.(check bool) "cast-free numeric eligibility remains active" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+        (Engine.PFS.of_list [bin FLessThan x y;
+          bin FLessThanEqual y (Expr.num 5.);
+          bin ILessThanEqual (Expr.UnOp (Utf16Len,s)) (Expr.int 5)])
+        [bin FLessThan x (Expr.num 5.)] g);
+    let new_rows = smt_result_rows (read_log ()) |> List.mapi (fun i r -> i,r)
+      |> List.filter_map (fun (i,r) -> if i >= old_rows then Some r else None) in
+    Alcotest.(check bool) "real cast-free numeric probe observed" true
+      (List.exists (fun row -> smt_result_field "caller" row =
+        "optional-entailment-numeric") new_rows);
+    (* Int goals with an unrelated Number cast retain focused eligibility. *)
+    let i = Expr.LVar "#non_number_i" and k = Expr.LVar "#non_number_k"
+    and n = Expr.LVar "#non_number_n" in
+    let g = Gamma.init () in
+    List.iter (fun name -> Gamma.update g name Type.IntType)
+      ["#non_number_i";"#non_number_k"];
+    Gamma.update g "#non_number_n" Type.NumberType;
+    let old_rows = List.length (smt_result_rows (read_log ())) in
+    Alcotest.(check bool) "non-Number goal retains original entailment" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+        (Engine.PFS.of_list [bin ILessThan i k;
+          bin ILessThanEqual k (Expr.int 0);
+          bin ILessThanEqual (Expr.int 0) (cast n)])
+        [bin ILessThan (bin ITimes (Expr.int 2) i) (Expr.int 0)] g);
+    let new_rows = smt_result_rows (read_log ()) |> List.mapi (fun i r -> i,r)
+      |> List.filter_map (fun (i,r) -> if i >= old_rows then Some r else None) in
+    Alcotest.(check bool) "real non-Number focused probe observed" true
+      (List.exists (fun row -> smt_result_field "caller" row =
+        "optional-entailment-focused") new_rows);
+    L.normal (fun m -> m "NUMERIC_CAST_PROBES_END"))
+let focused_formatter_probe_eligibility () =
+  (* Saved append-reabsorption q264 FS/Gamma. Its nested formatter goal must
+     skip only the optional focused projection, retaining the full query. *)
+  let original = parse_gil_set [
+    "(! (u16\"length\" -e- #taKeys))";
+    "(! (#start == #end))";
+    "(! ((num_to_utf16 #end) -e- #taKeys))";
+    "(! ((num_to_utf16 #start) == (num_to_utf16 #end)))";
+    "(is_int #end)"; "(is_int #start)"; "(is_int (#start + 1.))";
+    "(0i i<= (l-len #taValues))";
+    "(0i i<= (as_int (#end - #start)))";
+    "(0i i<= (as_int (#end - (#start + 1.))))";
+    "(0. <= #start)"; "(0. <= (#start + 1.))";
+    "(#end <= 4294967295.)"; "(#start < #end)";
+    "(#start <= 4294967294.)";
+    "((! (-u- (-{ (num_to_utf16 #start) }-, #taKeys) == -{  }-)) or (! (-{  }- == -u- (-{ (num_to_utf16 #start) }-, #taKeys))))";
+    "((as_int (#end - (#start + 1.))) i< (as_int (#end - #start)))";
+    "((as_int (#start + 1.)) == (1i i+ (as_int #start)))";
+    "((#start + 1.) <= #end)"
+  ] in
+  Alcotest.(check int) "captured complete counterquery has nineteen atoms" 19
+    (Expr.Set.cardinal original);
+  let start = Expr.LVar "#start" and finish = Expr.LVar "#end"
+  and cell = Expr.LVar "#taCell" and tail = Expr.LVar "#taKeys" in
+  let format e = Expr.UnOp (NumberToUtf16, e) in
+  (* Match the parser's canonical SetUnion operand ordering. *)
+  let keys = Expr.NOp (SetUnion,
+    Expr.Set.elements (Expr.Set.of_list [Expr.ESet [format start]; tail])) in
+  let goals = [bin Equal keys (Expr.ESet []); bin Equal (Expr.ESet []) keys] in
+  let failed = Expr.disjunct (List.map Expr.negate goals) in
+  Alcotest.(check bool) "nested set matcher countergoal matches capture" true
+    (Expr.Set.mem failed original);
+  let g = Gamma.init () in
+  List.iter (fun (name,typ) -> Gamma.update g name typ)
+    ["#start",Type.NumberType; "#taKeys",Type.SetType;
+     "#taCell",Type.Utf16Type; "#end",Type.NumberType; "#taValues",Type.ListType];
+  let gt = Gamma.as_hashtbl g in
+  let types () = Hashtbl.fold (fun n t acc -> (n,t)::acc) gt []
+    |> List.sort Stdlib.compare in
+  let before_types = types () in
+  (* A test-only tautology preserves the captured unused UTF16 Gamma slot
+     through pre-simplification filtering. It must vanish from submitted FS. *)
+  let premises = Engine.PFS.of_list
+    (bin Equal cell cell :: Expr.Set.elements (Expr.Set.remove failed original)) in
+  let before_facts = Engine.PFS.to_list premises in
+  let module L = Logging in
+  let saved_dump = !Config.dump_smt in
+  L.Mode.set_mode (Enabled Normal); L.initialize [L.file_reporter];
+  Config.dump_smt := true;
+  let read path = let c = open_in_bin path in
+    Fun.protect ~finally:(fun () -> close_in c)
+      (fun () -> really_input_string c (in_channel_length c)) in
+  let rows () = smt_result_rows (read "file.log") in
+  let observe label old caller result fs =
+    let fresh = rows () |> List.mapi (fun i r -> i,r)
+      |> List.filter_map (fun (i,r) -> if i >= old then Some r else None) in
+    let complete = List.filter (fun row -> smt_result_field "caller" row = caller) fresh in
+    Alcotest.(check int) (label ^ " has one actual complete native result") 1
+      (List.length complete);
+    List.iter (fun row ->
+      Alcotest.(check string) (label ^ " actual native result") result
+        (smt_result_field "result" row);
+      Alcotest.(check string) (label ^ " required UNKNOWN policy") "false"
+        (smt_result_field "raw_unknown" row);
+      Alcotest.(check string) (label ^ " phase policy unchanged") "3"
+        (smt_result_field "phase_selection" row);
+      let query = smt_result_field "query" row in
+      let prefix = if label = "captured" then
+        (* Frozen original native257 prefix, before AST reconstruction. *)
+        {captured|GIL query:
+FS: (! (u16"length" -e- #taKeys)), (! (#start == #end)),
+(! ((num_to_utf16 #end) -e- #taKeys)),
+(! ((num_to_utf16 #start) == (num_to_utf16 #end))), (is_int #end),
+(is_int #start), (is_int (#start + 1.)), (0i i<= (l-len #taValues)),
+(0i i<= (as_int (#end - #start))), (0i i<= (as_int (#end - (#start + 1.)))),
+(0. <= #start), (0. <= (#start + 1.)), (#end <= 4294967295.),
+(#start < #end), (#start <= 4294967294.),
+((! (-u- (-{ (num_to_utf16 #start) }-, #taKeys) == -{  }-)) or (! (-{  }- == -u- 
+                                                                  (-{ (num_to_utf16 #start) }-,
+                                                                   #taKeys)))),
+((as_int (#end - (#start + 1.))) i< (as_int (#end - #start))),
+((as_int (#start + 1.)) == (1i i+ (as_int #start))),
+((#start + 1.) <= #end)
+GAMMA: (hashtbl (#start, Num) (#taKeys, Set)
+                                (#taCell, Utf16) (#end, Num)
+                                (#taValues, List))
+Encoded as SMT Query:
+|captured}
+      else Fmt.str "GIL query:\nFS: %a\nGAMMA: %a\nEncoded as SMT Query:\n"
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs
+        Fmt.(Dump.hashtbl string (of_to_string Type.str)) gt in
+      Alcotest.(check bool) (label ^ " exact full FS and Gamma prefix") true
+        (String.starts_with ~prefix (read (Filename.concat "gillian_smt_queries" query)));
+      Printf.printf "NativeQuery[focused-formatter:%s]=%s\n%!" label query) complete;
+    fresh in
+  let block_before = List.length (rows ()) in
+  Fun.protect ~finally:(fun () ->
+    Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump;
+      L.wrap_up (); L.initialize []; L.Mode.set_mode (Enabled Verbose)) (fun () ->
+      rows () |> List.mapi (fun i row -> i,row)
+        |> List.iter (fun (i,row) -> if i >= block_before then
+          Printf.printf "FOCUSED_FORMATTER_NATIVE_RESULT %s\n%!" row);
+      L.normal (fun m -> m "FOCUSED_FORMATTER_NORMAL_END");
+      Printf.printf "FOCUSED_FORMATTER_NORMAL_END\n%!")) (fun () ->
+    L.normal (fun m -> m "FOCUSED_FORMATTER_NORMAL_BEGIN");
+    Printf.printf "FOCUSED_FORMATTER_NORMAL_BEGIN\n%!";
+    let old = block_before in
+    Alcotest.(check bool) "captured false set-matching goal retains rejection" false
+      (Solver.check_entailment ~matching:true Utils.Containers.SS.empty premises goals g);
+    let fresh = observe "captured" old "required-complete" "sat" original in
+    Alcotest.(check bool) "no formatter-bearing focused probe submitted" true
+      (List.for_all (fun row -> smt_result_field "caller" row <>
+        "optional-entailment-focused") fresh);
+    Alcotest.(check bool) "original caller premises unchanged" true
+      (before_facts = Engine.PFS.to_list premises);
+    Alcotest.(check bool) "original caller Gamma unchanged" true
+      (before_types = types ());
+    (* Endpoint pins are native countercontrols only, never caller premises.
+       ValueEqual preserves both binary64 zeros. Formatter spellings are goals,
+       not assumed facts; direct native execution cannot simplify them away. *)
+    List.iter (fun (label,start_value,end_value,start_text,end_text) ->
+      let utf16 text = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical text)) in
+      let pinned = original
+        |> Expr.Set.add (bin ValueEqual start (Expr.num start_value))
+        |> Expr.Set.add (bin ValueEqual finish (Expr.num end_value)) in
+      let true_goal = Expr.conjunct [bin Equal (format start) (utf16 start_text);
+        bin Equal (format finish) (utf16 end_text)] in
+      let positive = Expr.Set.add (Expr.negate true_goal) pinned in
+      let caller = "control-focused-formatter-" ^ label ^ "-true" in
+      let old = List.length (rows ()) in
+      Alcotest.(check bool) (label ^ " actual formatted-key goal is native UNSAT") true
+        (Option.is_none (Smt.exec_sat ~caller_kind:caller positive gt));
+      ignore (observe (label ^ "-true") old caller "unsat" positive);
+      let false_goal = bin Equal (format start) (utf16 end_text) in
+      let negative = Expr.Set.add (Expr.negate false_goal) pinned in
+      let caller = "control-focused-formatter-" ^ label ^ "-false" in
+      let old = List.length (rows ()) in
+      let model = match Smt.exec_sat ~caller_kind:caller negative gt with
+        | Some model -> model | None -> Alcotest.fail (label ^ " missing native countermodel") in
+      ignore (observe (label ^ "-false") old caller "sat" negative);
+      let lifted = Hashtbl.create 2 in
+      Smt.lift_model model gt (Hashtbl.add lifted) (Expr.Set.of_list [start;finish]);
+      List.iter (fun (name,value) -> match Hashtbl.find_opt lifted name with
+        | Some (Expr.Lit (Literal.Num actual)) ->
+            Alcotest.(check int64) (label ^ " exact native binary64 " ^ name)
+              (Int64.bits_of_float value) (Int64.bits_of_float actual);
+            Printf.printf "FOCUSED_FORMATTER_NATIVE_MODEL[%s:%s]=%Lx\n%!" label name
+              (Int64.bits_of_float actual)
+        | _ -> Alcotest.fail (label ^ " missing native Number " ^ name))
+        ["#start",start_value; "#end",end_value]
+    ) ["positive-zero",0.,1.,"0","1"; "negative-zero",(-0.),1.,"0","1";
+       "uint32-boundary",4294967294.,4294967295.,"4294967294","4294967295"];
+    Alcotest.(check bool) "countercontrols leave original Gamma unchanged" true
+      (before_types = types ()))
+
+(* Keep273 query403: exact original GIL FS/Gamma, not its SMT encoding.
+   The dump has 24 GIL assertions and 12 types; its 28 encoded assertions
+   include four encoder facts. No standalone solver prelude is invented here.
+   Source dump: 40682 bytes, SHA256
+   22d5783accc1116e6b41cd503db19108a03add3acabd315fade259349c061544. *)
+let nonblank_counter_fixture () =
+  let fs = parse_gil_set [
+    "(! ((u16-trim #dhHead) == u16\"\"))";
+    "(is_int #k)";
+    "(is_int #n)";
+    "(is_int #to)";
+    "(is_int (#to + 1.))";
+    "(0i i<= (l-len #chosen))";
+    "(0i i<= (l-len #dhTailValues))";
+    "(0i i<= (l-len #locals))";
+    "(0i i<= (l-len #prefix))";
+    "(0i i<= (as_int (#n - (#to + 1.))))";
+    "(0. <= #k)";
+    "(0. <= #to)";
+    "(#k < #n)";
+    "(#k <= 4294967295.)";
+    "(#n <= 4294967295.)";
+    "(#to <= 4294967294.)";
+    "(#to <= 4294967295.)";
+    "(#to <= #k)";
+    "((u16-len #dhHead) i<= 9007199254740991i)";
+    "((as_int #k) == (l-len #prefix))";
+    "((as_int #to) == (l-len #chosen))";
+    "((as_int (#n - (#to + 1.))) i< (as_int (#n - #to)))";
+    "((as_int (#to + 1.)) == (1i i+ (as_int #to)))";
+    "((#to + 1.) <= #n)";
+  ] in
+  Alcotest.(check int) "all query403 GIL assertions retained" 24
+    (Expr.Set.cardinal fs);
+  let gamma = Hashtbl.create 12 in
+  List.iter (fun (name,typ) -> Hashtbl.add gamma name typ) [
+    "#outKeys",Type.SetType; "#env",Type.ObjectType;
+    "#chosen",Type.ListType; "#dhTailValues",Type.ListType;
+    "#dhHead",Type.Utf16Type; "#prefix",Type.ListType;
+    "#dhTailKeys",Type.SetType; "#dhPrefixKeys",Type.SetType;
+    "#to",Type.NumberType; "#k",Type.NumberType;
+    "#n",Type.NumberType; "#locals",Type.ListType;
+  ];
+  fs,gamma
+
+let nonblank_utf16 value =
+  Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical value))
+
+let nonblank_counter_pins fs lower upper position head =
+  Expr.Set.union fs (Expr.Set.of_list [
+    bin ValueEqual (Expr.LVar "#k") (Expr.num lower);
+    bin ValueEqual (Expr.LVar "#n") (Expr.num upper);
+    bin ValueEqual (Expr.LVar "#to") (Expr.num position);
+    bin ValueEqual (Expr.LVar "#dhHead") (nonblank_utf16 head);
+  ])
+
+let nonblank_counter_files () =
+  if Sys.file_exists "gillian_smt_queries" then
+    Array.to_list (Sys.readdir "gillian_smt_queries") else []
+
+let nonblank_counter_read path =
+  let channel = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in channel)
+    (fun () -> really_input_string channel (in_channel_length channel))
+
+let nonblank_counter_rows () = smt_result_rows (nonblank_counter_read "file.log")
+
+let nonblank_counter_types gamma =
+  Hashtbl.fold (fun name typ rows -> (name,typ)::rows) gamma []
+  |> List.sort Stdlib.compare
+
+let nonblank_counter_observe label before caller result expected gamma =
+  let rows = nonblank_counter_rows () |> List.filter (fun row ->
+    not (List.mem row before) && smt_result_field "caller" row = caller) in
+  Alcotest.(check int) (label ^ " one actual native result for " ^ caller)
+    1 (List.length rows);
+  let row = List.hd rows in
+  Alcotest.(check string) (label ^ " actual native result") result
+    (smt_result_field "result" row);
+  Alcotest.(check string) (label ^ " native phase policy") "3"
+    (smt_result_field "phase_selection" row);
+  let query = smt_result_field "query" row in
+  let text = nonblank_counter_read (Filename.concat "gillian_smt_queries" query) in
+  (* Ignore formatter whitespace only outside literals: spaced UTF16 hints
+     must not compare equal to a different, stripped string witness. *)
+  let compact text =
+    let buffer = Buffer.create (String.length text) in
+    let quoted = ref false and escaped = ref false in
+    String.iter (fun c ->
+      if !quoted then (
+        Buffer.add_char buffer c;
+        if !escaped then escaped := false
+        else if c = '\\' then escaped := true
+        else if c = '"' then quoted := false)
+      else if c = '"' then (quoted := true; Buffer.add_char buffer c)
+      else if not (List.mem c [' ';'\t';'\r';'\n']) then
+        Buffer.add_char buffer c) text;
+    Buffer.contents buffer in
+  let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: %a\nEncoded as SMT Query:"
+    (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) expected
+    Fmt.(Dump.hashtbl string (of_to_string Type.str)) gamma in
+  Alcotest.(check bool) (label ^ " complete original FS/Gamma plus only expected hints")
+    true (String.starts_with ~prefix:(compact prefix) (compact text));
+  Printf.printf "NONBLANK_COUNTER_NATIVE_RESULT[%s]=%s\n%!" label row;
+  row
+
+let with_nonblank_counter_trace ?(preserve_prior = false) f =
+  let module L = Logging in
+  let saved = !Config.dump_smt in
+  (* Only the appended rank controls preserve a previous closed trace. The
+     atomic replacement's prior + two fresh copies stay below the existing
+     32 MiB worker evidence ceiling; all other evidence guards still apply. *)
+  let trace_limit = 32 * 1024 * 1024 in
+  let read_closed_trace limit =
+    let channel = open_in_bin "file.log" in
+    Fun.protect ~finally:(fun () -> close_in channel) (fun () ->
+      let length = in_channel_length channel in
+      if length > limit then failwith "nonblank trace preservation budget";
+      let text = really_input_string channel length in
+      if in_channel_length channel <> length then
+        failwith "nonblank closed trace length changed";
+      text)
+  in
+  let prior = if preserve_prior then (
+    L.wrap_up (); Some (read_closed_trace trace_limit)) else None in
+  L.Mode.set_mode (Enabled Normal); L.initialize [L.file_reporter];
+  L.normal (fun m -> m "NONBLANK_COUNTER_NORMAL_BEGIN");
+  Config.dump_smt := true;
+  Fun.protect ~finally:(fun () ->
+    Config.dump_smt := saved; L.wrap_up ();
+    match prior with
+    | None ->
+        List.iter (fun row -> Printf.printf "NONBLANK_COUNTER_CAPTURE %s\n%!" row)
+          (nonblank_counter_rows ());
+        L.initialize []; L.Mode.set_mode (Enabled Verbose)
+    | Some prior ->
+        Fun.protect ~finally:(fun () ->
+          L.initialize []; L.Mode.set_mode (Enabled Verbose)) (fun () ->
+          let fresh = read_closed_trace
+            ((trace_limit - String.length prior) / 2) in
+          List.iter (fun row -> Printf.printf "NONBLANK_COUNTER_CAPTURE %s\n%!" row)
+            (smt_result_rows fresh);
+          let temporary = Filename.temp_file ~temp_dir:"."
+            "nonblank-preserved-" ".log" in
+          Fun.protect ~finally:(fun () ->
+            if Sys.file_exists temporary then Sys.remove temporary) (fun () ->
+            let channel = open_out_bin temporary in
+            Fun.protect ~finally:(fun () -> close_out channel) (fun () ->
+              output_string channel prior; output_string channel fresh;
+              flush channel;
+              if out_channel_length channel <>
+                  String.length prior + String.length fresh then
+                failwith "nonblank preserved trace length mismatch");
+            Sys.rename temporary "file.log"))) f
+
+let nonblank_counter_retained label fs gamma before before_types =
+  Alcotest.(check bool) (label ^ " original FS unchanged") true
+    (before = Expr.Set.elements fs);
+  Alcotest.(check bool) (label ^ " original Gamma unchanged") true
+    (before_types = nonblank_counter_types gamma)
+
+let nonblank_counter_model_values label model gamma lower upper position head =
+  Printf.printf "NONBLANK_COUNTER_NATIVE_MODEL[%s]=%s\n%!" label
+    (Fmt.str "%a" Smt.pp_model model);
+  let values = Hashtbl.create 4 in
+  Smt.lift_model model gamma (Hashtbl.add values)
+    (Expr.Set.of_list (List.map (fun name -> Expr.LVar name)
+      ["#k";"#n";"#to";"#dhHead"]));
+  List.iter (fun (name,want) -> match Hashtbl.find_opt values name with
+    | Some (Expr.Lit (Literal.Num actual)) ->
+        Alcotest.(check int64) (label ^ " exact native binary64 " ^ name)
+          (Int64.bits_of_float want) (Int64.bits_of_float actual)
+    | _ -> Alcotest.fail (label ^ " missing native Number model " ^ name))
+    ["#k",lower;"#n",upper;"#to",position];
+  match Hashtbl.find_opt values "#dhHead" with
+  | Some (Expr.Lit (Literal.Utf16String actual)) ->
+      Alcotest.(check bool) (label ^ " literal-respecting native UTF16 model") true
+        (actual = Utils.Utf16.of_canonical head)
+  | _ -> Alcotest.fail (label ^ " missing native UTF16 model")
+
+let nonblank_counter_native_query () = with_nonblank_counter_trace (fun () ->
+  let original,gamma = nonblank_counter_fixture () in
+  let check label fs lower upper position head =
+    let before = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let rows = nonblank_counter_rows () in
+    let model = match Smt.check_sat fs gamma with Some model -> model
+      | None -> Alcotest.fail (label ^ " missing native complete-frame SAT") in
+    let row = nonblank_counter_observe label rows "optional-nonblank-counter"
+      "sat" (nonblank_counter_pins fs lower upper position head) gamma in
+    Alcotest.(check string) (label ^ " optional raw policy") "true"
+      (smt_result_field "raw_unknown" row);
+    let timeout = int_of_string (smt_result_field "timeout_ms" row) in
+    Alcotest.(check bool) (label ^ " optional budget at most one second") true
+      (timeout > 0 && timeout <= 1000);
+    nonblank_counter_model_values label model gamma lower upper position head;
+    let files = List.sort String.compare (nonblank_counter_files ()) in
+    ignore (Smt.check_sat fs gamma);
+    Alcotest.(check bool) (label ^ " cached SAT adds no native query") true
+      (files = List.sort String.compare (nonblank_counter_files ()));
+    nonblank_counter_retained label fs gamma before types in
+  check "query403" original 0. 1. 0. "a";
+  let literal = nonblank_counter_pins original (-0.) 1. (-0.) " a " in
+  check "literal-space-and-negative-zero" literal (-0.) 1. (-0.) " a ";
+  let trimmed = Expr.UnOp (Utf16Trim,Expr.LVar "#dhHead") in
+  let original_guard = not_ (bin Equal trimmed (nonblank_utf16 "")) in
+  let reversed = Expr.Set.add (not_ (bin ValueEqual (nonblank_utf16 "") trimmed))
+    (Expr.Set.remove original_guard original) in
+  let reversed = nonblank_counter_pins reversed 2. 3. 1. " b " in
+  check "reversed-value-equality-literals" reversed 2. 3. 1. " b ")
+
+let nonblank_counter_full_frame_rejection () = with_nonblank_counter_trace (fun () ->
+  let original,gamma = nonblank_counter_fixture () in
+  (* The contradiction is outside the numeric subset: a projection or a
+     fabricated successful seed cannot satisfy this complete list frame. *)
+  let conflict = Expr.Set.union original (parse_gil_set [
+    "((l-len #locals) == 0i)"; "((l-len #locals) == 1i)"
+  ]) in
+  let before = Expr.Set.elements conflict and types = nonblank_counter_types gamma in
+  let rows = nonblank_counter_rows () in
+  Alcotest.(check bool) "full nonnumeric frame contradiction returns no model" true
+    (Option.is_none (Smt.check_sat conflict gamma));
+  ignore (nonblank_counter_observe "list-frame-conflict" rows
+    "optional-nonblank-counter" "unsat"
+    (nonblank_counter_pins conflict 0. 1. 0. "a") gamma);
+  ignore (nonblank_counter_observe "original-frame-fallback" rows
+    "required-complete" "unsat" conflict gamma);
+  nonblank_counter_retained "list-frame-conflict" conflict gamma before types)
+
+let nonblank_counter_alias_fallback () = with_nonblank_counter_trace (fun () ->
+  let original,gamma = nonblank_counter_fixture () in
+  let fixed = nonblank_counter_pins original 2. 3. 1. "c" in
+  Hashtbl.add gamma "#nonblank_alias" Type.Utf16Type;
+  let fs = Expr.Set.add
+    (bin ValueEqual (Expr.LVar "#nonblank_alias") (Expr.LVar "#dhHead")) fixed in
+  let before = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let rows = nonblank_counter_rows () in
+  let model = match Smt.check_sat fs gamma with Some model -> model
+    | None -> Alcotest.fail "alias frame lost its original native SAT fallback" in
+  Alcotest.(check bool) "two UTF16 heads do not enter the new witness path" false
+    (List.exists (fun row -> not (List.mem row rows)
+      && smt_result_field "caller" row = "optional-nonblank-counter")
+      (nonblank_counter_rows ()));
+  ignore (nonblank_counter_observe "alias-full-fallback" rows
+    "required-complete" "sat" fs gamma);
+  nonblank_counter_model_values "alias-full-fallback" model gamma 2. 3. 1. "c";
+  let alias = ref None in
+  Smt.lift_model model gamma (fun name value ->
+    if name = "#nonblank_alias" then alias := Some value)
+    (Expr.Set.singleton (Expr.LVar "#nonblank_alias"));
+  Alcotest.(check bool) "native model preserves the structural head alias" true
+    (!alias = Some (nonblank_utf16 "c"));
+  nonblank_counter_retained "alias-full-fallback" fs gamma before types)
+
+(* A one-millisecond search can resolve SAT before reaching its required check.
+   Such a model is evidence for the full frame, never UNKNOWN coverage. *)
+let nonblank_required_model_values label model gamma =
+  Printf.printf "NONBLANK_COUNTER_NATIVE_MODEL[%s]=%s\n%!" label
+    (Fmt.str "%a" Smt.pp_model model);
+  let values = Hashtbl.create 4 in
+  Smt.lift_model model gamma (Hashtbl.add values)
+    (Expr.Set.of_list (List.map (fun name -> Expr.LVar name)
+      ["#k";"#n";"#to";"#dhHead"]));
+  let number name = match Hashtbl.find_opt values name with
+    | Some (Expr.Lit (Literal.Num value)) ->
+        Alcotest.(check bool) (label ^ " native UInt32 integral " ^ name) true
+          (0. <= value && value <= 4294967295. && floor value = value);
+        Printf.printf "NONBLANK_REQUIRED_NATIVE_BITS[%s,%s]=%016Lx\n%!" label name
+          (Int64.bits_of_float value);
+        value
+    | _ -> Alcotest.fail (label ^ " missing native Number model " ^ name) in
+  let k = number "#k" in
+  let n = number "#n" in
+  let to_ = number "#to" in
+  Alcotest.(check bool) (label ^ " actual scalar bounds and order") true
+    (to_ <= 4294967294. && to_ <= k && k < n);
+  match Hashtbl.find_opt values "#dhHead" with
+  | Some (Expr.Lit (Literal.Utf16String head)) ->
+      Alcotest.(check bool) (label ^ " actual finite UTF16 bound") true
+        (Utils.Utf16.length head <= 9007199254740991);
+      let trimmed = Engine.CExprEval.evaluate_expr (Engine.CExprEval.CStore.init [])
+        (Expr.UnOp (Utf16Trim,Expr.Lit (Literal.Utf16String head))) in
+      (match trimmed with
+       | Literal.Utf16String value ->
+           Alcotest.(check bool) (label ^ " actual native head remains nonblank")
+             true (value <> Utils.Utf16.of_canonical "")
+       | _ -> Alcotest.fail (label ^ " concrete trim did not return UTF16"))
+  | _ -> Alcotest.fail (label ^ " missing native UTF16 model")
+
+let nonblank_forced_outcome label fs gamma =
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let outcome = try match Smt.check_sat fs gamma with
+    | Some model -> `Model model
+    | None -> `NoModel
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError message)
+      when message = "Incomplete totality proof: SMT returned unknown" ->
+        `RequiredUnknown message in
+  (match outcome with
+   | `Model model ->
+       Printf.printf "NONBLANK_FORCED_CAPTURE_MODEL[%s]=%s\n%!" label
+         (Fmt.str "%a" Smt.pp_model model)
+   | _ -> ());
+  let rows = nonblank_counter_rows () |> List.filter (fun row -> not (List.mem row before)) in
+  Alcotest.(check bool) (label ^ " bounded actual native records") true
+    (rows <> [] && List.length rows <= 32);
+  let queries = List.map (smt_result_field "query") rows in
+  Alcotest.(check int) (label ^ " unique actual native query IDs") (List.length queries)
+    (List.length (List.sort_uniq String.compare queries));
+  List.iter (fun row ->
+    let caller = smt_result_field "caller" row and query = smt_result_field "query" row in
+    Alcotest.(check string) (label ^ " actual one millisecond") "1"
+      (smt_result_field "timeout_ms" row);
+    Alcotest.(check string) (label ^ " actual native phase") "3"
+      (smt_result_field "phase_selection" row);
+    Alcotest.(check string) (label ^ " actual raw policy")
+      (if caller = "required-complete" then "false" else "true")
+      (smt_result_field "raw_unknown" row);
+    Alcotest.(check bool) (label ^ " actual native dump retained") true
+      (query <> "none" && Sys.file_exists (Filename.concat "gillian_smt_queries" query))) rows;
+  let rec split_prelude acc = function
+    | row::rest when smt_result_field "caller" row = "optional-numeric-subset" ->
+        Alcotest.(check bool) (label ^ " numeric prelude is inconclusive") true
+          (List.mem (smt_result_field "result" row) ["sat";"unknown"]);
+        split_prelude (row::acc) rest
+    | rest -> List.rev acc,rest in
+  let prelude,attempts = split_prelude [] rows in
+  List.iteri (fun index row ->
+    Printf.printf "NONBLANK_FORCED_PRELUDE[%s,%d]=%s\n%!" label index row) prelude;
+  let signature = List.map (fun row ->
+    smt_result_field "caller" row,smt_result_field "result" row) attempts in
+  let failed result = List.mem result ["unsat";"unknown"] in
+  let head_hint,required_unknown,branch = match signature with
+    | [("optional-nonblank-counter","sat")] -> Some "a",false,"first-sat"
+    | [("optional-nonblank-counter",first);
+       ("optional-nonblank-whitespace-counter","sat")] when failed first ->
+        Some " a",false,"whitespace-sat"
+    | [("optional-nonblank-counter",first);
+       ("optional-nonblank-whitespace-counter",second);
+       ("required-complete","sat")] when failed first && failed second ->
+        None,false,"required-sat"
+    | [("optional-nonblank-counter",first);
+       ("optional-nonblank-whitespace-counter",second);
+       ("required-complete","unknown")] when failed first && failed second ->
+        None,true,"required-unknown"
+    | _ -> Alcotest.fail (label ^ " missing, foreign or impossible native outcome") in
+  (match outcome,required_unknown with
+   | `Model model,false ->
+       (match head_hint with
+        | Some head -> nonblank_counter_model_values label model gamma 0. 1. 0. head
+        | None -> nonblank_required_model_values label model gamma)
+   | `RequiredUnknown message,true ->
+       Alcotest.(check string) (label ^ " reached required UNKNOWN retains exact error")
+         "Incomplete totality proof: SMT returned unknown" message
+   | _ -> Alcotest.fail (label ^ " native result and returned outcome disagree"));
+  List.iter (fun row ->
+    let caller = smt_result_field "caller" row in
+    let suffix,expected = match caller with
+      | "optional-nonblank-counter" -> "first",nonblank_counter_pins fs 0. 1. 0. "a"
+      | "optional-nonblank-whitespace-counter" ->
+          "whitespace",nonblank_counter_pins fs 0. 1. 0. " a"
+      | "required-complete" -> "required",fs
+      | _ -> Alcotest.fail (label ^ " foreign complete-witness caller") in
+    ignore (nonblank_counter_observe (label ^ "-" ^ suffix) before caller
+      (smt_result_field "result" row) expected gamma)) attempts;
+  Alcotest.(check int) (label ^ " required call occurs only when reached")
+    (if String.starts_with ~prefix:"required-" branch then 1 else 0)
+    (List.length (List.filter (fun row -> smt_result_field "caller" row = "required-complete") rows));
+  Printf.printf "NONBLANK_FORCED_OUTCOME[%s]=%s\n%!" label branch;
+  Printf.printf "NONBLANK_FORCED_REQUIRED_UNKNOWN_COVERAGE[%s]=%d\n%!" label
+    (if required_unknown then 1 else 0);
+  nonblank_counter_retained label fs gamma original types
+
+let nonblank_counter_unknown_contract () =
+  (* SAT receives full-query/model checks and zero UNKNOWN credit. Actual
+     required-UNKNOWN coverage remains mandatory in unchanged groups82/87. *)
+  if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then
+    with_nonblank_counter_trace (fun () ->
+      let original,gamma = nonblank_counter_fixture () in
+      Hashtbl.add gamma "#nonblank_unknown_frame" Type.BooleanType;
+      let fs = Expr.Set.add
+        (bin Equal (Expr.LVar "#nonblank_unknown_frame")
+          (Expr.Lit (Literal.Bool true))) original in
+      nonblank_forced_outcome "forced78" fs gamma)
+
+(* Keep275 actual required counterqueries, full 34-assertion GIL frames and
+   all eleven original Gamma entries. q472: b5007813b5a724183b522d4201fb3711255d34c2de1a7fd518e899f94e9e4a94;
+   q478: 09312694f8c182046fef190cdacb111f7174ff9cf59d1cdf12b51fcbd6275227.
+   Encoded assertions are not reimported; the existing native backend supplies
+   its actual datatype/prelude. These tests remain unexecuted source candidates. *)
+let symbolic_prefix_fixture cons =
+  let failed = parse_gil_set [ if cons then
+    "(! (l-sub(l+ (#prefix, {{ #dhHead }}, #dhTailValues), 0i, (as_int (#k + 1.))) == l+ ({{ l-nth(l-sub(l-sub(l+ (#prefix, {{ #dhHead }}, #dhTailValues), 0i, (as_int (#k + 1.))), 0i, 1i), 0i) }}, (cdr l-sub(l+ (#prefix, {{ #dhHead }}, #dhTailValues), 0i, (as_int (#k + 1.)))))))"
+    else "(! (l+ (#prefix, {{ #dhHead }}) == l-sub(l+ (#prefix, {{ #dhHead }}, #dhTailValues), 0i, (as_int (#k + 1.)))))" ] |> Expr.Set.choose in
+  let common = parse_gil_set [
+    "(! (u16\"length\" -e- #outKeys))";
+    "(! ((num_to_utf16 #to) -e- #outKeys))";
+    "(! ((u16-trim #dhHead) == u16\"\"))";
+    "(is_int #k)";
+    "(is_int #n)";
+    "(is_int #to)";
+    "(is_int (#k + 1.))";
+    "(is_int (#to + 1.))";
+    "(0i i<= (l-len #chosen))";
+    "(0i i<= (l-len #dhTailValues))";
+    "(0i i<= (l-len #locals))";
+    "(0i i<= (l-len #prefix))";
+    "(0i i<= (as_int (#k - 0.)))";
+    "(0i i<= (as_int (#n - (#k + 1.))))";
+    "(0i i<= (as_int (#n - (#to + 1.))))";
+    "(0. <= #k)";
+    "(0. <= #to)";
+    "(#k < #n)";
+    "(#k <= 4294967294.)";
+    "(#k <= 4294967295.)";
+    "(#n <= 4294967295.)";
+    "(#to <= 4294967294.)";
+    "(#to <= 4294967295.)";
+    "(#to <= #k)";
+    "((u16-len #dhHead) i<= 9007199254740991i)";
+    "((as_int #k) == (l-len #prefix))";
+    "((as_int #to) == (l-len #chosen))";
+    "((as_int (#k + 1.)) == (1i i+ (as_int #k)))";
+    "((as_int (#n - (#k + 1.))) i< (as_int (#n - #k)))";
+    "((as_int (#n - (#to + 1.))) i< (as_int (#n - #to)))";
+    "((as_int (#to + 1.)) == (1i i+ (as_int #to)))";
+    "((#k + 1.) <= #n)";
+    "((#to + 1.) <= #n)";
+  ] in
+  let fs = Expr.Set.add failed common in
+  Alcotest.(check int) "all actual final-post GIL assertions retained" 34
+    (Expr.Set.cardinal fs);
+  let gamma = Hashtbl.create 11 in
+  List.iter (fun (name,typ) -> Hashtbl.add gamma name typ) [
+    "#outKeys",Type.SetType; "#chosen",Type.ListType;
+    "#dhTailValues",Type.ListType; "#dhHead",Type.Utf16Type;
+    "#prefix",Type.ListType; "#dhTailKeys",Type.SetType;
+    "#dhPrefixKeys",Type.SetType; "#to",Type.NumberType;
+    "#k",Type.NumberType; "#n",Type.NumberType; "#locals",Type.ListType;
+  ];
+  Alcotest.(check int) "all actual final-post Gamma entries retained" 11
+    (Hashtbl.length gamma);
+  let length = parse_gil_set [ "((as_int #k) == (l-len #prefix))" ]
+    |> Expr.Set.choose in
+  let bridge = parse_gil_set [ "((as_int (#k + 1.)) == (1i i+ (as_int #k)))" ]
+    |> Expr.Set.choose in
+  fs,gamma,failed,length,bridge
+
+let with_symbolic_prefix_trace f =
+  with_nonblank_counter_trace (fun () ->
+    Logging.normal (fun m -> m "SYMBOLIC_PREFIX_NORMAL_BEGIN"); f ())
+
+let symbolic_prefix_observe label before caller result expected gamma =
+  let row = nonblank_counter_observe label before caller result expected gamma in
+  Printf.printf "SYMBOLIC_PREFIX_NATIVE_RESULT[%s]=%s\n%!" label row;
+  row
+
+let symbolic_prefix_new_rows before =
+  nonblank_counter_rows () |> List.filter (fun row -> not (List.mem row before))
+
+let symbolic_prefix_no_core label before =
+  Alcotest.(check bool) (label ^ " no symbolic core accepts an ineligible goal") false
+    (List.exists (fun row -> List.mem (smt_result_field "caller" row)
+      ["optional-symbolic-prefix-slice";"optional-symbolic-prefix-cons"])
+      (symbolic_prefix_new_rows before))
+
+let symbolic_prefix_core_evidence label cons fs gamma failed length bridge =
+  let expected = Expr.Set.of_list [ failed;length;bridge ] in
+  Alcotest.(check int) (label ^ " exactly three distinct original atoms") 3
+    (Expr.Set.cardinal expected);
+  Alcotest.(check bool) (label ^ " native core is a proper original subset") true
+    (Expr.Set.subset expected fs && Expr.Set.cardinal expected < Expr.Set.cardinal fs);
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) (label ^ " complete actual post counterquery rejected") true
+    (Option.is_none (Smt.check_sat fs gamma));
+  let caller = if cons then "optional-symbolic-prefix-cons"
+    else "optional-symbolic-prefix-slice" in
+  let row = symbolic_prefix_observe label before caller "unsat" expected gamma in
+  Alcotest.(check int) (label ^ " one actual native sufficient core, no fabricated fallback")
+    1 (List.length (symbolic_prefix_new_rows before));
+  Alcotest.(check string) (label ^ " unchanged optional native cap") "5000"
+    (smt_result_field "timeout_ms" row);
+  Alcotest.(check string) (label ^ " optional native policy") "true"
+    (smt_result_field "raw_unknown" row);
+  Printf.printf "SYMBOLIC_PREFIX_ORIGINAL_CORE[%s]=3/proper-subset\n%!" label;
+  nonblank_counter_retained label fs gamma original types
+
+let symbolic_prefix_full_queries () = with_symbolic_prefix_trace (fun () ->
+  List.iter (fun (label,cons) ->
+    let fs,gamma,failed,length,bridge = symbolic_prefix_fixture cons in
+    symbolic_prefix_core_evidence label cons fs gamma failed length bridge)
+    ["full-q472",false;"full-q478",true])
+
+let symbolic_prefix_reversed_renamed () = with_symbolic_prefix_trace (fun () ->
+  List.iter (fun (label,cons) ->
+    let fs,gamma,failed,length,bridge = symbolic_prefix_fixture cons in
+    let names name = "#symbolic_" ^ label ^ "_" ^ String.sub name 1 (String.length name-1) in
+    let rename e = Expr.map_opt (function
+      | Expr.LVar name -> Some (Expr.LVar (names name)),false
+      | e -> Some e,true) None e |> Option.get in
+    let reverse = function
+      | Expr.UnOp (Not, BinOp (a,op,b)) -> Expr.UnOp (Not, BinOp (b,op,a))
+      | Expr.BinOp (a,op,b) -> Expr.BinOp (b,op,a)
+      | _ -> Alcotest.fail "expected original equality orientation" in
+    let selected = Expr.Set.of_list [ failed;length;bridge ] in
+    let moved = Expr.Set.fold (fun e acc ->
+      Expr.Set.add (rename (if Expr.Set.mem e selected then reverse e else e)) acc)
+      fs Expr.Set.empty in
+    let renamed = Hashtbl.create 11 in
+    Hashtbl.iter (fun name typ -> Hashtbl.add renamed (names name) typ) gamma;
+    symbolic_prefix_core_evidence label cons moved renamed
+      (rename (reverse failed)) (rename (reverse length)) (rename (reverse bridge)))
+    ["reverse472",false;"reverse478",true])
+
+let symbolic_prefix_negative_frames () = with_symbolic_prefix_trace (fun () ->
+  let fs,gamma,failed,length,bridge = symbolic_prefix_fixture false in
+  let slice = "l-sub(l+ (#prefix, {{ #dhHead }}, #dhTailValues), 0i, (as_int (#k + 1.)))" in
+  let wrong_prefix = parse_gil_set [ "(! (#prefix == " ^ slice ^ "))" ]
+    |> Expr.Set.choose in
+  let wrong_cons = parse_gil_set [ "(! (" ^ slice
+    ^ " == l+ ({{ u16\"b\" }}, (cdr " ^ slice ^ "))))" ] |> Expr.Set.choose in
+  let check_sat_frame label frame =
+    let original = Expr.Set.elements frame and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let model = match Smt.check_sat frame gamma with Some model -> model
+      | None -> Alcotest.fail (label ^ " genuine full-frame counterexample was overaccepted") in
+    symbolic_prefix_no_core label before;
+    ignore (symbolic_prefix_observe label before "optional-nonblank-counter" "sat"
+      (nonblank_counter_pins frame 0. 1. 0. "a") gamma);
+    nonblank_counter_model_values label model gamma 0. 1. 0. "a";
+    Printf.printf "SYMBOLIC_PREFIX_NATIVE_COUNTERMODEL[%s]=retained-full-frame\n%!" label;
+    nonblank_counter_retained label frame gamma original types in
+  check_sat_frame "missing-prefix-length" (Expr.Set.remove length fs);
+  check_sat_frame "wrong-prefix" (Expr.Set.add wrong_prefix (Expr.Set.remove failed fs));
+  check_sat_frame "wrong-cons" (Expr.Set.add wrong_cons (Expr.Set.remove failed fs));
+  (* Missing bridge must remain ineligible even though the complete pinned
+     original frame can still prove this concrete instance UNSAT. *)
+  let missing = nonblank_counter_pins (Expr.Set.remove bridge fs) 0. 1. 0. "a" in
+  let original = Expr.Set.elements missing and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "missing bridge uses complete original fallback" true
+    (Option.is_none (Smt.check_sat missing gamma));
+  symbolic_prefix_no_core "missing-successor-bridge" before;
+  ignore (symbolic_prefix_observe "missing-bridge-optional" before
+    "optional-nonblank-counter" "unsat" missing gamma);
+  let required = symbolic_prefix_observe "missing-bridge-required" before
+    "required-complete" "unsat" missing gamma in
+  Alcotest.(check string) "missing bridge retains required UNKNOWN policy" "false"
+    (smt_result_field "raw_unknown" required);
+  nonblank_counter_retained "missing-successor-bridge" missing gamma original types)
+
+let symbolic_prefix_unknown_contract () =
+  (* This row must run alone in a fresh SMT_TIMEOUT=1 process. It passes only
+     for actual optional-core UNKNOWN and actual required UNKNOWN rejection;
+     a faster definite answer is a failed control, never substitute evidence. *)
+  if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then
+    with_symbolic_prefix_trace (fun () ->
+      let fs,gamma,failed,length,bridge = symbolic_prefix_fixture true in
+      let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+      let before = nonblank_counter_rows () in
+      let rejected = try ignore (Smt.check_sat fs gamma); false with
+        | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError message) ->
+            message = "Incomplete totality proof: SMT returned unknown" in
+      Alcotest.(check bool) "actual optional UNKNOWN cannot accept the final post"
+        true rejected;
+      let optional = symbolic_prefix_observe "forced-core-unknown" before
+        "optional-symbolic-prefix-cons" "unknown"
+        (Expr.Set.of_list [failed;length;bridge]) gamma in
+      let required = symbolic_prefix_observe "forced-required-unknown" before
+        "required-complete" "unknown" fs gamma in
+      List.iter (fun row -> Alcotest.(check string) "actual one-millisecond native cap"
+        "1" (smt_result_field "timeout_ms" row)) [optional;required];
+      Alcotest.(check string) "optional core UNKNOWN is inconclusive" "true"
+        (smt_result_field "raw_unknown" optional);
+      Alcotest.(check string) "required UNKNOWN remains hard" "false"
+        (smt_result_field "raw_unknown" required);
+      nonblank_counter_retained "forced-core-and-required-unknown" fs gamma original types)
+  else Printf.printf "SYMBOLIC_PREFIX_FORCED_UNKNOWN_HELD: requires fresh SMT_TIMEOUT=1\n%!"
+
+(* Keep275 focused q474: exact fifteen original GIL assertions and eleven
+   original Gamma entries. Dump SHA e8c92bc3f48e243064b2b1c7901ad5753372b828351e030cb71eff88a6e1c935.
+   This query needs a real SAT countermodel, not a prefix UNSAT theorem.
+   Unit candidates remain unexecuted; native models/dumps/results are required. *)
+let prefix_length_counter_fixture () =
+  let fs = parse_gil_set [
+    "(! ((l-len #prefix) == (as_int (#k + 1.))))";
+    "(is_int #k)";
+    "(is_int (#k + 1.))";
+    "(0i i<= (l-len #prefix))";
+    "(0i i<= (as_int (#k - 0.)))";
+    "(0i i<= (as_int (#n - (#k + 1.))))";
+    "(0. <= #k)";
+    "(#k < #n)";
+    "(#k <= 4294967294.)";
+    "(#k <= 4294967295.)";
+    "(#to <= #k)";
+    "((as_int #k) == (l-len #prefix))";
+    "((as_int (#k + 1.)) == (1i i+ (as_int #k)))";
+    "((as_int (#n - (#k + 1.))) i< (as_int (#n - #k)))";
+    "((#k + 1.) <= #n)";
+  ] in
+  let _,gamma,_,_,_ = symbolic_prefix_fixture false in
+  Alcotest.(check int) "all focused q474 GIL assertions retained" 15
+    (Expr.Set.cardinal fs);
+  Alcotest.(check int) "all focused q474 Gamma entries retained" 11
+    (Hashtbl.length gamma);
+  fs,gamma
+
+let prefix_length_counter_pins fs name =
+  List.fold_left (fun frame (role,value) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar (name role)) value) frame) fs
+    ["#k",Expr.num 0.;"#n",Expr.num 1.;"#to",Expr.num 0.;"#prefix",Expr.EList []]
+
+let prefix_length_counter_model_values label model gamma name =
+  Printf.printf "PREFIX_LENGTH_COUNTER_NATIVE_MODEL[%s]=%s\n%!" label
+    (Fmt.str "%a" Smt.pp_model model);
+  let lifted = Hashtbl.create 3 in
+  Smt.lift_model model gamma (Hashtbl.add lifted)
+    (Expr.Set.of_list (List.map (fun role -> Expr.LVar (name role)) ["#k";"#n";"#to"]));
+  List.iter (fun (role,want) -> match Hashtbl.find_opt lifted (name role) with
+    | Some (Expr.Lit (Literal.Num actual)) ->
+        Alcotest.(check int64) (label ^ " native counter binary64 " ^ role)
+          (Int64.bits_of_float want) (Int64.bits_of_float actual)
+    | _ -> Alcotest.fail (label ^ " missing native counter model " ^ role))
+    ["#k",0.;"#n",1.;"#to",0.];
+  (* Existing lifting supports primitive values only. Prefix=nil is validated
+     by actual native SAT of the complete dumped query with that exact hint;
+     preserve the raw native model without inventing a lifted List binding. *)
+  Printf.printf "PREFIX_LENGTH_COUNTER_EMPTY_PREFIX[%s]=native-SAT/full-query-hint;List-lift-unavailable\n%!" label
+
+let prefix_length_counter_query () = with_symbolic_prefix_trace (fun () ->
+  Logging.normal (fun m -> m "PREFIX_LENGTH_COUNTER_NORMAL_BEGIN");
+  let fs,gamma = prefix_length_counter_fixture () in
+  let check label frame types name =
+    let original = Expr.Set.elements frame and original_types = nonblank_counter_types types in
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " complete focused query has no UNSAT proof") false
+      (Smt.proves_unsat ~caller_kind:"prefix-length-original-complete" frame types);
+    let row = symbolic_prefix_observe label before "optional-prefix-length-counter" "sat"
+      (prefix_length_counter_pins frame name) types in
+    Alcotest.(check string) (label ^ " optional SAT policy") "true"
+      (smt_result_field "raw_unknown" row);
+    let cap = int_of_string (smt_result_field "timeout_ms" row) in
+    Alcotest.(check bool) (label ^ " actual optional SAT cap at most one second") true
+      (cap > 0 && cap <= 1000);
+    Alcotest.(check int) (label ^ " one actual complete native SAT witness") 1
+      (List.length (symbolic_prefix_new_rows before));
+    let cached_rows = nonblank_counter_rows () and cached_files = nonblank_counter_files () |> List.sort String.compare in
+    Alcotest.(check bool) (label ^ " original-key native SAT cache cannot prove UNSAT") false
+      (Smt.proves_unsat ~caller_kind:"prefix-length-cache-hit" frame types);
+    let model = match Smt.check_sat frame types with Some model -> model
+      | None -> Alcotest.fail (label ^ " original-key cache lost actual native SAT model") in
+    Alcotest.(check bool) (label ^ " cache invents no native status or dump") true
+      (cached_rows = nonblank_counter_rows ()
+       && cached_files = (nonblank_counter_files () |> List.sort String.compare));
+    prefix_length_counter_model_values label model types name;
+    nonblank_counter_retained label frame types original original_types in
+  check "focused-q474" fs gamma (fun name -> name);
+  let renamed_name name = "#prefix_length_renamed_" ^ String.sub name 1 (String.length name-1) in
+  let rename e = Expr.map_opt (function
+    | Expr.LVar name -> Some (Expr.LVar (renamed_name name)),false
+    | e -> Some e,true) None e |> Option.get in
+  let renamed_fs = Expr.Set.fold (fun e acc -> Expr.Set.add (rename e) acc) fs Expr.Set.empty in
+  let renamed_gamma = Hashtbl.create 11 in
+  Hashtbl.iter (fun name typ -> Hashtbl.add renamed_gamma (renamed_name name) typ) gamma;
+  check "renamed-focused-q474" renamed_fs renamed_gamma renamed_name;
+  (* The contradiction is outside the numeric/length shape. The full frame
+     must survive into both the seeded SAT attempt and the original fallback. *)
+  let conflict = Expr.Set.union fs (parse_gil_set [
+    "(#chosen v== nil)"; "(#chosen v== {{ u16\"false-frame\" }})" ]) in
+  let original = Expr.Set.elements conflict and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "false full list frame needs actual native UNSAT" true
+    (Smt.proves_unsat ~caller_kind:"prefix-length-full-frame-rejection" conflict gamma);
+  ignore (symbolic_prefix_observe "false-frame-seeded" before "optional-prefix-length-counter" "unsat"
+    (prefix_length_counter_pins conflict (fun name -> name)) gamma);
+  let fallback = symbolic_prefix_observe "false-frame-original-fallback" before
+    "prefix-length-full-frame-rejection" "unsat" conflict gamma in
+  Alcotest.(check string) "false frame retains unchanged full optional fallback cap" "5000"
+    (smt_result_field "timeout_ms" fallback);
+  Alcotest.(check int) "false frame records seeded and full native UNSAT" 2
+    (List.length (symbolic_prefix_new_rows before));
+  nonblank_counter_retained "false-full-list-frame" conflict gamma original types;
+  let bridge = parse_gil_set [ "((as_int (#k + 1.)) == (1i i+ (as_int #k)))" ] |> Expr.Set.choose in
+  let ineligible = prefix_length_counter_pins (Expr.Set.remove bridge fs) (fun name -> name) in
+  let original = Expr.Set.elements ineligible and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "missing focused bridge keeps original native SAT fallback" false
+    (Smt.proves_unsat ~caller_kind:"prefix-length-ineligible-complete" ineligible gamma);
+  Alcotest.(check bool) "missing bridge emits no new SAT probe" false
+    (List.exists (fun row -> smt_result_field "caller" row = "optional-prefix-length-counter")
+      (symbolic_prefix_new_rows before));
+  let fallback = symbolic_prefix_observe "missing-bridge-complete" before
+    "prefix-length-ineligible-complete" "sat" ineligible gamma in
+  Alcotest.(check string) "ineligible retains unchanged full optional fallback cap" "5000"
+    (smt_result_field "timeout_ms" fallback);
+  nonblank_counter_retained "missing-focused-bridge" ineligible gamma original types)
+
+(* SOURCE-ONLY Keep276 suffix candidate. The identical q474/q476 dumps are
+   89843B SHA256 03d5bf508ac766a953c2ec4c1b3ef4bd34cd13ffdbb205589409e87add534ba8.
+   Their 33 common atoms/Gamma equal the accepted prefix fixture. Replace only
+   its failed atom to recover the exact 34-atom, eleven-type captured query.
+   These new tests have not been parsed, built or executed. *)
+let symbolic_suffix_failed_string =
+  "(! (#dhTailValues == l-sub(l+ (#prefix, {{ #dhHead }}, #dhTailValues), (as_int (#k + 1.)), (1i i+ (((l-len #dhTailValues) i+ (l-len #prefix)) i+ (-1i i* (as_int (#k + 1.))))))))"
+
+let symbolic_suffix_fixture () =
+  let fs,gamma,old_failed,length,bridge = symbolic_prefix_fixture false in
+  let failed = parse_gil_set [ symbolic_suffix_failed_string ] |> Expr.Set.choose in
+  let fs = Expr.Set.add failed (Expr.Set.remove old_failed fs) in
+  Alcotest.(check int) "exact Keep276 suffix assertions" 34 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "exact Keep276 suffix Gamma" 11 (Hashtbl.length gamma);
+  fs,gamma,failed,length,bridge
+
+let symbolic_suffix_selected failed length bridge =
+  let counter = match length with
+    | Expr.BinOp (UnOp (NumToInt, (LVar _ as counter)), (Equal | ValueEqual), _)
+    | Expr.BinOp (_, (Equal | ValueEqual), UnOp (NumToInt, (LVar _ as counter))) -> counter
+    | _ -> failwith "suffix prefix-length link does not expose its counter" in
+  Expr.Set.of_list [failed;length;bridge;
+    Expr.UnOp (IsInt, counter);
+    Expr.BinOp (Expr.num 0., FLessThanEqual, counter);
+    Expr.BinOp (counter, FLessThanEqual, Expr.num 4294967294.)]
+
+let symbolic_suffix_alpha_expected label selected gamma failed =
+  let slice = function
+    | Expr.LstSub (NOp (LstCat, [LVar prefix;EList [LVar head];LVar tail]),
+        UnOp (NumToInt, BinOp (LVar counter,FPlus,Lit (Num step))), _) when step = 1. ->
+        Some [prefix;tail;head;counter]
+    | _ -> None in
+  let roles = match failed with
+    | Expr.UnOp (Not,BinOp (a,(Equal | ValueEqual),b)) ->
+        (match slice a with Some roles -> roles | None -> Option.get (slice b))
+    | _ -> Alcotest.fail "alpha expected core has no suffix equality" in
+  let preferred = ["#prefix";"#dhTailValues";"#dhHead";"#k"] in
+  let encoded name = String.concat "$$" (String.split_on_char '#' name) in
+  let unmapped = Hashtbl.to_seq_keys gamma |> List.of_seq
+    |> List.filter (fun name -> not (List.mem name roles)) |> List.map encoded in
+  let clashes = List.filter (fun target -> List.mem (encoded target) unmapped) preferred in
+  let targets = if clashes = ["#dhHead"]
+    then ["#prefix";"#dhTailValues";"#s05_suffix_role_head";"#k"] else preferred in
+  let mapping = List.combine roles targets in
+  let inverse = List.map (fun (a,b) -> b,a) mapping in
+  let name map n = Option.value ~default:n (List.assoc_opt n map) in
+  let expression map e = Expr.map_opt (function
+    | Expr.LVar n -> Some (Expr.LVar (name map n)),false | e -> Some e,true) None e |> Option.get in
+  let frame map fs = Expr.Set.fold (fun e acc -> Expr.Set.add (expression map e) acc) fs Expr.Set.empty in
+  let types map gamma =
+    let result = Hashtbl.create (Hashtbl.length gamma) in
+    Hashtbl.iter (fun n t -> Hashtbl.add result (name map n) t) gamma; result in
+  let copied = frame mapping selected and copied_gamma = types mapping gamma in
+  Alcotest.(check int) (label ^ " alpha copy keeps six atoms") 6 (Expr.Set.cardinal copied);
+  Alcotest.(check int) (label ^ " alpha copy keeps complete Gamma") (Hashtbl.length gamma) (Hashtbl.length copied_gamma);
+  Alcotest.(check bool) (label ^ " alpha atom inverse is exact") true (Expr.Set.equal (frame inverse copied) selected);
+  Alcotest.(check bool) (label ^ " alpha Gamma inverse is exact") true
+    (nonblank_counter_types (types inverse copied_gamma) = nonblank_counter_types gamma);
+  Printf.printf "SUFFIX_ALPHA_EXPECTED_MAP[%s]=%s\n%!" label
+    (String.concat ";" (List.map (fun (a,b) -> a ^ "->" ^ b) mapping));
+  copied,copied_gamma
+
+let symbolic_suffix_core_evidence label fs gamma failed length bridge =
+  let selected = symbolic_suffix_selected failed length bridge in
+  Alcotest.(check int) (label ^ " six distinct original atoms") 6
+    (Expr.Set.cardinal selected);
+  Alcotest.(check bool) (label ^ " proper unchanged original subset") true
+    (Expr.Set.subset selected fs && Expr.Set.cardinal selected < Expr.Set.cardinal fs);
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let copied,copied_gamma = symbolic_suffix_alpha_expected label selected gamma failed in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) (label ^ " complete suffix counterquery rejected") true
+    (Option.is_none (Smt.check_sat fs gamma));
+  let row = symbolic_prefix_observe label before "optional-symbolic-suffix-alpha-copy"
+    "unsat" copied copied_gamma in
+  Alcotest.(check int) (label ^ " one native core, no invented fallback") 1
+    (List.length (symbolic_prefix_new_rows before));
+  Alcotest.(check string) (label ^ " unchanged optional cap") "5000"
+    (smt_result_field "timeout_ms" row);
+  Alcotest.(check string) (label ^ " optional native policy") "true"
+    (smt_result_field "raw_unknown" row);
+  Printf.printf "SYMBOLIC_SUFFIX_BIJECTIVE_CORE[%s]=6/original-proper-subset/typed-inverse\n%!" label;
+  nonblank_counter_retained label fs gamma original types
+
+let symbolic_suffix_full_queries () = with_symbolic_prefix_trace (fun () ->
+  let fs,gamma,failed,length,bridge = symbolic_suffix_fixture () in
+  symbolic_suffix_core_evidence "full-q474-q476" fs gamma failed length bridge;
+  List.iter (fun (label,reverse) ->
+    let names name = "#suffix_" ^ label ^ "_" ^ String.sub name 1 (String.length name-1) in
+    let rename e = Expr.map_opt (function
+      | Expr.LVar name -> Some (Expr.LVar (names name)),false
+      | e -> Some e,true) None e |> Option.get in
+    let orient = function
+      | Expr.UnOp (Not, BinOp (a,op,b)) when reverse -> Expr.UnOp (Not, BinOp (b,op,a))
+      | Expr.BinOp (a,op,b) when reverse -> Expr.BinOp (b,op,a)
+      | e -> e in
+    let selected = Expr.Set.of_list [failed;length;bridge] in
+    let move e = rename (if Expr.Set.mem e selected then orient e else e) in
+    let moved = Expr.Set.fold (fun e acc -> Expr.Set.add (move e) acc) fs Expr.Set.empty in
+    let types = Hashtbl.create 11 in
+    Hashtbl.iter (fun name typ -> Hashtbl.add types (names name) typ) gamma;
+    symbolic_suffix_core_evidence label moved types (move failed) (move length) (move bridge))
+    ["reversed-renamed",true;"renamed",false])
+
+(* These controls deliberately pin a small test domain. They are native
+   countermodels/fallback checks for changed unit frames, not full caller
+   counterexamples or authority to narrow the Keep theorem. *)
+let symbolic_suffix_reduced_frame goal prefix tail =
+  let _,gamma,_,length,bridge = symbolic_suffix_fixture () in
+  let fs = parse_gil_set [goal; "(#k v== 0.)";
+    "(is_int #k)"; "(0. <= #k)"; "(#k <= 4294967294.)";
+    "(#dhHead v== u16\"a\")"; "(#prefix v== " ^ prefix ^ ")";
+    "(#dhTailValues v== " ^ tail ^ ")"; "(#chosen v== {{ u16\"c\" }})"] in
+  Expr.Set.add length (Expr.Set.add bridge fs),gamma,length,bridge
+
+let symbolic_suffix_no_core label before =
+  symbolic_prefix_no_core label before;
+  Alcotest.(check bool) (label ^ " no suffix core for changed/ineligible frame") false
+    (List.exists (fun row -> smt_result_field "caller" row = "optional-symbolic-suffix-slice")
+      (symbolic_prefix_new_rows before))
+
+let symbolic_suffix_reduced_countermodels () = with_symbolic_prefix_trace (fun () ->
+  let whole = "l+ (#prefix, {{ #dhHead }}, #dhTailValues)" in
+  let start = "(as_int (#k + 1.))" in
+  let length s leading = "(" ^ leading ^ " i+ (((l-len #dhTailValues) i+ (l-len #prefix)) i+ (-1i i* " ^ s ^ ")))" in
+  let goal left body s count = "(! (" ^ left ^ " == l-sub(" ^ body ^ ", " ^ s ^ ", " ^ count ^ ")))" in
+  let tail = "{{ u16\"b\" }}" in
+  List.iter (fun (label,failed,prefix,missing_length) ->
+    let fs,gamma,length_link,_ = symbolic_suffix_reduced_frame failed prefix tail in
+    let fs = if missing_length then Expr.Set.remove length_link fs else fs in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let model = match Smt.check_sat fs gamma with Some model -> model
+      | None -> Alcotest.fail (label ^ " native reduced countermodel was overaccepted") in
+    symbolic_suffix_no_core label before;
+    let row = symbolic_prefix_observe label before "required-complete" "sat" fs gamma in
+    Alcotest.(check string) (label ^ " required SAT policy") "false"
+      (smt_result_field "raw_unknown" row);
+    Printf.printf "SYMBOLIC_SUFFIX_REDUCED_NATIVE_MODEL[%s]=%s\n%!" label
+      (Fmt.str "%a" Smt.pp_model model);
+    nonblank_counter_retained label fs gamma original types)
+    ["wrong-tail",goal "#chosen" whole start (length start "1i"),"nil",false;
+     "wrong-start",goal "#dhTailValues" whole "0i" (length "0i" "1i"),"nil",false;
+     "wrong-length",goal "#dhTailValues" whole start (length start "0i"),"nil",false;
+     "wrong-decomposition",goal "#dhTailValues"
+       "l+ (#prefix, {{ #dhHead, #dhHead }}, #dhTailValues)" start (length start "1i"),"nil",false;
+     "missing-prefix-length",symbolic_suffix_failed_string,"{{ u16\"a\" }}",true])
+
+let symbolic_suffix_ineligible_fallbacks () = with_symbolic_prefix_trace (fun () ->
+  List.iter (fun (label,number_head) ->
+    let fs,gamma,_,bridge = symbolic_suffix_reduced_frame symbolic_suffix_failed_string
+      "nil" "{{ u16\"b\" }}" in
+    let fs = if number_head then (
+      let old_head = bin ValueEqual (Expr.LVar "#dhHead") (nonblank_utf16 "a") in
+      Alcotest.(check bool) "reduced UTF16 head pin exists before typed control" true
+        (Expr.Set.mem old_head fs);
+      Hashtbl.replace gamma "#dhHead" Type.NumberType;
+      Expr.Set.add (bin ValueEqual (Expr.LVar "#dhHead") (Expr.num 1.))
+        (Expr.Set.remove old_head fs))
+      else Expr.Set.remove bridge fs in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " literal-pinned reduced frame uses complete UNSAT fallback") true
+      (Option.is_none (Smt.check_sat fs gamma));
+    symbolic_suffix_no_core label before;
+    let row = symbolic_prefix_observe label before "required-complete" "unsat" fs gamma in
+    Alcotest.(check string) (label ^ " required UNKNOWN policy preserved") "false"
+      (smt_result_field "raw_unknown" row);
+    Printf.printf "SYMBOLIC_SUFFIX_REDUCED_FALLBACK[%s]=required-native-UNSAT\n%!" label;
+    nonblank_counter_retained label fs gamma original types)
+    ["missing-successor-bridge",false;"well-typed-Number-head-ineligible",true])
+
+let symbolic_suffix_unknown_contract () =
+  (* Fresh one-millisecond process only. A definite optional/required result
+     fails this control; it cannot replace actual native UNKNOWN evidence. *)
+  if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then
+    with_symbolic_prefix_trace (fun () ->
+      let fs,gamma,failed,length,bridge = symbolic_suffix_fixture () in
+      let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+      let before = nonblank_counter_rows () in
+      let rejected = try ignore (Smt.check_sat fs gamma); false with
+        | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError message) ->
+            message = "Incomplete totality proof: SMT returned unknown" in
+      Alcotest.(check bool) "actual suffix optional UNKNOWN cannot accept final POST" true rejected;
+      let selected = symbolic_suffix_selected failed length bridge in
+      let copied,copied_gamma = symbolic_suffix_alpha_expected "forced-suffix-alpha" selected gamma failed in
+      let alpha = symbolic_prefix_observe "forced-suffix-alpha-unknown" before
+        "optional-symbolic-suffix-alpha-copy" "unknown" copied copied_gamma in
+      let optional = symbolic_prefix_observe "forced-suffix-core-unknown" before
+        "optional-symbolic-suffix-slice" "unknown" selected gamma in
+      let required = symbolic_prefix_observe "forced-suffix-required-unknown" before
+        "required-complete" "unknown" fs gamma in
+      List.iter (fun row -> Alcotest.(check string) "actual one-millisecond native cap" "1"
+        (smt_result_field "timeout_ms" row)) [alpha;optional;required];
+      Alcotest.(check string) "alpha suffix UNKNOWN is inconclusive" "true"
+        (smt_result_field "raw_unknown" alpha);
+      Alcotest.(check string) "optional suffix UNKNOWN is inconclusive" "true"
+        (smt_result_field "raw_unknown" optional);
+      Alcotest.(check string) "required suffix UNKNOWN remains hard" "false"
+        (smt_result_field "raw_unknown" required);
+      nonblank_counter_retained "forced-suffix-and-required-unknown" fs gamma original types)
+  else Printf.printf "SYMBOLIC_SUFFIX_FORCED_UNKNOWN_HELD: requires fresh SMT_TIMEOUT=1\n%!"
+
+(* SOURCE-ONLY equality symmetry controls; native sufficiency remains unproved. *)
+let symbolic_suffix_equality_masks () = with_symbolic_prefix_trace (fun () ->
+  let fs,gamma,failed,length,bridge = symbolic_suffix_fixture () in
+  List.iter (fun mask ->
+    let label = "equality-mask-" ^ string_of_int mask in
+    let names name = "#suffix_equality_" ^ string_of_int mask ^ "_"
+      ^ String.sub name 1 (String.length name-1) in
+    let rename e = Expr.map_opt (function
+      | Expr.LVar name -> Some (Expr.LVar (names name)),false
+      | e -> Some e,true) None e |> Option.get in
+    let reverse bit e =
+      if (mask land bit) = 0 then e else match e with
+      | Expr.UnOp (Not, BinOp (a, ((Equal | ValueEqual) as op), b)) ->
+          Expr.UnOp (Not, BinOp (b,op,a))
+      | Expr.BinOp (a, ((Equal | ValueEqual) as op), b) -> Expr.BinOp (b,op,a)
+      | _ -> Alcotest.fail "suffix equality mask selected a non-equality" in
+    let move e = rename (
+      if Expr.equal e failed then reverse 1 e
+      else if Expr.equal e length then reverse 2 e
+      else if Expr.equal e bridge then reverse 4 e
+      else e) in
+    let moved = Expr.Set.fold (fun e acc -> Expr.Set.add (move e) acc)
+      fs Expr.Set.empty in
+    let types = Hashtbl.create 11 in
+    Hashtbl.iter (fun name typ -> Hashtbl.add types (names name) typ) gamma;
+    Alcotest.(check int) (label ^ " all original assertions retained") 34
+      (Expr.Set.cardinal moved);
+    Alcotest.(check int) (label ^ " all original Gamma entries retained") 11
+      (Hashtbl.length types);
+    symbolic_suffix_core_evidence label moved types (move failed) (move length) (move bridge))
+    [0;1;2;3;4;5;6;7])
+
+let native_equality_control_retained label fs gamma before before_types =
+  Alcotest.(check bool) (label ^ " original FS bit identity unchanged") true
+    (Expr.Set.equal (Expr.Set.of_list before) fs);
+  Alcotest.(check bool) (label ^ " original Gamma unchanged") true
+    (before_types = nonblank_counter_types gamma)
+
+let native_equality_symmetry_controls () = with_symbolic_prefix_trace (fun () ->
+  Alcotest.(check bool) "snapshot NaN retains structural bit identity" true
+    (Expr.Set.equal (Expr.Set.singleton (Expr.num nan))
+      (Expr.Set.singleton (Expr.num nan)));
+  Alcotest.(check bool) "snapshot signed zeros remain structurally distinct" false
+    (Expr.Set.equal (Expr.Set.singleton (Expr.num 0.))
+      (Expr.Set.singleton (Expr.num (-0.))));
+  let run (tag,left_type,right_type,left_value,right_value,op,truth,literal_right) reverse =
+    let label = tag ^ (if reverse then "-reverse" else "-forward") in
+    let left_name = "#equality_" ^ label ^ "_left" in
+    let right_name = "#equality_" ^ label ^ "_right" in
+    let left = Expr.LVar left_name and right = Expr.LVar right_name in
+    let gamma = Hashtbl.create 2 in
+    List.iter (fun (name,typ) -> Option.iter (Hashtbl.add gamma name) typ)
+      [left_name,left_type;right_name,right_type];
+    let target = if literal_right then right_value else right in
+    let comparison = if reverse then bin op target left else bin op left target in
+    let fs = Expr.Set.of_list [bin ValueEqual left left_value;
+      bin ValueEqual right right_value;not_ comparison] in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    (* Direct required native execution keeps a real query/model for every
+       control; no literal reduction, sufficient shortcut or SAT cache credit. *)
+    let model = Smt.exec_sat fs gamma in
+    Alcotest.(check bool) (label ^ " exact equality truth from native query") truth
+      (Option.is_none model);
+    let row = symbolic_prefix_observe label before "required-complete"
+      (if truth then "unsat" else "sat") fs gamma in
+    Alcotest.(check int) (label ^ " one direct native query") 1
+      (List.length (symbolic_prefix_new_rows before));
+    Alcotest.(check string) (label ^ " required native cap") "30000"
+      (smt_result_field "timeout_ms" row);
+    Alcotest.(check string) (label ^ " required UNKNOWN policy") "false"
+      (smt_result_field "raw_unknown" row);
+    (match model with None -> () | Some model ->
+      Printf.printf "EQUALITY_NATIVE_MODEL[%s]=%s\n%!" label (Fmt.str "%a" Smt.pp_model model);
+      let scalar_values = List.filter (fun (_,typ,_) ->
+        typ = Some Type.IntType || typ = Some Type.NumberType)
+        [left_name,left_type,left_value;right_name,right_type,right_value] in
+      let lifted = Hashtbl.create 2 in
+      Smt.lift_model model gamma (Hashtbl.add lifted)
+        (Expr.Set.of_list (List.map (fun (name,_,_) -> Expr.LVar name) scalar_values));
+      List.iter (fun (name,_,expected) -> match expected,Hashtbl.find_opt lifted name with
+        | Expr.Lit (Literal.Int want), Some (Expr.Lit (Literal.Int actual)) ->
+            Alcotest.(check bool) (label ^ " exact native Int " ^ name) true (Z.equal want actual)
+        | Expr.Lit (Literal.Num want), Some (Expr.Lit (Literal.Num actual)) ->
+            if Float.is_nan want then
+              Alcotest.(check bool) (label ^ " actual native NaN " ^ name) true (Float.is_nan actual)
+            else Alcotest.(check int64) (label ^ " exact native Number bits " ^ name)
+              (Int64.bits_of_float want) (Int64.bits_of_float actual)
+        | _ -> Alcotest.fail (label ^ " missing native scalar " ^ name)) scalar_values);
+    native_equality_control_retained label fs gamma original types in
+  List.iter (fun control -> List.iter (run control) [false;true])
+    [
+      ("native-int-same", Some Type.IntType, Some Type.IntType, (Expr.int 7), (Expr.int 7),
+        Equal, true, false);
+      ("native-int-different", Some Type.IntType, Some Type.IntType, (Expr.int 7), (Expr.int 8),
+        Equal, false, false);
+      ("native-list-same", Some Type.ListType, Some Type.ListType, (Expr.EList [nonblank_utf16 "a"]), (Expr.EList [nonblank_utf16 "a"]),
+        Equal, true, false);
+      ("native-list-different", Some Type.ListType, Some Type.ListType, (Expr.EList [nonblank_utf16 "a"]), (Expr.EList [nonblank_utf16 "b"]),
+        Equal, false, false);
+      ("number-zero-equal", Some Type.NumberType, Some Type.NumberType, (Expr.num 0.), (Expr.num (-0.)),
+        Equal, true, false);
+      ("number-zero-value", Some Type.NumberType, Some Type.NumberType, (Expr.num 0.), (Expr.num (-0.)),
+        ValueEqual, false, false);
+      ("number-nan-equal", Some Type.NumberType, Some Type.NumberType, (Expr.num nan), (Expr.num nan),
+        Equal, false, false);
+      ("number-nan-value", Some Type.NumberType, Some Type.NumberType, (Expr.num nan), (Expr.num nan),
+        ValueEqual, true, false);
+      ("wrapped-zero-equal", None, None, (Expr.num 0.), (Expr.num (-0.)),
+        Equal, true, false);
+      ("wrapped-zero-value", None, None, (Expr.num 0.), (Expr.num (-0.)),
+        ValueEqual, false, false);
+      ("wrapped-nan-equal", None, None, (Expr.num nan), (Expr.num nan),
+        Equal, false, false);
+      ("wrapped-nan-value", None, None, (Expr.num nan), (Expr.num nan),
+        ValueEqual, true, false);
+      ("nested-zero-equal", Some Type.ListType, Some Type.ListType, (Expr.EList [Expr.EList [Expr.num 0.]]), (Expr.EList [Expr.EList [Expr.num (-0.)]]),
+        Equal, false, false);
+      ("nested-zero-value", Some Type.ListType, Some Type.ListType, (Expr.EList [Expr.EList [Expr.num 0.]]), (Expr.EList [Expr.EList [Expr.num (-0.)]]),
+        ValueEqual, false, false);
+      ("nested-nan-equal", Some Type.ListType, Some Type.ListType, (Expr.EList [Expr.EList [Expr.num nan]]), (Expr.EList [Expr.EList [Expr.num nan]]),
+        Equal, true, false);
+      ("nested-nan-value", Some Type.ListType, Some Type.ListType, (Expr.EList [Expr.EList [Expr.num nan]]), (Expr.EList [Expr.EList [Expr.num nan]]),
+        ValueEqual, true, false);
+      ("mixed-utf16-number-equal", Some Type.Utf16Type, Some Type.NumberType, (nonblank_utf16 "a"), (Expr.num 1.),
+        Equal, false, false);
+      ("mixed-utf16-number-value", Some Type.Utf16Type, Some Type.NumberType, (nonblank_utf16 "a"), (Expr.num 1.),
+        ValueEqual, false, false);
+      ("mixed-int-list-value", Some Type.IntType, Some Type.ListType, (Expr.int 7), (Expr.EList [nonblank_utf16 "a"]),
+        ValueEqual, false, false);
+      ("boolean-true-simplification", Some Type.BooleanType, Some Type.BooleanType, (Expr.Lit (Literal.Bool true)), (Expr.Lit (Literal.Bool true)),
+        Equal, true, true);
+      ("boolean-false-simplification", Some Type.BooleanType, Some Type.BooleanType, (Expr.Lit (Literal.Bool false)), (Expr.Lit (Literal.Bool true)),
+        Equal, false, true)
+    ];
+  List.iter (fun reverse ->
+    let label = "mixed-int-list-error" ^ (if reverse then "-reverse" else "-forward") in
+    let left = Expr.LVar ("#equality_" ^ label ^ "_left") in
+    let right = Expr.LVar ("#equality_" ^ label ^ "_right") in
+    let gamma = Hashtbl.create 2 in
+    (match left,right with Expr.LVar l,Expr.LVar r ->
+      Hashtbl.add gamma l Type.IntType;Hashtbl.add gamma r Type.ListType | _ -> assert false);
+    let comparison = if reverse then bin Equal right left else bin Equal left right in
+    let fs = Expr.Set.of_list [bin ValueEqual left (Expr.int 7);
+      bin ValueEqual right (Expr.EList [nonblank_utf16 "a"]);not_ comparison] in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let files = List.sort String.compare (nonblank_counter_files ()) in
+    let rejected = try ignore (Smt.exec_sat fs gamma);false with
+      | Smt.SMT_error message -> message = "incompatible equality, type error!" in
+    Alcotest.(check bool) (label ^ " exact incompatible type error") true rejected;
+    Alcotest.(check bool) (label ^ " encoding error creates no native result") true
+      (before = nonblank_counter_rows ());
+    Alcotest.(check bool) (label ^ " encoding error creates no query dump") true
+      (files = List.sort String.compare (nonblank_counter_files ()));
+    Printf.printf "EQUALITY_EXPECTED_TYPE_ERROR[%s]=incompatible equality, type error!\n%!" label;
+    native_equality_control_retained label fs gamma original types)
+    [false;true])
+
+let suffix_alpha_copy_controls () = with_symbolic_prefix_trace (fun () ->
+  let fs,gamma,failed,length,bridge = symbolic_suffix_fixture () in
+  (* A fresh role rename prevents an earlier positive unit's full-frame cache
+     from replacing this control's actual native query. *)
+  let rename name = "#alpha_control_" ^ String.sub name 1 (String.length name-1) in
+  let move e = Expr.map_opt (function
+    | Expr.LVar n -> Some (Expr.LVar (rename n)),false | e -> Some e,true) None e |> Option.get in
+  let moved = Expr.Set.fold (fun e acc -> Expr.Set.add (move e) acc) fs Expr.Set.empty in
+  let moved_gamma = Hashtbl.create 11 in
+  Hashtbl.iter (fun n t -> Hashtbl.add moved_gamma (rename n) t) gamma;
+  symbolic_suffix_core_evidence "alpha-copy-positive" moved moved_gamma (move failed) (move length) (move bridge);
+  List.iter (fun (label,key) ->
+    let copied_gamma = Hashtbl.copy moved_gamma in
+    Hashtbl.add copied_gamma key Type.IntType;
+    symbolic_suffix_core_evidence label moved copied_gamma (move failed) (move length) (move bridge);
+    Alcotest.(check bool) (label ^ " unused occupied head type retained") true
+      (Hashtbl.find_opt copied_gamma key = Some Type.IntType))
+    ["target-name-collision","#dhHead";
+     "sanitized-name-collision","$$dhHead"];
+  let alias e = Expr.map_opt (function
+    | Expr.LVar "#prefix" -> Some (Expr.LVar "#dhTailValues"),false | e -> Some e,true) None e |> Option.get in
+  let alias_fs = Expr.Set.fold (fun e acc -> Expr.Set.add (alias e) acc) fs Expr.Set.empty in
+  let original = Expr.Set.elements alias_fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "alias preserves old UNSAT path" true (Option.is_none (Smt.check_sat alias_fs gamma));
+  Alcotest.(check bool) "alias cannot dispatch a four-role alpha copy" false
+    (List.exists (fun row -> smt_result_field "caller" row = "optional-symbolic-suffix-alpha-copy") (symbolic_prefix_new_rows before));
+  ignore (symbolic_prefix_observe "alpha-alias-fallback" before
+    "optional-symbolic-suffix-slice" "unsat"
+    (symbolic_suffix_selected (alias failed) (alias length) (alias bridge)) gamma);
+  Alcotest.(check int) "alias exact one original native fallback" 1
+    (List.length (symbolic_prefix_new_rows before));
+  nonblank_counter_retained "alias" alias_fs gamma original types;
+  let left = "(! (#dhTailValues ==" in
+  let goal = "(! (#chosen ==" ^ String.sub symbolic_suffix_failed_string
+    (String.length left) (String.length symbolic_suffix_failed_string - String.length left) in
+  let sat_fs,sat_gamma,_,_ = symbolic_suffix_reduced_frame goal "nil" "{{ u16\"b\" }}" in
+  let original = Expr.Set.elements sat_fs and types = nonblank_counter_types sat_gamma in
+  let before = nonblank_counter_rows () in
+  let native_model = match Smt.exec_sat sat_fs sat_gamma with Some model -> model
+    | None -> Alcotest.fail "changed goal full native SAT control was UNSAT" in
+  ignore (symbolic_prefix_observe "alpha-ineligible-SAT" before "required-complete" "sat" sat_fs sat_gamma);
+  Printf.printf "SUFFIX_ALPHA_ORIGINAL_NATIVE_MODEL=%s\n%!" (Fmt.str "%a" Smt.pp_model native_model);
+  let lifted = Hashtbl.create 1 in
+  Smt.lift_model native_model sat_gamma (Hashtbl.add lifted) (Expr.Set.singleton (Expr.LVar "#k"));
+  Alcotest.(check bool) "full SAT model remains under original names" true
+    (match Hashtbl.find_opt lifted "#k" with Some (Expr.Lit (Num n)) -> Int64.bits_of_float n = Int64.bits_of_float 0. | _ -> false);
+  nonblank_counter_retained "original-direct-SAT" sat_fs sat_gamma original types;
+  (* This isolated cache control has one Number variable and no slice/order
+     premises: all three optional witness selectors are structurally ineligible.
+     It tests cache/model identity, not the full caller or changed-goal frame. *)
+  let cache_fs = Expr.Set.singleton (bin ValueEqual (Expr.LVar "#k") (Expr.num 0.)) in
+  let cache_gamma = Hashtbl.create 1 in
+  Hashtbl.add cache_gamma "#k" Type.NumberType;
+  let cache_original = Expr.Set.elements cache_fs and cache_types = nonblank_counter_types cache_gamma in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "original cache seed is genuinely native SAT" false
+    (Smt.proves_unsat ~caller_kind:"optional-alpha-original-cache" cache_fs cache_gamma);
+  ignore (symbolic_prefix_observe "alpha-original-cache-SAT" before
+    "optional-alpha-original-cache" "sat" cache_fs cache_gamma);
+  Alcotest.(check int) "cache seed exact one native query" 1
+    (List.length (symbolic_prefix_new_rows before));
+  let before_cache = nonblank_counter_rows () in
+  let model = match Smt.check_sat cache_fs cache_gamma with Some model -> model
+    | None -> Alcotest.fail "original native SAT cache was wrongly proved UNSAT" in
+  Printf.printf "SUFFIX_ALPHA_ORIGINAL_MODEL=%s\n%!" (Fmt.str "%a" Smt.pp_model model);
+  Alcotest.(check bool) "original SAT cache adds no native row" true (before_cache = nonblank_counter_rows ());
+  let cached_lifted = Hashtbl.create 1 in
+  Smt.lift_model model cache_gamma (Hashtbl.add cached_lifted) (Expr.Set.singleton (Expr.LVar "#k"));
+  Alcotest.(check bool) "cached SAT model retains original signed-zero name/value" true
+    (match Hashtbl.find_opt cached_lifted "#k" with Some (Expr.Lit (Num n)) -> Int64.bits_of_float n = Int64.bits_of_float 0. | _ -> false);
+  nonblank_counter_retained "original-SAT-cache" cache_fs cache_gamma cache_original cache_types;
+  let bound = Expr.LVar "#alpha_bound" in
+  let binder_fs = Expr.Set.singleton (Expr.ForAll (["#alpha_bound",Some Type.IntType],bin Equal bound bound)) in
+  let binder_gamma = Hashtbl.create 1 in
+  Hashtbl.add binder_gamma "#alpha_unused" Type.IntType;
+  let binder_original = binder_fs and binder_types = nonblank_counter_types binder_gamma in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "binder frame remains native SAT" true (Option.is_some (Smt.check_sat binder_fs binder_gamma));
+  Alcotest.(check bool) "binder cannot dispatch alpha" false
+    (List.exists (fun row -> smt_result_field "caller" row = "optional-symbolic-suffix-alpha-copy") (symbolic_prefix_new_rows before));
+  ignore (symbolic_prefix_observe "alpha-binder-ineligible" before "required-complete" "sat" binder_fs binder_gamma);
+  Alcotest.(check bool) "binder caller FS remains unchanged" true (Expr.Set.equal binder_original binder_fs);
+  Alcotest.(check bool) "binder caller Gamma remains unchanged" true (binder_types = nonblank_counter_types binder_gamma))
+
+let suffix_role_normalization_controls () = with_symbolic_prefix_trace (fun () ->
+  let fs,gamma,failed,length,bridge = symbolic_suffix_fixture () in
+  let originals = ["#prefix";"#dhTailValues";"#dhHead";"#k"] in
+  let moved_case label targets =
+    let mapping = List.combine originals targets in
+    let rename name = match List.assoc_opt name mapping with
+      | Some target -> target
+      | None -> "#role_" ^ label ^ "_" ^ String.sub name 1 (String.length name-1) in
+    let move e = Expr.map_opt (function
+      | Expr.LVar name -> Some (Expr.LVar (rename name)),false
+      | e -> Some e,true) None e |> Option.get in
+    let moved = Expr.Set.fold (fun e acc -> Expr.Set.add (move e) acc) fs Expr.Set.empty in
+    let moved_gamma = Hashtbl.create (Hashtbl.length gamma) in
+    Hashtbl.iter (fun name typ -> Hashtbl.add moved_gamma (rename name) typ) gamma;
+    Alcotest.(check int) (label ^ " complete original frame cardinality") 34 (Expr.Set.cardinal moved);
+    Alcotest.(check int) (label ^ " complete original Gamma cardinality") 11 (Hashtbl.length moved_gamma);
+    moved,moved_gamma,move failed,move length,move bridge in
+  List.iter (fun (label,targets) ->
+    let moved,moved_gamma,failed,length,bridge = moved_case label targets in
+    symbolic_suffix_core_evidence label moved moved_gamma failed length bridge)
+    ["role-identity",originals;
+     "role-permutation",["#dhTailValues";"#prefix";"#k";"#dhHead"];
+     "role-partial-overlap",["#role_partial_prefix";"#prefix";"#dhHead";"#k"]];
+  List.iter (fun (label,key) ->
+    let targets = List.map (fun name -> "#role_" ^ label ^ "_" ^ String.sub name 1 (String.length name-1)) originals in
+    let moved,moved_gamma,failed,length,bridge = moved_case label targets in
+    Hashtbl.add moved_gamma key Type.IntType;
+    symbolic_suffix_core_evidence label moved moved_gamma failed length bridge;
+    Alcotest.(check bool) (label ^ " unused occupied head type retained") true
+      (Hashtbl.find_opt moved_gamma key = Some Type.IntType))
+    ["role-unused-target","#dhHead";"role-sanitize-alias","$$dhHead"])
+
+(* Both occupied targets are tested with the existing wrong-tail SAT frame.
+   Its suffix selector is already ineligible: this observes original SAT/model
+   preservation, not isolated native coverage of the occupied-target guard. *)
+let suffix_fresh_head_rejection_controls () = with_symbolic_prefix_trace (fun () ->
+  let left = "(! (#dhTailValues ==" in
+  let goal = "(! (#chosen ==" ^ String.sub symbolic_suffix_failed_string
+    (String.length left) (String.length symbolic_suffix_failed_string - String.length left) in
+  let fs,gamma,_,_ = symbolic_suffix_reduced_frame goal "nil" "{{ u16\"b\" }}" in
+  List.iter (fun (label,keys) ->
+    let mapping = Hashtbl.to_seq_keys gamma |> List.of_seq |> List.map (fun name ->
+      name,"#fresh_head_" ^ label ^ "_" ^ String.sub name 1 (String.length name-1)) in
+    let inverse = List.map (fun (a,b) -> b,a) mapping in
+    let name map n = Option.value ~default:n (List.assoc_opt n map) in
+    let move map e = Expr.map_opt (function
+      | Expr.LVar n -> Some (Expr.LVar (name map n)),false | e -> Some e,true) None e |> Option.get in
+    let frame map fs = Expr.Set.fold (fun e acc -> Expr.Set.add (move map e) acc) fs Expr.Set.empty in
+    let types map gamma =
+      let copied = Hashtbl.create (Hashtbl.length gamma) in
+      Hashtbl.iter (fun n t -> Hashtbl.add copied (name map n) t) gamma; copied in
+    let moved = frame mapping fs and moved_gamma = types mapping gamma in
+    Alcotest.(check bool) (label ^ " complete SAT frame inverse") true
+      (Expr.Set.equal (frame inverse moved) fs);
+    Alcotest.(check bool) (label ^ " complete SAT Gamma inverse") true
+      (nonblank_counter_types (types inverse moved_gamma) = nonblank_counter_types gamma);
+    List.iter (fun key -> Hashtbl.add moved_gamma key Type.IntType) keys;
+    Alcotest.(check int) (label ^ " complete SAT frame cardinality") 11 (Expr.Set.cardinal moved);
+    Alcotest.(check int) (label ^ " complete Gamma plus two unused types") 13 (Hashtbl.length moved_gamma);
+    let original = Expr.Set.elements moved and before_types = nonblank_counter_types moved_gamma in
+    let before = nonblank_counter_rows () in
+    let model = match Smt.check_sat moved moved_gamma with Some model -> model
+      | None -> Alcotest.fail (label ^ " complete ineligible SAT frame was overaccepted") in
+    symbolic_suffix_no_core label before;
+    Alcotest.(check bool) (label ^ " no alpha native dispatch") false
+      (List.exists (fun row -> smt_result_field "caller" row = "optional-symbolic-suffix-alpha-copy")
+        (symbolic_prefix_new_rows before));
+    let numeric = frame mapping (parse_gil_set
+      ["(#k v== 0.)"; "(is_int #k)"; "(0. <= #k)"; "(#k <= 4294967294.)"]) in
+    Alcotest.(check int) (label ^ " exact four original numeric atoms") 4
+      (Expr.Set.cardinal numeric);
+    Alcotest.(check bool) (label ^ " numeric frame is a proper original subset") true
+      (Expr.Set.subset numeric moved && Expr.Set.cardinal numeric < Expr.Set.cardinal moved);
+    let numeric_row = symbolic_prefix_observe (label ^ "-numeric") before
+      "optional-numeric-subset" "sat" numeric moved_gamma in
+    Alcotest.(check string) (label ^ " optional numeric raw policy") "true"
+      (smt_result_field "raw_unknown" numeric_row);
+    Alcotest.(check string) (label ^ " optional numeric cap") "5000"
+      (smt_result_field "timeout_ms" numeric_row);
+    let complete_row = symbolic_prefix_observe label before
+      "required-complete" "sat" moved moved_gamma in
+    Alcotest.(check string) (label ^ " required complete raw policy") "false"
+      (smt_result_field "raw_unknown" complete_row);
+    Alcotest.(check string) (label ^ " required complete cap") "30000"
+      (smt_result_field "timeout_ms" complete_row);
+    Alcotest.(check int) (label ^ " exactly two accounted native rows") 2
+      (List.length (symbolic_prefix_new_rows before));
+    Printf.printf "SUFFIX_FRESH_HEAD_REJECTION_MODEL[%s]=%s\n%!" label (Fmt.str "%a" Smt.pp_model model);
+    let counter = name mapping "#k" and lifted = Hashtbl.create 1 in
+    Smt.lift_model model moved_gamma (Hashtbl.add lifted) (Expr.Set.singleton (Expr.LVar counter));
+    Alcotest.(check bool) (label ^ " original mapped counter model retains positive zero") true
+      (match Hashtbl.find_opt lifted counter with Some (Expr.Lit (Num n)) ->
+        Int64.bits_of_float n = Int64.bits_of_float 0. | _ -> false);
+    Alcotest.(check bool) (label ^ " both unused occupied types retained") true
+      (List.for_all (fun key -> Hashtbl.find_opt moved_gamma key = Some Type.IntType) keys);
+    nonblank_counter_retained label moved moved_gamma original before_types)
+    ["both-heads-occupied",["#dhHead";"#s05_suffix_role_head"];
+     "both-head-aliases",["$$dhHead";"$$s05_suffix_role_head"]])
+
+(* Keep277 query470: all 34 original GIL facts and all 11 input types.
+   The negated goal is removed only to pass the ordinary implication to
+   FOSolver. Dump SHA256
+   9d9fbd967f6f6cebf1d00dd6a4227a104f9881b2f2e52888c9aac4dc6d7b3227.
+   Native expectations below are unobserved source-only controls. *)
+let symmetric_successor_fixture () =
+  let fs = parse_gil_set [
+    "(! (u16\"length\" -e- #outKeys))";
+    "(! ((num_to_utf16 #to) -e- #outKeys))";
+    "(! ((u16-trim #dhHead) == u16\"\"))";
+    "(! ((#to + 1.) <= (#k + 1.)))";
+    "(is_int #k)";
+    "(is_int #n)";
+    "(is_int #to)";
+    "(is_int (#k + 1.))";
+    "(is_int (#to + 1.))";
+    "(0i i<= (l-len #chosen))";
+    "(0i i<= (l-len #dhTailValues))";
+    "(0i i<= (l-len #locals))";
+    "(0i i<= (l-len #prefix))";
+    "(0i i<= (as_int (#k - 0.)))";
+    "(0i i<= (as_int (#n - (#k + 1.))))";
+    "(0i i<= (as_int (#n - (#to + 1.))))";
+    "(0. <= #k)";
+    "(0. <= #to)";
+    "(#k < #n)";
+    "(#k <= 4294967294.)";
+    "(#k <= 4294967295.)";
+    "(#n <= 4294967295.)";
+    "(#to <= 4294967294.)";
+    "(#to <= 4294967295.)";
+    "(#to <= #k)";
+    "((u16-len #dhHead) i<= 9007199254740991i)";
+    "((as_int #k) == (l-len #prefix))";
+    "((as_int #to) == (l-len #chosen))";
+    "((as_int (#k + 1.)) == (1i i+ (as_int #k)))";
+    "((as_int (#n - (#k + 1.))) i< (as_int (#n - #k)))";
+    "((as_int (#n - (#to + 1.))) i< (as_int (#n - #to)))";
+    "((as_int (#to + 1.)) == (1i i+ (as_int #to)))";
+    "((#k + 1.) <= #n)";
+    "((#to + 1.) <= #n)";
+  ] in
+  let gamma = Hashtbl.create 11 in
+  List.iter (fun (name,typ) -> Hashtbl.add gamma name typ) [
+    "#outKeys",Type.SetType;
+    "#chosen",Type.ListType;
+    "#dhTailValues",Type.ListType;
+    "#dhHead",Type.Utf16Type;
+    "#prefix",Type.ListType;
+    "#dhTailKeys",Type.SetType;
+    "#dhPrefixKeys",Type.SetType;
+    "#to",Type.NumberType;
+    "#k",Type.NumberType;
+    "#n",Type.NumberType;
+    "#locals",Type.ListType;
+  ];
+  let goal = bin FLessThanEqual
+    (bin FPlus (Expr.LVar "#to") (Expr.num 1.))
+    (bin FPlus (Expr.LVar "#k") (Expr.num 1.)) in
+  Alcotest.(check int) "all query470 GIL facts retained" 34 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "all query470 input types retained" 11 (Hashtbl.length gamma);
+  Alcotest.(check bool) "query470 exact negated successor goal retained" true
+    (Expr.Set.mem (not_ goal) fs);
+  fs,gamma,goal
+
+let symmetric_successor_order_controls () = with_nonblank_counter_trace (fun () ->
+  Logging.normal (fun m -> m "SYMMETRIC_SUCCESSOR_NORMAL_BEGIN");
+  let forced = Sys.getenv_opt "SMT_TIMEOUT" = Some "1" in
+  let observe label before caller result fs gamma optional =
+    let row = nonblank_counter_observe label before caller result fs gamma in
+    Alcotest.(check string) (label ^ " exact native query cap")
+      (if forced then "1" else if optional then
+         (if caller = "optional-natural-counter" then "1000" else "5000")
+       else "30000")
+      (smt_result_field "timeout_ms" row);
+    Alcotest.(check string) (label ^ " exact native UNKNOWN policy")
+      (if optional then "true" else "false") (smt_result_field "raw_unknown" row);
+    Printf.printf "SYMMETRIC_SUCCESSOR_NATIVE_RESULT[%s]=%s\n%!" label row;
+    row in
+  let original_bounds position start =
+    [Expr.UnOp (IsInt, position); Expr.UnOp (IsInt, start);
+     bin FLessThanEqual (Expr.num 0.) position;
+     bin FLessThanEqual (Expr.num 0.) start;
+     bin FLessThanEqual position (Expr.num 4294967294.);
+     bin FLessThanEqual start (Expr.num 4294967294.)] in
+  let expected_core label fs goal order =
+    (* Standalone N8 encoding diagnostics reported native UNSAT. This real
+       Gillian path and full-Gamma query remain unobserved. Expected atoms
+       below must already belong to the input and match its actual dump;
+       the private selector is neither called nor mocked by this helper. *)
+    let position,start = match order with
+      | Expr.BinOp (position, FLessThanEqual, start) -> position,start
+      | _ -> Alcotest.fail (label ^ " fixture order shape differs") in
+    let core = Expr.Set.of_list (not_ goal :: order :: original_bounds position start) in
+    Alcotest.(check bool) (label ^ " exactly eight unchanged original atoms") true
+      (Expr.Set.cardinal core = 8);
+    Alcotest.(check bool) (label ^ " core is a proper original subset") true
+      (Expr.Set.subset core fs && not (Expr.Set.equal core fs));
+    core in
+  let as_gamma gamma =
+    let copied = Gamma.init () in
+    Hashtbl.iter (fun name typ -> Gamma.update copied name typ) gamma;
+    copied in
+  let retained = native_equality_control_retained in
+  let fs,gamma,goal = symmetric_successor_fixture () in
+  let order = bin FLessThanEqual (Expr.LVar "#to") (Expr.LVar "#k") in
+  let original_input = Expr.Set.elements fs and original_types = nonblank_counter_types gamma in
+  if forced then (
+    (* Dispatch group93 alone in a separate fresh SMT_TIMEOUT=1 process.
+       Both actual UNKNOWNs are required: any definite result fails this
+       control. No forced UNKNOWN is permitted in the ordinary branch. *)
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let core = expected_core "forced-original-core" fs goal order in
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) "actual optional UNKNOWN cannot prove the goal" false
+      (Smt.proves_unsat ~caller_kind:"optional-entailment-successor-order-core" core gamma);
+    ignore (observe "forced-original-core" before
+      "optional-entailment-successor-order-core" "unknown" core gamma true);
+    Alcotest.(check int) "forced optional has exactly one accounted native row" 1
+      (List.length (symbolic_prefix_new_rows before));
+    let before = nonblank_counter_rows () in
+    let rejected = try ignore (Smt.exec_sat fs gamma); false with
+      | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError message) ->
+          message = "Incomplete totality proof: SMT returned unknown" in
+    Alcotest.(check bool) "actual required UNKNOWN retains the hard totality error" true rejected;
+    ignore (observe "forced-required-complete" before "required-complete" "unknown" fs gamma false);
+    Alcotest.(check int) "forced required has exactly one accounted native row" 1
+      (List.length (symbolic_prefix_new_rows before));
+    retained "forced-query470" fs gamma original types)
+  else (
+    let positive label frame types conclusion premise reverse =
+      let original = Expr.Set.elements frame and original_types = nonblank_counter_types types in
+      let core = expected_core label frame conclusion premise in
+      let premises = Expr.Set.remove (not_ conclusion) frame in
+      let input = Expr.Set.elements premises in
+      let input = if reverse then List.rev input else input in
+      (* The inherited FOSolver filters unused Gamma keys before its unchanged
+         callsite. Observe that complete active context, and retain/snapshot
+         the original input Gamma separately. Query470 has activeGamma9. *)
+      let used = Expr.Set.fold (fun e vars -> Utils.Containers.SS.union (Expr.lvars e) vars)
+        frame Utils.Containers.SS.empty in
+      let caller_pfs = Engine.PFS.of_list input and caller_gamma = as_gamma types in
+      let active_gamma = Gamma.copy caller_gamma in
+      Gamma.filter_vars_in_place active_gamma used;
+      let active = Gamma.as_hashtbl active_gamma in
+      let caller_types = nonblank_counter_types (Gamma.as_hashtbl caller_gamma) in
+      let before = nonblank_counter_rows () in
+      Alcotest.(check bool) (label ^ " real FOSolver successor entailment") true
+        (Solver.check_entailment Utils.Containers.SS.empty caller_pfs [conclusion] caller_gamma);
+      Alcotest.(check bool) (label ^ " FOSolver caller PFS remains unchanged") true
+        (Expr.Set.equal premises (Expr.Set.of_list (Engine.PFS.to_list caller_pfs)));
+      Alcotest.(check bool) (label ^ " FOSolver caller Gamma remains unchanged") true
+        (caller_types = nonblank_counter_types (Gamma.as_hashtbl caller_gamma));
+      ignore (observe (label ^ "-entailment") before
+        "optional-entailment-successor-order-core" "unsat" core active true);
+      Alcotest.(check int) (label ^ " real entailment has one native core row") 1
+        (List.length (symbolic_prefix_new_rows before));
+      if Hashtbl.length active <> Hashtbl.length types then (
+        let before = nonblank_counter_rows () in
+        Alcotest.(check bool) (label ^ " direct core with the full input Gamma") true
+          (Smt.proves_unsat ~caller_kind:"optional-entailment-successor-order-core" core types);
+        ignore (observe (label ^ "-input-gamma") before
+          "optional-entailment-successor-order-core" "unsat" core types true);
+        Alcotest.(check int) (label ^ " direct full-Gamma core has one native row") 1
+          (List.length (symbolic_prefix_new_rows before)));
+      let before = nonblank_counter_rows () in
+      Alcotest.(check bool) (label ^ " actual native result has a separate unchanged cache key") true
+        (Smt.proves_unsat ~caller_kind:"optional-entailment-successor-order-core" core types);
+      Alcotest.(check int) (label ^ " repeated exact core uses its native-backed cache") 0
+        (List.length (symbolic_prefix_new_rows before));
+      retained label frame types original original_types in
+    positive "captured-query470" fs gamma goal order false;
+    let mapping = nonblank_counter_types gamma |> List.map (fun (name,_) ->
+      name,"#successor_renamed_" ^ String.sub name 1 (String.length name-1)) in
+    let move map e = Expr.map_opt (function
+      | Expr.LVar name -> Some (Expr.LVar (Option.value ~default:name
+          (List.assoc_opt name map))),false | e -> Some e,true) None e |> Option.get in
+    let move_frame map frame = Expr.Set.fold (fun e acc ->
+      Expr.Set.add (move map e) acc) frame Expr.Set.empty in
+    let moved = move_frame mapping fs and moved_gamma = Hashtbl.create 11 in
+    Hashtbl.iter (fun name typ -> Hashtbl.add moved_gamma (List.assoc name mapping) typ) gamma;
+    let inverse = List.map (fun (a,b) -> b,a) mapping in
+    Alcotest.(check bool) "renamed captured frame has a complete simultaneous inverse" true
+      (Expr.Set.equal (move_frame inverse moved) fs);
+    Alcotest.(check bool) "renamed captured Gamma has an exact typed inverse" true
+      (List.sort Stdlib.compare (List.map (fun (name,typ) -> List.assoc name inverse,typ)
+        (nonblank_counter_types moved_gamma)) = nonblank_counter_types gamma);
+    positive "renamed-reversed-query470" moved moved_gamma (move mapping goal) (move mapping order) true;
+    let left = Expr.LVar "#successor_bound_free_left" in
+    let right = Expr.LVar "#successor_bound_free_right" in
+    let text = Expr.LVar "#successor_bound_free_text" in
+    let conclusion = bin FLessThanEqual (bin FPlus left (Expr.num 1.))
+      (bin FPlus right (Expr.num 1.)) in
+    let premise = bin FLessThanEqual left right in
+    let unrelated = not_ (bin Equal text (nonblank_utf16 "")) in
+    (* All N8 atoms are existing facts of this test input. Eligibility of
+       this sufficient selector does not add a precondition to callers or
+       claim a native proof of universal unbounded successor ordering. *)
+    let bounds = original_bounds left right in
+    let bounded = Expr.Set.of_list (not_ conclusion :: premise :: unrelated :: bounds) in
+    let bounded_gamma = Hashtbl.create 3 in
+    List.iter (fun (name,typ) -> Hashtbl.add bounded_gamma name typ)
+      ["#successor_bound_free_left",Type.NumberType;
+       "#successor_bound_free_right",Type.NumberType;
+       "#successor_bound_free_text",Type.Utf16Type];
+    positive "bounded-N8-order" bounded bounded_gamma conclusion premise true;
+    let model_control label frame types values =
+      let original = Expr.Set.elements frame and original_types = nonblank_counter_types types in
+      let before = nonblank_counter_rows () in
+      let caller = "control-symmetric-successor-" ^ label in
+      let model = match Smt.exec_sat ~caller_kind:caller frame types with
+        | Some model -> model | None -> Alcotest.fail (label ^ " missing actual native SAT model") in
+      ignore (observe label before caller "sat" frame types false);
+      Alcotest.(check int) (label ^ " one complete native SAT query") 1
+        (List.length (symbolic_prefix_new_rows before));
+      Printf.printf "SYMMETRIC_SUCCESSOR_NATIVE_MODEL[%s]=%s\n%!" label (Fmt.str "%a" Smt.pp_model model);
+      let lifted = Hashtbl.create (List.length values) in
+      Smt.lift_model model types (Hashtbl.add lifted)
+        (Expr.Set.of_list (List.map (fun (name,_) -> Expr.LVar name) values));
+      List.iter (fun (name,want) -> match Hashtbl.find_opt lifted name with
+        | Some (Expr.Lit (Literal.Num actual)) ->
+            Alcotest.(check int64) (label ^ " exact native binary64 model " ^ name)
+              (Int64.bits_of_float want) (Int64.bits_of_float actual)
+        | _ -> Alcotest.fail (label ^ " missing native Number model " ^ name)) values;
+      retained label frame types original original_types in
+    (* Real SAT witnesses must retain every selected bound and both zero
+       signs. Their future native models are separate from the standalone
+       diagnostics and never counted as a full caller proof. *)
+    List.iter (fun (label,a,b) ->
+      let frame = Expr.Set.of_list (premise :: conclusion :: unrelated ::
+        bin ValueEqual left (Expr.num a) :: bin ValueEqual right (Expr.num b) :: bounds) in
+      model_control label frame bounded_gamma
+        ["#successor_bound_free_left",a;"#successor_bound_free_right",b])
+      ["positive-zeros",0.,0.;"negative-zeros",(-0.),(-0.);
+       "mixed-zero-left-negative",(-0.),0.;"mixed-zero-right-negative",0.,(-0.)];
+    List.iter (fun (label,control_goal,kept,a,b) ->
+      let premises = Expr.Set.of_list (kept @ bounds @
+        [bin ValueEqual left (Expr.num a);bin ValueEqual right (Expr.num b)]) in
+      let query = Expr.Set.add (not_ control_goal) premises in
+      let types = Hashtbl.create 2 in
+      List.iter (fun name -> Hashtbl.add types name Type.NumberType)
+        ["#successor_bound_free_left";"#successor_bound_free_right"];
+      let before = nonblank_counter_rows () in
+      Alcotest.(check bool) (label ^ " actual FOSolver rejects the false implication") false
+        (Solver.check_entailment Utils.Containers.SS.empty
+          (Engine.PFS.of_list (Expr.Set.elements premises)) [control_goal] (as_gamma types));
+      Alcotest.(check int) (label ^ " literal reduction does not invent native proof credit") 0
+        (List.length (symbolic_prefix_new_rows before));
+      model_control label query types
+        ["#successor_bound_free_left",a;"#successor_bound_free_right",b])
+      ["missing-order",conclusion,[],2.,0.;
+       "opposite-order",bin FLessThanEqual (bin FPlus right (Expr.num 1.))
+         (bin FPlus left (Expr.num 1.)),[premise],0.,2.;
+       "unequal-offset",bin FLessThanEqual (bin FPlus left (Expr.num 2.))
+         (bin FPlus right (Expr.num 1.)),[premise],0.,0.];
+    (* A complete eight-atom N8 frame is not a proper subset. Standalone
+       N8 was UNSAT, but this public Gillian complete query is unobserved.
+       Require its actual native result with no optional successor row. *)
+    let complete = Expr.Set.of_list (not_ conclusion :: premise :: bounds) in
+    let complete_gamma = Hashtbl.create 2 in
+    List.iter (fun name -> Hashtbl.add complete_gamma name Type.NumberType)
+      ["#successor_bound_free_left";"#successor_bound_free_right"];
+    let original = Expr.Set.elements complete and types = nonblank_counter_types complete_gamma in
+    let caller_gamma = as_gamma complete_gamma in
+    let native_gamma = Gamma.as_hashtbl (Gamma.copy caller_gamma) in
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) "no proper subset still uses actual ordinary entailment" true
+      (Solver.check_entailment Utils.Containers.SS.empty
+        (Engine.PFS.of_list (premise :: bounds)) [conclusion] caller_gamma);
+    Alcotest.(check bool) "no proper subset cannot dispatch the successor selector" false
+      (List.exists (fun row -> smt_result_field "caller" row = "optional-entailment-successor-order-core")
+        (symbolic_prefix_new_rows before));
+    let hinted = List.fold_left (fun frame endpoint ->
+      Expr.Set.add (bin ValueEqual endpoint (Expr.num 1.)) frame)
+      complete [left;right] in
+    ignore (observe "not-a-proper-subset-natural" before "optional-natural-counter" "unsat"
+      hinted native_gamma true);
+    ignore (observe "not-a-proper-subset" before "required-complete" "unsat"
+      complete native_gamma false);
+    Alcotest.(check int) "no proper subset has two accounted native rows" 2
+      (List.length (symbolic_prefix_new_rows before));
+    retained "not-a-proper-subset" complete complete_gamma original types;
+    retained "captured-input-after-all-controls" fs gamma original_input original_types))
+
+(* Keep every existing group unchanged. These complete-frame controls exercise
+   the later whitespace attempt through the public native SAT path. *)
+let nonblank_whitespace_fixture label =
+  let fs,gamma = nonblank_counter_fixture () in
+  let marker = "#nonblank_whitespace_" ^ label in
+  Hashtbl.add gamma marker Type.BooleanType;
+  Expr.Set.add (bin ValueEqual (Expr.LVar marker)
+    (Expr.Lit (Literal.Bool true))) fs,gamma
+
+let nonblank_whitespace_observe label before caller result expected gamma =
+  let row = nonblank_counter_observe label before caller result expected gamma in
+  Alcotest.(check string) (label ^ " optional UNKNOWN remains raw") "true"
+    (smt_result_field "raw_unknown" row);
+  let timeout = int_of_string (smt_result_field "timeout_ms" row) in
+  Alcotest.(check bool) (label ^ " optional budget stays at most one second")
+    true (timeout > 0 && timeout <= 1000);
+  row
+
+let nonblank_whitespace_order label before expected =
+  let callers = nonblank_counter_rows ()
+    |> List.filter (fun row -> not (List.mem row before))
+    |> List.map (smt_result_field "caller")
+    |> List.filter (fun caller -> List.mem caller
+      ["optional-nonblank-counter";"optional-nonblank-whitespace-counter";
+       "required-complete"]) in
+  Alcotest.(check (list string)) (label ^ " actual native order and multiplicity")
+    expected callers
+
+let nonblank_whitespace_native_controls () = with_nonblank_counter_trace (fun () ->
+  let mismatch label =
+    let fs,gamma = nonblank_whitespace_fixture label in
+    let head = Expr.LVar "#dhHead" in
+    Expr.Set.add (not_ (bin Equal head (Expr.UnOp (Utf16Trim,head)))) fs,gamma in
+  let check label (fs,gamma) ~zero ~first_head ~first ~second ~fallback ~head =
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let model = Smt.check_sat fs gamma in
+    ignore (nonblank_whitespace_observe (label ^ "-first") before
+      "optional-nonblank-counter" first
+      (nonblank_counter_pins fs zero 1. zero first_head) gamma);
+    let expected = ["optional-nonblank-counter"] in
+    let expected = match second with None -> expected | Some result ->
+      ignore (nonblank_whitespace_observe (label ^ "-second") before
+        "optional-nonblank-whitespace-counter" result
+        (nonblank_counter_pins fs zero 1. zero " a") gamma);
+      expected @ ["optional-nonblank-whitespace-counter"] in
+    let expected = match fallback with None -> expected | Some result ->
+      let row = nonblank_counter_observe (label ^ "-fallback") before
+        "required-complete" result fs gamma in
+      Alcotest.(check string) (label ^ " required UNKNOWN remains hard") "false"
+        (smt_result_field "raw_unknown" row);
+      expected @ ["required-complete"] in
+    nonblank_whitespace_order label before expected;
+    (match model,head with
+     | Some model,Some head ->
+         nonblank_counter_model_values label model gamma zero 1. zero head
+     | None,None -> ()
+     | _ -> Alcotest.fail (label ^ " incorrect complete-frame model admission"));
+    nonblank_counter_retained label fs gamma original types in
+  let fs,gamma = mismatch "mismatch_negative_zero" in
+  let fs = Expr.Set.union fs (Expr.Set.of_list [
+    bin ValueEqual (Expr.LVar "#k") (Expr.num (-0.));
+    bin ValueEqual (Expr.LVar "#to") (Expr.num (-0.))]) in
+  check "mismatch-negative-zero" (fs,gamma) ~zero:(-0.) ~first_head:"a"
+    ~first:"unsat" ~second:(Some "sat") ~fallback:None ~head:(Some " a");
+  check "first-a-sat" (nonblank_whitespace_fixture "first_a_sat")
+    ~zero:0. ~first_head:"a" ~first:"sat" ~second:None ~fallback:None
+    ~head:(Some "a");
+  let fs,gamma = mismatch "pinned_a_mismatch" in
+  check "pinned-a-deduplicated" (nonblank_counter_pins fs 0. 1. 0. "a",gamma)
+    ~zero:0. ~first_head:"a" ~first:"unsat" ~second:None
+    ~fallback:(Some "unsat") ~head:None;
+  let fs,gamma = mismatch "pinned_space_a" in
+  check "pinned-space-a-first-sat"
+    (nonblank_counter_pins fs (-0.) 1. (-0.) " a",gamma)
+    ~zero:(-0.) ~first_head:" a" ~first:"sat" ~second:None ~fallback:None
+    ~head:(Some " a");
+  let fs,gamma = mismatch "independent_contradiction" in
+  let conflict = Expr.Set.union fs (parse_gil_set [
+    "((l-len #locals) == 0i)";"((l-len #locals) == 1i)"]) in
+  check "independent-original-contradiction" (conflict,gamma)
+    ~zero:0. ~first_head:"a" ~first:"unsat" ~second:(Some "unsat")
+    ~fallback:(Some "unsat") ~head:None;
+  let original,gamma = nonblank_whitespace_fixture "excluded_two_heads" in
+  let fixed = nonblank_counter_pins original 2. 3. 1. "c" in
+  Hashtbl.add gamma "#nonblank_whitespace_alias" Type.Utf16Type;
+  let fs = Expr.Set.add (bin ValueEqual (Expr.LVar "#nonblank_whitespace_alias")
+    (Expr.LVar "#dhHead")) fixed in
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let model = match Smt.check_sat fs gamma with Some model -> model
+    | None -> Alcotest.fail "excluded shape lost its complete native fallback" in
+  ignore (nonblank_counter_observe "excluded-two-heads" before
+    "required-complete" "sat" fs gamma);
+  nonblank_whitespace_order "excluded-two-heads" before ["required-complete"];
+  nonblank_counter_model_values "excluded-two-heads" model gamma 2. 3. 1. "c";
+  nonblank_counter_retained "excluded-two-heads" fs gamma original types)
+
+let nonblank_whitespace_unknown_contract () =
+  (* A fresh one-millisecond process verifies whichever causal path is reached;
+     a successful full-query model never substitutes for UNKNOWN evidence. *)
+  if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then
+    with_nonblank_counter_trace (fun () ->
+      let fs,gamma = nonblank_whitespace_fixture "forced_unknown" in
+      nonblank_forced_outcome "forced95" fs gamma)
+
+(* SOURCE-ONLY regression: these native observations remain unexecuted.
+   Fresh alpha namespaces isolate old formula caches. Full dump matching below
+   requires both the mixed goal and the unrelated typed frame to survive the
+   actual Solver simplification; absence of a probe alone is insufficient. *)
+let contained_list_cast_controls () = with_nonblank_counter_trace (fun () ->
+  let captured = parse_gil_set [
+    "(! (u16\"length\" -e- #outKeys))";
+    "(! (#dhHead == (u16-trim #dhHead)))";
+    "(! ((num_to_utf16 #to) -e- #outKeys))";
+    "(! ((u16-trim #dhHead) == u16\"\"))";
+    "(is_int #k)";
+    "(is_int #n)";
+    "(is_int #to)";
+    "(is_int (#k + 1.))";
+    "(is_int (#to + 1.))";
+    "(0i i<= (l-len #chosen))";
+    "(0i i<= (l-len #dhTailValues))";
+    "(0i i<= (l-len #locals))";
+    "(0i i<= (l-len #prefix))";
+    "(0i i<= (as_int (#k - 0.)))";
+    "(0i i<= (as_int (#n - #k)))";
+    "(0i i<= (as_int (#n - (#k + 1.))))";
+    "(0i i<= (as_int (#n - (#to + 1.))))";
+    "(0. <= #k)";
+    "(0. <= #to)";
+    "(0. <= (#to + 1.))";
+    "(#k < #n)";
+    "(#k <= 4294967294.)";
+    "(#k <= 4294967295.)";
+    "(#n <= 4294967295.)";
+    "(#to <= 4294967294.)";
+    "(#to <= 4294967295.)";
+    "(#to <= #k)";
+    "((l-len #dhTailValues) i<= 4294967294i)";
+    "((u16-len #dhHead) i<= 9007199254740991i)";
+    "((u16-len (u16-trim #dhHead)) i<= (u16-len #dhHead))";
+    "((as_int #k) == (l-len #prefix))";
+    "((as_int #n) == (1i i+ ((l-len #dhTailValues) i+ (as_int #k))))";
+    "((as_int #to) == (l-len #chosen))";
+    "((as_int (#k + 1.)) == (1i i+ (as_int #k)))";
+    "((as_int (#n - (#k + 1.))) i< (as_int (#n - #k)))";
+    "((as_int (#n - (#to + 1.))) i< (as_int (#n - #to)))";
+    "((as_int (#to + 1.)) == (1i i+ (as_int #to)))";
+    "((#k + 1.) <= 4294967295.)";
+    "((#k + 1.) <= #n)";
+    "((#to + 1.) <= 4294967295.)";
+    "((#to + 1.) <= #n)";
+  ] in
+  Alcotest.(check int) "captured frame removes only four native witness pins" 41
+    (Expr.Set.cardinal captured);
+  let compact text =
+    let buffer = Buffer.create (String.length text) in
+    let quoted = ref false and escaped = ref false in
+    String.iter (fun c ->
+      if !quoted then (
+        Buffer.add_char buffer c;
+        if !escaped then escaped := false
+        else if c = '\\' then escaped := true
+        else if c = '"' then quoted := false)
+      else if c = '"' then (quoted := true; Buffer.add_char buffer c)
+      else if not (List.mem c [' ';'\t';'\r';'\n']) then Buffer.add_char buffer c) text;
+    Buffer.contents buffer in
+  let matches frame types row =
+    let query = smt_result_field "query" row in
+    Alcotest.(check bool) "native result names a retained dump" true
+      (query <> "none" && Sys.file_exists (Filename.concat "gillian_smt_queries" query));
+    let text = nonblank_counter_read (Filename.concat "gillian_smt_queries" query) in
+    (* FS stays exact; compare every typed Gamma entry independently of the
+       hashtable printer order, rejecting missing, extra or duplicate pairs. *)
+    let find text needle =
+      let rec loop i =
+        if i + String.length needle > String.length text then None
+        else if String.sub text i (String.length needle) = needle then Some i
+        else loop (i+1) in loop 0 in
+    let gamma_matches rendered =
+      let prefix = "(hashtbl" in
+      if not (String.starts_with ~prefix rendered && String.ends_with ~suffix:")" rendered)
+      then false else
+      let remaining = String.sub rendered (String.length prefix)
+        (String.length rendered - String.length prefix - 1) in
+      let remove pair text = match find text pair with
+        | None -> None
+        | Some at -> Some (String.sub text 0 at ^ String.sub text
+            (at + String.length pair) (String.length text - at - String.length pair)) in
+      List.fold_left (fun rest (name,typ) -> Option.bind rest
+        (remove ("(" ^ name ^ "," ^ Type.str typ ^ ")")))
+        (Some remaining) (nonblank_counter_types types) = Some "" in
+    let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: "
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) frame |> compact in
+    let actual = compact text in
+    if not (String.starts_with ~prefix actual) then false else
+    let suffix = String.sub actual (String.length prefix)
+      (String.length actual - String.length prefix) in
+    match find suffix "EncodedasSMTQuery:" with
+    | None -> false
+    | Some at -> gamma_matches (String.sub suffix 0 at) in
+  let fresh before = nonblank_counter_rows ()
+    |> List.filter (fun row -> not (List.mem row before)) in
+  let checked_rows label before =
+    let rows = fresh before in
+    Alcotest.(check bool) (label ^ " real native evidence is nonempty") true (rows <> []);
+    let ids = List.map (smt_result_field "query") rows in
+    Alcotest.(check int) (label ^ " unique causal native IDs") (List.length ids)
+      (List.length (List.sort_uniq String.compare ids));
+    List.iter (fun row ->
+      Alcotest.(check bool) (label ^ " mixed goal skips contained probe") false
+        (smt_result_field "caller" row = "optional-entailment-contained");
+      Alcotest.(check bool) (label ^ " no ordinary UNKNOWN") false
+        (smt_result_field "result" row = "unknown");
+      Alcotest.(check string) (label ^ " unchanged native phase") "3"
+        (smt_result_field "phase_selection" row);
+      Alcotest.(check string) (label ^ " unchanged UNKNOWN policy")
+        (if smt_result_field "caller" row = "required-complete" then "false" else "true")
+        (smt_result_field "raw_unknown" row);
+      Printf.printf "CONTAINED_LIST_CAST_NATIVE_RESULT[%s]=%s\n%!" label row) rows;
+    rows in
+  let run label nested =
+    let name role = "#contained_list_cast96_" ^ label ^ "_" ^
+      String.sub role 1 (String.length role - 1) in
+    let move e = Expr.map_opt (function
+      | Expr.LVar role -> Some (Expr.LVar (name role)),false
+      | e -> Some e,true) None e |> Option.get in
+    let frame = Expr.Set.fold (fun e acc -> Expr.Set.add (move e) acc)
+      captured Expr.Set.empty in
+    let caller_gamma = Gamma.init () in
+    List.iter (fun (role,typ) -> Gamma.update caller_gamma (name role) typ)
+      ["#outKeys",Type.SetType; "#chosen",Type.ListType;
+       "#dhTailValues",Type.ListType; "#dhHead",Type.Utf16Type;
+       "#prefix",Type.ListType; "#dhTailKeys",Type.SetType;
+       "#dhPrefixKeys",Type.SetType; "#to",Type.NumberType;
+       "#k",Type.NumberType; "#n",Type.NumberType; "#locals",Type.ListType];
+    let k = Expr.LVar (name "#k") and prefix = Expr.LVar (name "#prefix") in
+    let length = Expr.UnOp (LstLen,prefix)
+    and cast_next = Expr.UnOp (NumToInt,bin FPlus k (Expr.num 1.)) in
+    let wrap e = if nested then bin IPlus (Expr.int 2) e else e in
+    let false_goal = bin Equal (wrap length) (wrap cast_next)
+    and valid_goal = bin ILessThan (wrap length) (wrap cast_next) in
+    let caller_pfs = Engine.PFS.of_list (Expr.Set.elements frame) in
+    let original_pfs = Engine.PFS.to_list caller_pfs in
+    let original_types = nonblank_counter_types (Gamma.as_hashtbl caller_gamma) in
+    let used = Expr.Set.fold (fun e names ->
+      Utils.Containers.SS.union (Expr.lvars e) names) frame Utils.Containers.SS.empty in
+    let active_gamma = Gamma.copy caller_gamma in
+    Gamma.filter_vars_in_place active_gamma used;
+    let active = Gamma.as_hashtbl active_gamma in
+    let active_types = nonblank_counter_types active in
+    Alcotest.(check int) (label ^ " exact active Gamma cardinality") 9
+      (Hashtbl.length active);
+    (* Reference normalization is pure and isolated from the caller/frame.
+       The original wrapped goals remain the Solver inputs and direct valid
+       counterquery; only complete false-query metadata/cache keys normalize. *)
+    let normalization_gamma = Gamma.copy active_gamma in
+    let canonical_false_goal = Engine.Reduction.reduce_lexpr
+      ~gamma:normalization_gamma false_goal in
+    let canonical_reference = bin Equal length cast_next in
+    Alcotest.(check bool) (label ^ " checked reference false-goal normalization") true
+      (Expr.equal canonical_false_goal canonical_reference);
+    Alcotest.(check bool) (label ^ " reference normalization preserves active Gamma") true
+      (active_types = nonblank_counter_types active);
+    Printf.printf "CONTAINED_LIST_CAST_ORIGINAL_GOAL[%s]=%s\nCONTAINED_LIST_CAST_CANONICAL_GOAL[%s]=%s\n%!"
+      label (Fmt.str "%a" Expr.pp false_goal)
+      label (Fmt.str "%a" Expr.pp canonical_false_goal);
+    let preserved () =
+      Alcotest.(check bool) (label ^ " caller PFS unchanged") true
+        (original_pfs = Engine.PFS.to_list caller_pfs);
+      Alcotest.(check bool) (label ^ " caller Gamma unchanged") true
+        (original_types = nonblank_counter_types (Gamma.as_hashtbl caller_gamma)) in
+    (* The unrelated locals fact is retained in every complete query but is
+       outside both goal variables: the old contained omission is genuine. *)
+    let unrelated = bin ILessThanEqual (Expr.int 0)
+      (Expr.UnOp (LstLen,Expr.LVar (name "#locals"))) in
+    Alcotest.(check bool) (label ^ " original typed omission premise retained") true
+      (Expr.Set.mem unrelated frame
+       && Hashtbl.find_opt active (name "#locals") = Some Type.ListType
+       && not (Utils.Containers.SS.mem (name "#locals") (Expr.lvars false_goal)));
+    let before = nonblank_counter_rows () in
+    let false_result = Solver.check_entailment Utils.Containers.SS.empty
+      caller_pfs [false_goal] caller_gamma in
+    let full = Expr.Set.add (not_ canonical_false_goal) frame in
+    (* Retain the actual model before any later trace/header/cache assertions.
+       A cache miss may yield a model, but any added query still rejects below. *)
+    let before_model = nonblank_counter_rows () in
+    let model = match Smt.check_sat full active with Some model -> model
+      | None -> Alcotest.fail (label ^ " missing full native SAT model") in
+    Printf.printf "CONTAINED_LIST_CAST_NATIVE_MODEL[%s]=%s\n%!" label
+      (Fmt.str "%a" Smt.pp_model model);
+    Alcotest.(check bool) (label ^ " full-query model has exact native cache correspondence")
+      true (before_model = nonblank_counter_rows ());
+    Alcotest.(check bool) (label ^ " false successor length still rejects") false false_result;
+    Alcotest.(check int) (label ^ " canonical complete false-query cardinality") 42
+      (Expr.Set.cardinal full);
+    let rows = checked_rows (label ^ "-false") before in
+    let hinted = List.fold_left (fun fs (role,value) -> Expr.Set.add
+      (bin ValueEqual (Expr.LVar (name role)) value) fs) full
+      ["#k",Expr.num 0.; "#n",Expr.num 1.; "#to",Expr.num 0.;
+       "#dhHead",nonblank_utf16 " a"] in
+    let witnesses = List.filter (fun row ->
+      smt_result_field "caller" row = "optional-nonblank-whitespace-counter"
+      && smt_result_field "result" row = "sat" && matches hinted active row) rows in
+    Alcotest.(check int) (label ^ " actual complete failed-goal FS/Gamma SAT witness")
+      1 (List.length witnesses);
+    let witness = List.hd witnesses in
+    Alcotest.(check bool) (label ^ " existing optional witness cap unchanged") true
+      (let cap = int_of_string (smt_result_field "timeout_ms" witness) in cap > 0 && cap <= 1000);
+    let lifted = Hashtbl.create 4 in
+    Smt.lift_model model active (Hashtbl.add lifted)
+      (Expr.Set.of_list (List.map (fun role -> Expr.LVar (name role))
+        ["#k";"#n";"#to";"#dhHead"]));
+    List.iter (fun (role,want) -> match Hashtbl.find_opt lifted (name role) with
+      | Some (Expr.Lit (Literal.Num actual)) ->
+          Alcotest.(check int64) (label ^ " actual native Number bits " ^ role)
+            (Int64.bits_of_float want) (Int64.bits_of_float actual)
+      | _ -> Alcotest.fail (label ^ " missing actual native Number " ^ role))
+      ["#k",0.;"#n",1.;"#to",0.];
+    (match Hashtbl.find_opt lifted (name "#dhHead") with
+     | Some (Expr.Lit (Literal.Utf16String actual)) ->
+         Alcotest.(check bool) (label ^ " actual spaced UTF16 model") true
+           (actual = Utils.Utf16.of_canonical " a")
+     | _ -> Alcotest.fail (label ^ " missing actual native UTF16 model"));
+    preserved ();
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " valid mixed strict successor relation proves") true
+      (Solver.check_entailment Utils.Containers.SS.empty caller_pfs [valid_goal] caller_gamma);
+    ignore (checked_rows (label ^ "-valid") before);
+    (* An independent full original counterquery, without any seed pins, must
+       have real native UNSAT too; hinted UNSAT/subset SAT gives no proof credit. *)
+    let valid_full = Expr.Set.add (not_ valid_goal) frame in
+    let before = nonblank_counter_rows () in
+    let caller = "control-contained-list-cast-valid-" ^ label in
+    Alcotest.(check bool) (label ^ " valid full original counterquery native UNSAT") true
+      (Option.is_none (Smt.exec_sat ~caller_kind:caller valid_full active));
+    let rows = fresh before in
+    Alcotest.(check int) (label ^ " one direct full original native result") 1 (List.length rows);
+    let row = List.hd rows in
+    Alcotest.(check string) (label ^ " direct native caller") caller (smt_result_field "caller" row);
+    Alcotest.(check string) (label ^ " direct native UNSAT") "unsat" (smt_result_field "result" row);
+    Alcotest.(check string) (label ^ " direct UNKNOWN stays hard") "false"
+      (smt_result_field "raw_unknown" row);
+    Alcotest.(check bool) (label ^ " direct native complete FS/Gamma exact") true
+      (matches valid_full active row);
+    Printf.printf "CONTAINED_LIST_CAST_VALID_FULL[%s]=%s\n%!" label row;
+    preserved () in
+  run "plain_fresh" false;
+  run "alpha_nested_fresh" true)
+
+(* SOURCE-ONLY native controls; no native outcome has been observed.
+   Keep M21 query509: 22 original facts and all ten input Gamma entries.
+   Dump SHA256 679d76f87a950df2a20192307afa66dcb571d798c81864079fdc3b8e56e1c1c9.
+   The public check_sat path must issue a real complete hinted query. *)
+let distinct_counter_fixture () =
+  let fs = parse_gil_set [
+    "(! (#k v== #to))";
+    "(! ((u16-trim #dhHead) == u16\"\"))";
+    "(is_int #k)"; "(is_int #n)"; "(is_int #to)";
+    "(0i i<= (l-len #chosen))";
+    "(0i i<= (l-len #dhTailValues))";
+    "(0i i<= (l-len #locals))";
+    "(0i i<= (l-len #prefix))";
+    "(0i i<= (as_int (#n - #k)))";
+    "(0. <= #k)"; "(0. <= #to)"; "(#k < #n)";
+    "(#k <= 4294967295.)"; "(#n <= 4294967295.)";
+    "(#to <= 4294967295.)"; "(#to <= #k)";
+    "((l-len #dhTailValues) i<= 4294967294i)";
+    "((u16-len #dhHead) i<= 9007199254740991i)";
+    "((as_int #k) == (l-len #prefix))";
+    "((as_int #n) == (1i i+ ((l-len #dhTailValues) i+ (as_int #k))))";
+    "((as_int #to) == (l-len #chosen))";
+  ] in
+  let gamma = Hashtbl.create 10 in
+  List.iter (fun (name,typ) -> Hashtbl.add gamma name typ)
+    ["#chosen",Type.ListType; "#dhTailValues",Type.ListType;
+     "#dhHead",Type.Utf16Type; "#prefix",Type.ListType;
+     "#dhTailKeys",Type.SetType; "#dhPrefixKeys",Type.SetType;
+     "#to",Type.NumberType; "#k",Type.NumberType; "#n",Type.NumberType;
+     "#locals",Type.ListType];
+  Alcotest.(check int) "distinct captured original atoms" 22 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "distinct captured original Gamma" 10 (Hashtbl.length gamma);
+  fs,gamma
+
+(* Each noncaptured case has its own alpha namespace, including unused Gamma
+   keys. This isolates actual native evidence from all earlier formula caches. *)
+let distinct_counter_case label =
+  let fs,gamma = distinct_counter_fixture () in
+  let name x = if label = "" then x else
+    "#distinct_counter_" ^ label ^ "_" ^ String.sub x 1 (String.length x - 1) in
+  let move e = Expr.map_opt (function
+    | Expr.LVar x -> Some (Expr.LVar (name x)),false
+    | e -> Some e,true) None e |> Option.get in
+  let moved = Expr.Set.fold (fun e acc -> Expr.Set.add (move e) acc) fs Expr.Set.empty in
+  let types = Hashtbl.create 10 in
+  Hashtbl.iter (fun x typ -> Hashtbl.add types (name x) typ) gamma;
+  moved,types,name
+
+let distinct_counter_pins fs name lower upper position head =
+  Expr.Set.union fs (Expr.Set.of_list
+    [bin ValueEqual (Expr.LVar (name "#k")) (Expr.num lower);
+     bin ValueEqual (Expr.LVar (name "#n")) (Expr.num upper);
+     bin ValueEqual (Expr.LVar (name "#to")) (Expr.num position);
+     bin ValueEqual (Expr.LVar (name "#dhHead")) (nonblank_utf16 head)])
+
+let distinct_counter_capture label = function
+  | None -> ()
+  | Some model ->
+      (* Preserve the complete actual native model before any later assertion,
+         dump/trace/cache read or lift_model solver reset. Lists are retained in
+         this native model; the public lift API only decodes scalar sorts. *)
+      Printf.printf "DISTINCT_COUNTER_NATIVE_MODEL[%s]=%s\n%!" label
+        (Fmt.str "%a" Smt.pp_model model)
+
+let distinct_counter_model label model gamma name expected =
+  let values = Hashtbl.create 4 in
+  Smt.lift_model model gamma (Hashtbl.add values)
+    (Expr.Set.of_list (List.map (fun x -> Expr.LVar (name x))
+      ["#k";"#n";"#to";"#dhHead"]));
+  let number x = match Hashtbl.find_opt values (name x) with
+    | Some (Expr.Lit (Literal.Num value)) -> value
+    | _ -> Alcotest.fail (label ^ " missing actual Number model " ^ x) in
+  let k = number "#k" and n = number "#n" and to_ = number "#to" in
+  Alcotest.(check bool) (label ^ " native integral UInt32 order") true
+    (List.for_all (fun v -> 0. <= v && v <= 4294967295. && floor v = v) [k;n;to_]
+     && k < n && to_ <= k);
+  let head = match Hashtbl.find_opt values (name "#dhHead") with
+    | Some (Expr.Lit (Literal.Utf16String value)) -> value
+    | _ -> Alcotest.fail (label ^ " missing actual Utf16 model") in
+  let trimmed = Engine.CExprEval.evaluate_expr (Engine.CExprEval.CStore.init [])
+    (Expr.UnOp (Utf16Trim,Expr.Lit (Literal.Utf16String head))) in
+  Alcotest.(check bool) (label ^ " native head remains nonblank") true
+    (match trimmed with Literal.Utf16String value -> value <> Utils.Utf16.of_canonical ""
+     | _ -> false);
+  (match expected with
+   | None -> ()
+   | Some (lower,upper,position,want_head) ->
+       List.iter (fun (role,want,actual) ->
+         Alcotest.(check int64) (label ^ " exact native bits " ^ role)
+           (Int64.bits_of_float want) (Int64.bits_of_float actual))
+         ["lower",lower,k;"upper",upper,n;"position",position,to_];
+       Alcotest.(check bool) (label ^ " native literal head") true
+         (head = Utils.Utf16.of_canonical want_head))
+
+let distinct_counter_checked_rows label before forced =
+  let rows = symbolic_prefix_new_rows before in
+  Alcotest.(check bool) (label ^ " real native rows are nonempty") true (rows <> []);
+  let ids = List.map (smt_result_field "query") rows in
+  Alcotest.(check int) (label ^ " distinct actual query IDs") (List.length rows)
+    (List.length (List.sort_uniq String.compare ids));
+  List.iter (fun row ->
+    let caller = smt_result_field "caller" row in
+    Alcotest.(check string) (label ^ " native phase") "3" (smt_result_field "phase_selection" row);
+    Alcotest.(check string) (label ^ " native UNKNOWN policy")
+      (if caller = "required-complete" then "false" else "true")
+      (smt_result_field "raw_unknown" row);
+    if forced then Alcotest.(check string) (label ^ " actual one millisecond") "1"
+      (smt_result_field "timeout_ms" row)
+    else Alcotest.(check bool) (label ^ " no ordinary UNKNOWN") false
+      (smt_result_field "result" row = "unknown");
+    Printf.printf "DISTINCT_COUNTER_NATIVE_RESULT[%s]=%s\n%!" label row) rows;
+  rows
+
+let distinct_counter_run label (fs,gamma,name) expected_calls expected_model =
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let model = Smt.check_sat fs gamma in
+  distinct_counter_capture label model;
+  ignore (distinct_counter_checked_rows label before false);
+  List.iter (fun (caller,result,query) ->
+    let row = nonblank_counter_observe label before caller result query gamma in
+    Alcotest.(check string) (label ^ " exact query cap")
+      (if caller = "required-complete" then "30000" else "1000")
+      (smt_result_field "timeout_ms" row)) expected_calls;
+  nonblank_whitespace_order label before (List.map (fun (c,_,_) -> c) expected_calls);
+  let model = match model with Some model -> model
+    | None -> Alcotest.fail (label ^ " missing actual full-frame SAT model") in
+  Alcotest.(check bool) (label ^ " SAT credit requires full-frame native row") true
+    (List.exists (fun (_,result,_) -> result = "sat") expected_calls);
+  distinct_counter_model label model gamma name expected_model;
+  let before_cached = nonblank_counter_rows () in
+  Alcotest.(check bool) (label ^ " subsequent original cache retains model") true
+    (Option.is_some (Smt.check_sat fs gamma));
+  Alcotest.(check bool) (label ^ " cache check is not new native coverage") true
+    (before_cached = nonblank_counter_rows ());
+  nonblank_counter_retained label fs gamma original types
+
+let distinct_counter_full_unsat label (fs,gamma,name) (lower,upper,position,heads) =
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let result = Smt.check_sat fs gamma in
+  distinct_counter_capture (label ^ "-unexpected") result;
+  ignore (distinct_counter_checked_rows label before false);
+  Alcotest.(check bool) (label ^ " original conflict returns no witness") true
+    (Option.is_none result);
+  let callers = List.mapi (fun index head ->
+    let caller = if index = 0 then "optional-nonblank-counter"
+      else "optional-nonblank-whitespace-counter" in
+    let row = nonblank_counter_observe label before caller "unsat"
+      (distinct_counter_pins fs name lower upper position head) gamma in
+    Alcotest.(check string) (label ^ " actual optional cap") "1000"
+      (smt_result_field "timeout_ms" row);
+    caller) heads in
+  ignore (nonblank_counter_observe label before "required-complete" "unsat" fs gamma);
+  nonblank_whitespace_order label before (callers @ ["required-complete"]);
+  (* Regardless of any sufficient original precheck, additionally retain one
+     real direct UNSAT observation for the entire original conflicting frame. *)
+  let before_full = nonblank_counter_rows () in
+  let caller = "control-distinct-counter-full-" ^ label in
+  let full_result = Smt.exec_sat ~caller_kind:caller fs gamma in
+  distinct_counter_capture (label ^ "-unexpected-direct") full_result;
+  Alcotest.(check bool) (label ^ " direct original full query is native UNSAT") true
+    (Option.is_none full_result);
+  let row = nonblank_counter_observe label before_full caller "unsat" fs gamma in
+  Alcotest.(check string) (label ^ " direct full query keeps hard UNKNOWN") "false"
+    (smt_result_field "raw_unknown" row);
+  nonblank_counter_retained label fs gamma original types
+
+let distinct_counter_native_positives () = with_nonblank_counter_trace (fun () ->
+  let first label ((fs,_gamma,name) as case) values =
+    let lower,upper,position,head = values in
+    distinct_counter_run label case
+      ["optional-nonblank-counter","sat",distinct_counter_pins fs name lower upper position head]
+      (Some values) in
+  first "captured-q509" (distinct_counter_case "") (1.,2.,0.,"a");
+  first "alpha" (distinct_counter_case "alpha97") (1.,2.,0.,"a");
+  let fs,gamma,name = distinct_counter_case "gamma_cache97" in
+  first "original-Gamma-cache-key" (fs,gamma,name) (1.,2.,0.,"a");
+  let changed_gamma = Hashtbl.copy gamma in
+  Hashtbl.replace changed_gamma (name "#dhTailKeys") Type.ListType;
+  first "different-unused-Gamma-key-needs-fresh-native-row"
+    (fs,changed_gamma,name) (1.,2.,0.,"a");
+  let fs,gamma,name = distinct_counter_case "reverse97" in
+  let lower = Expr.LVar (name "#k") and position = Expr.LVar (name "#to") in
+  let fs = Expr.Set.add (not_ (bin ValueEqual position lower))
+    (Expr.Set.remove (not_ (bin ValueEqual lower position)) fs) in
+  first "reverse-ValueEqual" (fs,gamma,name) (1.,2.,0.,"a");
+  List.iter (fun (label,lower,position,op,left_literal) ->
+    let namespace = if List.mem label
+      ["negative-positive-right97";"positive-negative-right97"]
+      then "same_names_signed_cache97" else label in
+    let fs,gamma,name = distinct_counter_case namespace in
+    let pin role value = if left_literal then bin op value (Expr.LVar (name role))
+      else bin op (Expr.LVar (name role)) value in
+    let fs = Expr.Set.union fs (Expr.Set.of_list
+      [pin "#k" (Expr.num lower);pin "#n" (Expr.num 1.);
+       pin "#to" (Expr.num position);pin "#dhHead" (nonblank_utf16 "a")]) in
+    first label (fs,gamma,name) (lower,1.,position,"a"))
+    ["negative-positive-right97",(-0.),0.,ValueEqual,false;
+     "positive-negative-right97",0.,(-0.),ValueEqual,false;
+     "positive-negative-left97",0.,(-0.),ValueEqual,true;
+     "IEEE-literals-left97",(-0.),0.,Equal,true];
+  let fs,gamma,name = distinct_counter_case "literal_override97" in
+  let fs = distinct_counter_pins fs name 2. 3. 1. "c" in
+  first "literal-overrides-all-defaults" (fs,gamma,name) (2.,3.,1.,"c"))
+
+let distinct_counter_probe_and_conflict_controls () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,name = distinct_counter_case "whitespace98" in
+  let head = Expr.LVar (name "#dhHead") in
+  let fs = Expr.Set.add (not_ (bin Equal head (Expr.UnOp (Utf16Trim,head)))) fs in
+  distinct_counter_run "first-UNSAT-second-SAT" (fs,gamma,name)
+    ["optional-nonblank-counter","unsat",distinct_counter_pins fs name 1. 2. 0. "a";
+     "optional-nonblank-whitespace-counter","sat",distinct_counter_pins fs name 1. 2. 0. " a"]
+    (Some (1.,2.,0.," a"));
+  let fs,gamma,name = distinct_counter_case "dedup98" in
+  let head = Expr.LVar (name "#dhHead") in
+  let fs = Expr.Set.add (bin ValueEqual head (nonblank_utf16 "a"))
+    (Expr.Set.add (not_ (bin Equal head (Expr.UnOp (Utf16Trim,head)))) fs) in
+  (* The same two literal head proposals must deduplicate after the first fails. *)
+  distinct_counter_full_unsat "dedup98" (fs,gamma,name) (1.,2.,0.,["a"]);
+  let fs,gamma,name = distinct_counter_case "frame98" in
+  let locals = Expr.UnOp (LstLen,Expr.LVar (name "#locals")) in
+  let fs = Expr.Set.union fs (Expr.Set.of_list
+    [bin Equal locals (Expr.int 0);bin Equal locals (Expr.int 1)]) in
+  distinct_counter_full_unsat "frame98" (fs,gamma,name) (1.,2.,0.,["a";" a"]);
+  let fs,gamma,name = distinct_counter_case "pin_conflict98" in
+  let fs = distinct_counter_pins fs name 0. 1. 0. "a" in
+  distinct_counter_full_unsat "pin-conflict98" (fs,gamma,name) (0.,1.,0.,["a"]))
+
+let distinct_counter_guard_controls () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,name = distinct_counter_case "no_identity_guard99" in
+  let fs = Expr.Set.remove (not_ (bin ValueEqual (Expr.LVar (name "#k"))
+    (Expr.LVar (name "#to")))) fs in
+  distinct_counter_run "no-identity-guard-old-defaults" (fs,gamma,name)
+    ["optional-nonblank-counter","sat",distinct_counter_pins fs name 0. 1. 0. "a"]
+    (Some (0.,1.,0.,"a"));
+  let fs,gamma,name = distinct_counter_case "IEEE_guard99" in
+  let lower = Expr.LVar (name "#k") and position = Expr.LVar (name "#to") in
+  let fs = Expr.Set.add (not_ (bin Equal lower position))
+    (Expr.Set.remove (not_ (bin ValueEqual lower position)) fs) in
+  distinct_counter_run "IEEE-guard-does-not-select-distinct-defaults" (fs,gamma,name)
+    ["optional-nonblank-counter","unsat",distinct_counter_pins fs name 0. 1. 0. "a";
+     "optional-nonblank-whitespace-counter","unsat",distinct_counter_pins fs name 0. 1. 0. " a";
+     "required-complete","sat",fs] None;
+  List.iter (fun label ->
+    let fs,gamma,name = distinct_counter_case label in
+    let fs = distinct_counter_pins fs name 1. 2. 0. "a" in
+    let fs = match label with
+      | "rounded99" ->
+          let length = Expr.UnOp (IntToNum,
+            Expr.UnOp (Utf16Len,Expr.LVar (name "#dhHead"))) in
+          Expr.Set.add (bin Equal length (Expr.num 1.)) fs
+      | "typed_number_count99" ->
+          Hashtbl.add gamma (name "#extra") Type.NumberType;
+          Expr.Set.add (bin ValueEqual (Expr.LVar (name "#extra")) (Expr.num 7.)) fs
+      | "no_order_shape99" -> Expr.Set.remove
+          (bin FLessThan (Expr.LVar (name "#k")) (Expr.LVar (name "#n"))) fs
+      | _ -> Alcotest.fail "unknown distinct guard fixture" in
+    (* The extra unlicensed Number no longer blocks a uniquely licensed
+       position. The entire original frame must still receive native SAT;
+       rounded lengths and a missing order shape still use full fallback. *)
+    let caller = if label = "typed_number_count99" then
+      "optional-nonblank-counter" else "required-complete" in
+    distinct_counter_run label (fs,gamma,name) [caller,"sat",fs]
+      (Some (1.,2.,0.,"a")))
+    ["rounded99";"typed_number_count99";"no_order_shape99"])
+
+let distinct_counter_forced_unknown_controls () =
+  (* Ordinary execution still requires real complete native SAT evidence and
+     gives zero forced-UNKNOWN credit. The separate one-millisecond profile
+     below requires actual UNKNOWNs; a fast definite result fails that control. *)
+  if Sys.getenv_opt "SMT_TIMEOUT" <> Some "1" then
+    with_nonblank_counter_trace (fun () ->
+      let fs,gamma,name = distinct_counter_case "forced100_ordinary" in
+      distinct_counter_run "forced100-ordinary-full-model" (fs,gamma,name)
+        ["optional-nonblank-counter","sat",distinct_counter_pins fs name 1. 2. 0. "a"]
+        (Some (1.,2.,0.,"a"));
+      Printf.printf "DISTINCT_COUNTER_FORCED_ACTUAL_UNKNOWN_ROUNDS=0\n%!")
+  else with_nonblank_counter_trace (fun () ->
+    let fs,gamma,name = distinct_counter_case "forced100" in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    for attempt = 1 to 2 do
+      let label = "forced100-" ^ string_of_int attempt in
+      let before = nonblank_counter_rows () in
+      let outcome = try
+        let model = Smt.check_sat fs gamma in
+        distinct_counter_capture (label ^ "-unexpected") model;
+        `Definite
+      with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError message)
+        when message = "Incomplete totality proof: SMT returned unknown" -> `RequiredUnknown in
+      ignore (distinct_counter_checked_rows label before true);
+      Alcotest.(check bool) (label ^ " actual required UNKNOWN remains fatal") true
+        (outcome = `RequiredUnknown);
+      List.iter (fun (caller,query) ->
+        ignore (nonblank_counter_observe label before caller "unknown" query gamma))
+        ["optional-nonblank-counter",distinct_counter_pins fs name 1. 2. 0. "a";
+         "optional-nonblank-whitespace-counter",distinct_counter_pins fs name 1. 2. 0. " a";
+         "required-complete",fs];
+      nonblank_whitespace_order label before
+        ["optional-nonblank-counter";"optional-nonblank-whitespace-counter";"required-complete"];
+      nonblank_counter_retained label fs gamma original types
+    done;
+    Printf.printf "DISTINCT_COUNTER_FORCED_ACTUAL_UNKNOWN_ROUNDS=2\n%!")
+
+let admission_nonzero_seed_controls () =
+  let fixture () =
+    let fs = parse_gil_set [
+      "(#before v== {{ u16\"d\", #old, true, true, true }})";
+      "(#enumRank0 <= 2.)";
+      "(#enumRank0 == 0.)";
+      "(#index < #length)";
+      "(#index <= 4294967294.)";
+      "(#index <= 4294967295.)";
+      "(#index == #index)";
+      "(#length <= 4294967295.)";
+      "(#length == #length)";
+      "(#lvar_461 v== empty)";
+      "(#lvar_462 v== {{  }})";
+      "(#lvar_511 v== l+ ({{ #lvar_523, #lvar_533, #lvar_543, #lvar_553, #lvar_563,                    #lvar_573 }}, #lvar_571))";
+      "(#lvar_512 v== -u- (-{ u16\"1\", u16\"2\", u16\"3\", u16\"4\", u16\"5\", u16\"6\" }-,                     #lvar_572))";
+      "(#lvar_521 v== l+ ({{ #lvar_533, #lvar_543, #lvar_553, #lvar_563,                    #lvar_573 }}, #lvar_571))";
+      "(#lvar_522 v== -u- (-{ u16\"2\", u16\"3\", u16\"4\", u16\"5\", u16\"6\" }-, #lvar_572))";
+      "(#lvar_531 v== l+ ({{ #lvar_543, #lvar_553, #lvar_563, #lvar_573 }},                    #lvar_571))";
+      "(#lvar_532 v== -u- (-{ u16\"3\", u16\"4\", u16\"5\", u16\"6\" }-, #lvar_572))";
+      "(#lvar_541 v== l+ ({{ #lvar_553, #lvar_563, #lvar_573 }}, #lvar_571))";
+      "(#lvar_542 v== -u- (-{ u16\"4\", u16\"5\", u16\"6\" }-, #lvar_572))";
+      "(#lvar_551 v== l+ ({{ #lvar_563, #lvar_573 }}, #lvar_571))";
+      "(#lvar_552 v== -u- (-{ u16\"5\", u16\"6\" }-, #lvar_572))";
+      "(#lvar_561 v== l+ ({{ #lvar_573 }}, #lvar_571))";
+      "(#lvar_562 v== -u- (-{ u16\"6\" }-, #lvar_572))";
+      "((#index + 1.) <= #length)";
+      "((as_int (#index + 1.)) == (1i i+ (as_int #index)))";
+      "((as_int (#length - (#index + 1.))) i< (as_int (#length - #index)))";
+      "(0. < #index)";
+      "(0. <= #enumRank0)";
+      "(0. <= #length)";
+      "(0i i<= (as_int (#index - 0.)))";
+      "(0i i<= (as_int (#length - (#index + 1.))))";
+      "(0i i<= (l-len #lvar_571))";
+      "(0i i<= (l-len #lvar_581))";
+      "(0i i<= (l-len #s05FilterRest))";
+      "(1. < #index)";
+      "(2. < #index)";
+      "(3. < #index)";
+      "(4. < #index)";
+      "(5. < #index)";
+      "(6. < #index)";
+      "(7. < #index)";
+      "(is_int #index)";
+      "(is_int #length)";
+      "(is_int (#index + 1.))";
+    ] in
+    (* Reimport canonicalizes SetUnion operands. Restore only the six exact
+       ordered nodes present in the frozen original query, never normalize it. *)
+    let parsed_fs = fs in
+    let parsed_unions = ref Expr.Set.empty
+    and ordered_unions = ref Expr.Set.empty in
+    let union_keys = [
+      "#lvar_512",[0x31;0x32;0x33;0x34;0x35;0x36];
+      "#lvar_522",[0x32;0x33;0x34;0x35;0x36];
+      "#lvar_532",[0x33;0x34;0x35;0x36];
+      "#lvar_542",[0x34;0x35;0x36];
+      "#lvar_552",[0x35;0x36];
+      "#lvar_562",[0x36];
+    ] in
+    Alcotest.(check int) "diagnostic parsed FS before ordered restoration" 44
+      (Expr.Set.cardinal parsed_fs);
+    let fs = List.fold_left (fun frame (head,codes) ->
+      let members = Expr.Set.filter (function
+        | Expr.BinOp (Expr.LVar name,_,_) -> String.equal name head
+        | _ -> false) frame in
+      Alcotest.(check int) ("diagnostic unique ordered-union head " ^ head) 1
+        (Expr.Set.cardinal members);
+      let previous = Expr.Set.choose members in
+      match previous with
+      | Expr.BinOp (Expr.LVar name,ValueEqual,
+          Expr.NOp (SetUnion,[Expr.LVar tail;Expr.ESet keys])) ->
+          Alcotest.(check string) "diagnostic exact ordered-union head" head name;
+          Alcotest.(check string) "diagnostic exact ordered-union tail" "#lvar_572" tail;
+          let expected_keys = List.map (fun code ->
+            Expr.Lit (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical
+              (Gillian.Utils.Utf16.of_code_units [code])))) codes in
+          Alcotest.(check bool) ("diagnostic exact ordered-union keys " ^ head) true
+            (List.length keys = List.length expected_keys
+             && List.for_all2 Expr.equal keys expected_keys);
+          Alcotest.(check bool) "diagnostic ordered-union member not repeated" false
+            (Expr.Set.mem previous !parsed_unions);
+          let ordered = Expr.BinOp (Expr.LVar name,ValueEqual,
+            Expr.NOp (SetUnion,[Expr.ESet keys;Expr.LVar tail])) in
+          parsed_unions := Expr.Set.add previous !parsed_unions;
+          ordered_unions := Expr.Set.add ordered !ordered_unions;
+          Expr.Set.add ordered (Expr.Set.remove previous frame)
+      | _ -> Alcotest.fail "diagnostic exact ValueEqual/two-operand SetUnion shape absent")
+      fs union_keys in
+    Alcotest.(check int) "diagnostic exactly six parsed union members" 6
+      (Expr.Set.cardinal !parsed_unions);
+    Alcotest.(check int) "diagnostic exactly six ordered union members" 6
+      (Expr.Set.cardinal !ordered_unions);
+    Alcotest.(check int) "diagnostic ordered restoration preserves FS44" 44
+      (Expr.Set.cardinal fs);
+    Alcotest.(check int) "diagnostic exactly38 untouched FS members" 38
+      (Expr.Set.cardinal (Expr.Set.diff fs !ordered_unions));
+    Alcotest.(check bool) "diagnostic all other FS members unchanged" true
+      (Expr.Set.equal (Expr.Set.diff parsed_fs !parsed_unions)
+         (Expr.Set.diff fs !ordered_unions));
+    Alcotest.(check bool) "diagnostic exact ordered-union restoration inverse" true
+      (Expr.Set.equal parsed_fs
+         (Expr.Set.union (Expr.Set.diff fs !ordered_unions) !parsed_unions));
+    let types = [
+      "#enumRank0",Type.NumberType;
+      "#helperTdz",Type.ObjectType;
+      "#index",Type.NumberType;
+      "#length",Type.NumberType;
+      "#lvar_444",Type.ObjectType;
+      "#lvar_445",Type.ObjectType;
+      "#lvar_446",Type.ObjectType;
+      "#lvar_448",Type.ObjectType;
+      "#lvar_468",Type.ObjectType;
+      "#lvar_469",Type.ObjectType;
+      "#lvar_471",Type.ObjectType;
+      "#lvar_482",Type.ObjectType;
+      "#lvar_494",Type.ObjectType;
+      "#lvar_495",Type.ObjectType;
+      "#lvar_497",Type.ObjectType;
+      "#lvar_503",Type.ObjectType;
+      "#lvar_513",Type.Utf16Type;
+      "#lvar_523",Type.Utf16Type;
+      "#lvar_533",Type.Utf16Type;
+      "#lvar_543",Type.Utf16Type;
+      "#lvar_553",Type.Utf16Type;
+      "#lvar_563",Type.Utf16Type;
+      "#lvar_571",Type.ListType;
+      "#lvar_572",Type.SetType;
+      "#lvar_573",Type.Utf16Type;
+      "#lvar_581",Type.ListType;
+      "#lvar_582",Type.SetType;
+      "#lvar_583",Type.Utf16Type;
+      "#s05FilterItem",Type.Utf16Type;
+      "#s05FilterRest",Type.ListType;
+      "#s05FilterRestKeys",Type.SetType;
+    ] in
+    let gamma = Hashtbl.create 31 in
+    List.iter (fun (name,typ) -> Hashtbl.add gamma name typ) types;
+    fs,gamma in
+  let renamed prefix fs gamma =
+    let name n = prefix ^ String.sub n 1 (String.length n-1) in
+    let expression e = Expr.map_opt (function
+      | Expr.LVar n -> Some (Expr.LVar (name n)),false
+      | e -> Some e,true) None e |> Option.get in
+    let frame = Expr.Set.fold (fun e acc -> Expr.Set.add (expression e) acc)
+      fs Expr.Set.empty in
+    let types = Hashtbl.create (Hashtbl.length gamma) in
+    Hashtbl.iter (fun n t -> Hashtbl.add types (name n) t) gamma;
+    frame,types,name in
+  let pins fs names lower upper rank = List.fold_left (fun acc (name,n) ->
+    Expr.Set.add (bin ValueEqual (Expr.LVar (names name)) (Expr.num n)) acc)
+    fs ["#index",lower;"#length",upper;"#enumRank0",rank] in
+  let zeros fs gamma =
+    let vars = Expr.Set.fold (fun e acc ->
+      Utils.Containers.SS.union (Expr.lvars e) acc) fs Utils.Containers.SS.empty in
+    Utils.Containers.SS.fold (fun name acc ->
+      let value = match Hashtbl.find_opt gamma name with
+        | Some Type.NumberType -> Some (Expr.num 0.)
+        | Some Type.Utf16Type -> Some (nonblank_utf16 "")
+        | _ -> None in
+      match value with None -> acc
+      | Some value -> Expr.Set.add (bin Equal (Expr.LVar name) value) acc)
+      vars fs in
+  let rows_since before = nonblank_counter_rows () |> List.filter
+    (fun row -> not (List.mem row before)) in
+  let optional before = rows_since before |> List.filter (fun row ->
+    smt_result_field "caller" row = "optional-seeded-model") in
+  let model_values label model gamma expected =
+    (* Retain the actual native model before assertions/cache/trace reads. *)
+    Printf.printf "ADMISSION_NONZERO_MODEL[%s]=%s\n%!" label
+      (Fmt.str "%a" Smt.pp_model model);
+    let values = Hashtbl.create (List.length expected) in
+    Smt.lift_model model gamma (Hashtbl.add values)
+      (Expr.Set.of_list (List.map (fun (name,_) -> Expr.LVar name) expected));
+    List.iter (fun (name,want) -> match Hashtbl.find_opt values name with
+      | Some (Expr.Lit (Literal.Num actual)) ->
+          Alcotest.(check int64) (label ^ " lifted binary64 " ^ name)
+            (Int64.bits_of_float want) (Int64.bits_of_float actual)
+      | _ -> Alcotest.fail (label ^ " missing native Number model " ^ name)) expected in
+  let policy label row =
+    List.iter (fun (key,value) -> Alcotest.(check string) (label ^ " " ^ key)
+      value (smt_result_field key row))
+      ["timeout_ms",(if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then "1" else "1000");
+       "phase_selection","3";"raw_unknown","true"] in
+  with_nonblank_counter_trace (fun () ->
+    let original,original_gamma = fixture () in
+    let original_members = Expr.Set.elements original
+    and original_types = nonblank_counter_types original_gamma in
+    if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then (
+      let fs,gamma,name = renamed "#nonzero_unknown_" original original_gamma in
+      let before = nonblank_counter_rows () in
+      let failed = try ignore (Smt.check_sat fs gamma);false with
+        | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError message)
+          when message = "Incomplete totality proof: SMT returned unknown" -> true in
+      Alcotest.(check bool) "actual required UNKNOWN remains fatal" true failed;
+      let attempts = optional before in
+      Alcotest.(check int) "both zero and nonzero actually submitted" 2 (List.length attempts);
+      let row = nonblank_counter_observe "nonzero-forced-optional-unknown"
+        (List.hd attempts :: before)
+        "optional-seeded-model" "unknown" (pins fs name 8. 9. 0.) gamma in
+      policy "forced nonzero" row;
+      let required = nonblank_counter_observe "nonzero-forced-required-unknown" before
+        "required-complete" "unknown" fs gamma in
+      List.iter (fun (key,value) -> Alcotest.(check string) ("required unknown " ^ key)
+        value (smt_result_field key required))
+        ["timeout_ms","1";"phase_selection","3";"raw_unknown","false"]
+    ) else (
+      Alcotest.(check bool) "ordinary controls use unchanged default timeout" true
+        (Sys.getenv_opt "SMT_TIMEOUT" = None);
+      let check ?(extra=[]) label frame types lower upper =
+        let fs,gamma,name = if label = "original44" then frame,types,Fun.id
+          else renamed ("#nonzero_" ^ label ^ "_") frame types in
+        let before_fs = Expr.Set.elements fs and before_types = nonblank_counter_types gamma in
+        let before = nonblank_counter_rows () in
+        let model = match Smt.check_sat fs gamma with
+          | Some model -> model | None -> Alcotest.fail (label ^ " complete native SAT absent") in
+        model_values label model gamma
+          ([name "#index",lower;name "#length",upper;name "#enumRank0",0.]
+           @ List.map (fun (n,v) -> name n,v) extra);
+        let attempts = optional before in
+        Alcotest.(check int) (label ^ " actual zero then nonzero attempts") 2
+          (List.length attempts);
+        let zero = List.hd attempts and seeded = List.nth attempts 1 in
+        (* Each helper requires exactly one row for its caller. Exclude only
+           the other known actual row from that helper's comparison baseline. *)
+        let zero_row = nonblank_counter_observe (label ^ "-zero") (seeded::before)
+          "optional-seeded-model" "unsat" (zeros fs gamma) gamma in
+        policy (label ^ "-zero") zero_row;
+        let row = nonblank_counter_observe (label ^ "-nonzero") (zero::before)
+          "optional-seeded-model" "sat"
+          (List.fold_left (fun acc (n,v) -> Expr.Set.add
+            (bin ValueEqual (Expr.LVar (name n)) (Expr.num v)) acc)
+            (pins fs name lower upper 0.) extra) gamma in
+        policy label row;
+        Alcotest.(check bool) (label ^ " required fallback unnecessary after actual SAT") true
+          (not (List.exists (fun r -> smt_result_field "caller" r = "required-complete")
+             (rows_since before)));
+        nonblank_counter_retained label fs gamma before_fs before_types;
+        let saved = nonblank_counter_rows ()
+        and files = List.sort String.compare (nonblank_counter_files ()) in
+        let cached = match Smt.check_sat fs gamma with Some model -> model
+          | None -> Alcotest.fail (label ^ " lost original-key native cache") in
+        model_values (label ^ "-cache") cached gamma
+          ([name "#index",lower;name "#length",upper;name "#enumRank0",0.]
+           @ List.map (fun (n,v) -> name n,v) extra);
+        Alcotest.(check bool) (label ^ " cache invents no row/dump") true
+          (saved = nonblank_counter_rows ()
+           && files = List.sort String.compare (nonblank_counter_files ())) in
+      check "original44" original original_gamma 8. 9.;
+      check "alpha44" original original_gamma 8. 9.;
+      let old_bound = bin FLessThan (Expr.num 7.) (Expr.LVar "#index") in
+      Alcotest.(check bool) "different-bound original member exists" true
+        (Expr.Set.mem old_bound original);
+      let changed = Expr.Set.add (bin FLessThan (Expr.num 6.5) (Expr.LVar "#index"))
+        (Expr.Set.remove old_bound original) in
+      check "bound6_5" changed original_gamma 7. 8.;
+      let alias_gamma = Hashtbl.copy original_gamma in
+      Hashtbl.add alias_gamma "#next" Type.NumberType;
+      Hashtbl.add alias_gamma "#prior" Type.NumberType;
+      let adjacent = Expr.Set.add
+        (bin ValueEqual (Expr.LVar "#next")
+          (bin FPlus (Expr.LVar "#index") (Expr.num 1.))) original
+        |> Expr.Set.add (bin Equal
+          (bin FMinus (Expr.LVar "#next") (Expr.num 1.)) (Expr.LVar "#prior")) in
+      check ~extra:["#next",9.;"#prior",8.] "adjacent-reversed" adjacent alias_gamma 8. 9.;
+      (* A contradictory unrelated frame must not disappear from either the
+         direct required query or the normal complete-query entry point. *)
+      let bad,gamma,name = renamed "#nonzero_badframe_" original original_gamma in
+      Hashtbl.add gamma "#nonzero_badframe_flag" Type.BooleanType;
+      let flag = Expr.LVar "#nonzero_badframe_flag" in
+      let bad = Expr.Set.add (bin Equal flag (Expr.Lit (Literal.Bool true))) bad
+        |> Expr.Set.add (bin Equal flag (Expr.Lit (Literal.Bool false))) in
+      let before = nonblank_counter_rows () in
+      Alcotest.(check bool) "full contradictory frame native UNSAT" true
+        (Option.is_none (Smt.exec_sat ~caller_kind:"control-nonzero-full-frame" bad gamma));
+      ignore (nonblank_counter_observe "nonzero-full-frame" before
+        "control-nonzero-full-frame" "unsat" bad gamma);
+      Alcotest.(check bool) "no hinted SAT for contradictory full frame" true
+        (Option.is_none (Smt.check_sat bad gamma));
+      ignore name;
+      (* No small literal lower-bound trigger: zero fails, then unchanged
+         required native SAT/model must win without a new nonzero attempt. *)
+      (* Keep x unpinned without introducing a lower bound. Construct the
+         FPlus node directly so parsing cannot fold it into a literal pin. *)
+      let raw_x = bin ValueEqual (Expr.LVar "#nonzero_plain_x")
+        (bin FPlus (Expr.num 1.) (Expr.num 1.)) in
+      let small = Expr.Set.add raw_x (parse_gil_set [
+        "(#nonzero_plain_y v== 3.)";
+        "(#nonzero_plain_s v== u16\"A\")";"(#nonzero_plain_t v== u16\"B\")"]) in
+      Alcotest.(check bool) "no-bound control retains unreduced xEqFPlus AST" true
+        (Expr.Set.mem raw_x small);
+      Alcotest.(check bool) "no-bound control x has no literal equality pin" false
+        (Expr.Set.exists (function
+          | Expr.BinOp (Expr.LVar "#nonzero_plain_x",(Equal | ValueEqual),Expr.Lit (Num _))
+          | Expr.BinOp (Expr.Lit (Num _),(Equal | ValueEqual),Expr.LVar "#nonzero_plain_x") -> true
+          | _ -> false) small);
+      let g = Hashtbl.create 4 in
+      List.iter (fun (n,t) -> Hashtbl.add g n t)
+        ["#nonzero_plain_x",Type.NumberType;"#nonzero_plain_y",Type.NumberType;
+         "#nonzero_plain_s",Type.Utf16Type;"#nonzero_plain_t",Type.Utf16Type];
+      let fallback label fs gamma expected =
+        let before = nonblank_counter_rows () in
+        let model = match Smt.check_sat fs gamma with Some m -> m
+          | None -> Alcotest.fail (label ^ " required native SAT absent") in
+        model_values label model gamma expected;
+        Alcotest.(check int) (label ^ " exactly old zero seed, no new attempt") 1
+          (List.length (optional before));
+        let row = nonblank_counter_observe label before "required-complete" "sat" fs gamma in
+        List.iter (fun (key,value) -> Alcotest.(check string) (label ^ " " ^ key)
+          value (smt_result_field key row))
+          ["timeout_ms","30000";"phase_selection","3";"raw_unknown","false"] in
+      fallback "no-bound-noop" small g ["#nonzero_plain_x",2.;"#nonzero_plain_y",3.];
+      let content,content_gamma,name = renamed "#nonzero_content_" original original_gamma in
+      (* Leave the bound-driven index unpinned: without the content guard,
+         original7<index proposes8 and produces a second seed. Length9 and
+         rank+0 constrain this control's native model, not the caller domain. *)
+      let content = Expr.Set.union content (Expr.Set.of_list [
+        bin ValueEqual (Expr.LVar (name "#length")) (Expr.num 9.);
+        bin ValueEqual (Expr.LVar (name "#enumRank0")) (Expr.num 0.);
+        bin FLessThanEqual (Expr.LVar (name "#index")) (Expr.num 8.);
+      ]) in
+      Alcotest.(check bool) "content control index has no literal equality pin" false
+        (Expr.Set.exists (function
+          | Expr.BinOp (Expr.LVar n,(Equal | ValueEqual),Expr.Lit (Num _))
+          | Expr.BinOp (Expr.Lit (Num _),(Equal | ValueEqual),Expr.LVar n) ->
+              n = name "#index"
+          | _ -> false) content);
+      Alcotest.(check bool) "content control original bound still drives index8" true
+        (Expr.Set.mem (bin FLessThan (Expr.num 7.) (Expr.LVar (name "#index"))) content);
+      let content = Expr.Set.add
+        (bin Equal (Expr.UnOp (Utf16Trim,Expr.LVar (name "#lvar_523")))
+          (nonblank_utf16 "A")) content in
+      fallback "content-excluded" content content_gamma
+        [name "#index",8.;name "#length",9.;name "#enumRank0",0.]
+    );
+    nonblank_counter_retained "original-fixture" original original_gamma
+      original_members original_types)
+
+
+(* Opt-in emission controls. Run the first two groups with an existing fresh
+   absolute GILLIAN_NATIVE_SMT_CONTEXT_DIR, the last group with it unset.
+   No test changes the environment, logging mode/reporters or solver policy. *)
+let pending_context_field key = function
+  | `Assoc fields -> (match List.assoc_opt key fields with
+      | Some value -> value | None -> Alcotest.fail ("missing provenance field " ^ key))
+  | _ -> Alcotest.fail "expected provenance object"
+
+let pending_context_directory () =
+  match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+  | Some path when path <> "" && not (Filename.is_relative path)
+                   && (Unix.lstat path).Unix.st_kind = Unix.S_DIR -> path
+  | _ -> Alcotest.fail "this group requires a fresh absolute native context directory"
+
+let pending_context_capture f =
+  let directory = pending_context_directory () in
+  let names () = Array.to_list (Sys.readdir directory) in
+  let before = names () and saved = !Config.dump_smt in
+  Config.dump_smt := true;
+  let result = Fun.protect ~finally:(fun () -> Config.dump_smt := saved) f in
+  let fresh = List.filter (fun name -> not (List.mem name before)) (names ()) in
+  Alcotest.(check bool) "real native emissions are present" true (fresh <> []);
+  let rows = List.map (fun name ->
+    Alcotest.(check bool) "only exclusive context sidecars" true
+      (Filename.check_suffix name ".smt2.context.json");
+    let path = Filename.concat directory name in
+    Alcotest.(check bool) "sidecar is regular" true
+      ((Unix.lstat path).Unix.st_kind = Unix.S_REG);
+    let row = Yojson.Safe.from_file path in
+    Alcotest.(check bool) "query joins the actual file" true
+      (pending_context_field "query" row = `String
+        (String.sub name 0 (String.length name - String.length ".context.json")));
+    Alcotest.(check bool) "metadata records pre-result status" true
+      (pending_context_field "result_status" (pending_context_field "provenance" row)
+       = `String "not-yet-requested");
+    row) fresh in
+  (result, rows)
+
+let pending_context_scopes row =
+  match pending_context_field "operation_scopes"
+      (pending_context_field "provenance" row) with
+  | `List scopes -> scopes | _ -> Alcotest.fail "expected operation scopes"
+
+let pending_context_scope operation rows =
+  let scopes = List.concat_map pending_context_scopes rows in
+  match List.find_opt (fun scope -> pending_context_field "operation" scope
+      = `String operation) scopes with
+  | Some scope -> scope | None -> Alcotest.fail ("missing actual operation " ^ operation)
+
+let pending_context_ints prefix =
+  let xn = "#pending_" ^ prefix ^ "_x" and yn = "#pending_" ^ prefix ^ "_y" in
+  let gamma = Gamma.init () in
+  Gamma.update gamma xn Type.IntType; Gamma.update gamma yn Type.IntType;
+  (Expr.LVar xn, Expr.LVar yn, gamma)
+
+let pending_context_original_operations () =
+  let expression e = `String (Fmt.str "%a" Expr.pp e) in
+  let px,py,g = pending_context_ints "sat" in
+  let fs = [bin ILessThan px py;bin ILessThan (Expr.int 0) py] in
+  let result,rows = pending_context_capture (fun () ->
+    Solver.check_satisfiability ~matching:true fs g) in
+  Alcotest.(check bool) "actual SAT result" true result;
+  let context = pending_context_scope "satisfiability" rows in
+  Alcotest.(check bool) "SAT original formulas retained" true
+    (pending_context_field "original_fs" context = `List (List.map expression fs));
+  Alcotest.(check bool) "matching context retained" true
+    (pending_context_field "matching" context = `Bool true);
+  let px,_,g = pending_context_ints "entail" in
+  let left = [bin ILessThan px (Expr.int 0)]
+  and goal = bin ILessThan px (Expr.int (-1)) in
+  let result,rows = pending_context_capture (fun () ->
+    Solver.check_entailment Utils.Containers.SS.empty
+      (Engine.PFS.of_list left) [goal] g) in
+  Alcotest.(check bool) "false original goal is rejected" false result;
+  let context = pending_context_scope "entailment" rows in
+  Alcotest.(check bool) "original right survives simplification/fallback" true
+    (pending_context_field "original_right_fs" context = `List [expression goal]);
+  Alcotest.(check bool) "original left survives simplification" true
+    (pending_context_field "original_left_fs" context = `List (List.map expression left));
+  let px,py,g = pending_context_ints "assumption" in
+  let formula = bin ILessThan px py in
+  let result,rows = pending_context_capture (fun () ->
+    Solver.sat ~matching:false ~pfs:(Engine.PFS.of_list
+      [bin ILessThan (Expr.int 0) py]) ~gamma:g formula) in
+  Alcotest.(check bool) "assumption is feasible" true result;
+  let context = pending_context_scope "sat" rows in
+  Alcotest.(check bool) "original assumption retained before Reduction" true
+    (pending_context_field "original_formula" context = expression formula);
+  ignore (pending_context_scope "satisfiability" rows);
+  let px,py,g = pending_context_ints "model" in
+  let model,rows = pending_context_capture (fun () ->
+    Solver.check_satisfiability_with_model
+      [bin ILessThan px py;bin ILessThan (Expr.int 0) py] g) in
+  Alcotest.(check bool) "model entry keeps actual result" true (Option.is_some model);
+  ignore (pending_context_scope "satisfiability-with-model" rows)
+
+let pending_context_nested_exception () =
+  let parent = Option.get (Logging.Report_id.of_string_opt "424242") in
+  let original_parent = Logging.Parent.get () in
+  let emitted = ref [] in
+  (try
+    Smt.with_native_smt_context
+      (fun () -> `Assoc [("operation",`String "unit-outer")]) (fun () ->
+      Smt.with_native_smt_context
+        (fun () -> `Assoc [("operation",`String "unit-inner")]) (fun () ->
+        Logging.Parent.with_id (Some parent) (fun () ->
+          let px,py,g = pending_context_ints "nested" in
+          let _,rows = pending_context_capture (fun () ->
+            Solver.sat ~matching:false ~pfs:(Engine.PFS.of_list
+              [bin ILessThan (Expr.int 0) py]) ~gamma:g (bin ILessThan px py)) in
+          emitted := rows;
+          failwith "provenance exceptional-exit control")))
+  with Failure message when message = "provenance exceptional-exit control" -> ());
+  Alcotest.(check bool) "parent restored after exception" true
+    (Option.equal Logging.Report_id.equal original_parent (Logging.Parent.get ()));
+  List.iter (fun row ->
+    let scopes = pending_context_scopes row in
+    let operations = List.map (pending_context_field "operation") scopes in
+    Alcotest.(check bool) "ordered nested original operations" true
+      (operations = List.map (fun s -> `String s)
+         ["unit-outer";"unit-inner";"sat";"satisfiability"]);
+    Alcotest.(check bool) "actual active Parent API value joined at emission" true
+      (match Logging.Report_id.of_yojson
+         (pending_context_field "id" (pending_context_field "logging_parent"
+           (pending_context_field "provenance" row))) with
+       | Ok actual -> Logging.Report_id.equal actual parent
+       | Error _ -> false)
+  ) !emitted;
+  let px,_,g = pending_context_ints "after_exception" in
+  let model,rows = pending_context_capture (fun () ->
+    Smt.exec_sat (Expr.Set.singleton (bin Equal px (Expr.int 3)))
+      (Gamma.as_hashtbl g)) in
+  Alcotest.(check bool) "direct native SAT remains feasible" true (Option.is_some model);
+  List.iter (fun row ->
+    Alcotest.(check bool) "no stale operation after exceptional exit" true
+      (pending_context_scopes row = []);
+    Alcotest.(check bool) "direct entry is explicit" true
+      (pending_context_field "entry" (pending_context_field "provenance" row)
+       = `String "direct-smt")) rows
+
+let pending_context_unset () =
+  Alcotest.(check bool) "unset control needs the environment absent" true
+    (Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" = None);
+  let rendered = ref 0 in
+  let px,_,g = pending_context_ints "disabled" in
+  let model = Smt.with_native_smt_context
+    (fun () -> incr rendered; failwith "disabled metadata must stay lazy")
+    (fun () -> Smt.exec_sat
+      (Expr.Set.singleton (bin Equal px (Expr.int 7))) (Gamma.as_hashtbl g)) in
+  Alcotest.(check int) "disabled path never formats metadata" 0 !rendered;
+  Alcotest.(check bool) "disabled native SAT remains unchanged" true (Option.is_some model)
+
+(* Direct-parent controls run singly in fresh processes, with no database
+   reporter. Cleanup restores the normal fresh-process default logger mode. *)
+let direct_parent_with_state state f =
+  (* Preserve the existing with_state API, including its exception behavior. *)
+  match Logging.Report_state.with_state
+      (fun () -> try Ok (f ()) with exn -> Error exn) state with
+  | Ok value -> value | Error exn -> raise exn
+
+let direct_parent_file_logger f =
+  Logging.Mode.set_mode (Enabled Normal);
+  Logging.initialize [Logging.file_reporter];
+  Fun.protect ~finally:(fun () ->
+    Logging.wrap_up (); Logging.initialize [];
+    Logging.Mode.set_mode (Enabled Verbose))
+    (fun () -> direct_parent_with_state (Logging.Report_state.make ()) f)
+
+let direct_parent_loggable render =
+  Logging.Loggable.make (fun fmt _ -> Fmt.string fmt "DIRECT_PARENT_FIXTURE")
+    (fun json -> Ok json) (fun _ -> render ()) `Null
+
+let direct_parent_command render f =
+  Logging.Parent.with_specific (Some (direct_parent_loggable render))
+    Logging.Logging_constants.Content_type.cmd f
+
+let direct_parent_snapshot_content () =
+  match Logging.Parent.get_snapshot () with
+  | Some (id, type_, content) -> (id, type_, Yojson.Safe.from_string content)
+  | None -> Alcotest.fail "expected exact active immutable command snapshot"
+
+let direct_parent_native_rows label =
+  let px,_,g = pending_context_ints ("direct_" ^ label) in
+  let model, rows = pending_context_capture (fun () ->
+    Smt.exec_sat (Expr.Set.singleton (bin Equal px (Expr.int 17)))
+      (Gamma.as_hashtbl g)) in
+  Alcotest.(check bool) "real direct-parent native SAT result" true
+    (Option.is_some model);
+  rows
+
+let direct_parent_check_rows id expected rows =
+  List.iter (fun row ->
+    let parent = pending_context_field "logging_parent"
+      (pending_context_field "provenance" row) in
+    Alcotest.(check bool) "actual report ID at native emission" true
+      (match Logging.Report_id.of_yojson (pending_context_field "id" parent) with
+       | Ok actual -> Logging.Report_id.equal id actual | Error _ -> false);
+    Alcotest.(check bool) "actual active command type" true
+      (pending_context_field "type" parent
+       = `String Logging.Logging_constants.Content_type.cmd);
+    Alcotest.(check bool) "actual active command status" true
+      (pending_context_field "status" parent = `String "current-parent-is-command");
+    let content = match pending_context_field "content_json" parent with
+      | `String encoded -> Yojson.Safe.from_string encoded
+      | _ -> Alcotest.fail "missing immutable command content" in
+    Alcotest.(check bool) "original command/PC/state at native emission" true
+      (content = expected)) rows
+
+let direct_parent_normal_native () =
+  ignore (pending_context_directory ());
+  direct_parent_file_logger (fun () ->
+    let pc = ref 7 and state = ref "before" and rendered = ref 0 in
+    let original = `Assoc [("cmd", `String "assert true"); ("pc", `Int 7);
+      ("state", `String "before")] in
+    direct_parent_command (fun () -> incr rendered;
+      `Assoc [("cmd", `String "assert true"); ("pc", `Int !pc);
+        ("state", `String !state)]) (fun id ->
+      let id = Option.get id in
+      Alcotest.(check bool) "file-only command has no SQLite record" true
+        (Logging.Log_queryer.get_report id = None);
+      Alcotest.(check int) "serialize once at creation" 1 !rendered;
+      pc := 99; state := "mutated after report creation";
+      let snapshot_id,_,content = direct_parent_snapshot_content () in
+      Alcotest.(check bool) "snapshot owns exact created ID" true
+        (Logging.Report_id.equal snapshot_id id);
+      Alcotest.(check bool) "snapshot detached from mutable state" true
+        (content = original);
+      direct_parent_check_rows id original (direct_parent_native_rows "normal");
+      Alcotest.(check int) "query does not reserialize mutable command" 1 !rendered);
+    Alcotest.(check bool) "released command leaves no snapshot" true
+      (Logging.Parent.get_snapshot () = None))
+
+let direct_parent_check_unavailable id label =
+  Alcotest.(check bool) "unavailable fixture has no SQLite record" true
+    (Logging.Log_queryer.get_report id = None);
+  List.iter (fun row ->
+    let parent = pending_context_field "logging_parent"
+      (pending_context_field "provenance" row) in
+    Alcotest.(check bool) "unavailable snapshot retains exact parent ID" true
+      (match Logging.Report_id.of_yojson (pending_context_field "id" parent) with
+       | Ok actual -> Logging.Report_id.equal id actual | Error _ -> false);
+    Alcotest.(check bool) "unavailable snapshot never falls back to ancestor content" true
+      (pending_context_field "status" parent = `String "parent-content-unavailable"
+       && pending_context_field "type" parent = `Null
+       && pending_context_field "content_json" parent = `Null))
+    (direct_parent_native_rows label)
+
+let direct_parent_nested_states () =
+  ignore (pending_context_directory ());
+  direct_parent_file_logger (fun () ->
+    let original = `Assoc [("cmd", `String "outer"); ("pc", `Int 10)] in
+    let state_a = Logging.Report_state.make () in
+    direct_parent_with_state state_a (fun () ->
+      let saved_clone = ref None in
+      direct_parent_command (fun () -> original) (fun outer ->
+        let outer = Option.get outer in
+        saved_clone := Some (Logging.Report_state.clone state_a);
+        (try direct_parent_command
+          (fun () -> `Assoc [("cmd", `String "inner"); ("pc", `Int 11)])
+          (fun inner ->
+            direct_parent_check_rows (Option.get inner)
+              (`Assoc [("cmd", `String "inner"); ("pc", `Int 11)])
+              (direct_parent_native_rows "inner");
+            failwith "direct-parent nested exit")
+         with Failure message when message = "direct-parent nested exit" -> ());
+        direct_parent_check_rows outer original (direct_parent_native_rows "restored");
+        let state_b = Logging.Report_state.make () in
+        Logging.Report_state.activate state_b;
+        Fun.protect ~finally:(fun () -> Logging.Report_state.activate state_a) (fun () ->
+          Alcotest.(check bool) "new active state has no borrowed snapshot" true
+            (Logging.Parent.get_snapshot () = None);
+          direct_parent_command
+            (fun () -> `Assoc [("cmd", `String "other-state"); ("pc", `Int 20)])
+            (fun other -> direct_parent_check_rows (Option.get other)
+              (`Assoc [("cmd", `String "other-state"); ("pc", `Int 20)])
+              (direct_parent_native_rows "other_state")));
+        direct_parent_check_rows outer original (direct_parent_native_rows "state_a"));
+      Alcotest.(check bool) "original state released independently of clone" true
+        (Logging.Parent.get_snapshot () = None);
+      direct_parent_with_state (Option.get !saved_clone) (fun () ->
+        let id,_,content = direct_parent_snapshot_content () in
+        Alcotest.(check bool) "clone retained immutable parent" true (content = original);
+        direct_parent_check_rows id original (direct_parent_native_rows "clone");
+        Logging.Parent.release (Some id));
+      Alcotest.(check bool) "clone release did not mutate original stack" true
+        (Logging.Parent.get_snapshot () = None)))
+
+let direct_parent_unavailable () =
+  ignore (pending_context_directory ());
+  direct_parent_file_logger (fun () ->
+    direct_parent_command (fun () -> `String "valid outer") (fun _ ->
+      let other = Option.get (Logging.Report_id.of_string_opt "-9223372036854775807") in
+      Logging.Parent.with_id (Some other) (fun () ->
+        Alcotest.(check bool) "unmatched ID never borrows active ancestor" true
+          (Logging.Parent.get_snapshot () = None);
+        direct_parent_check_unavailable other "unmatched");
+      Alcotest.(check bool) "mismatched ID release restores outer" true
+        (Option.is_some (Logging.Parent.get_snapshot ()));
+      Logging.Parent.with_specific (Some (Logging.Loggable.make_string "noncmd"))
+        Logging.Logging_constants.Content_type.phase (fun id ->
+          Alcotest.(check bool) "noncommand parent never borrows command" true
+            (Logging.Parent.get_snapshot () = None);
+          direct_parent_check_unavailable (Option.get id) "noncommand");
+      direct_parent_command
+        (fun () -> `String (String.make (8 * 1024 * 1024 + 1) 'x')) (fun id ->
+          Alcotest.(check bool) "oversize retains real report ID" true (Option.is_some id);
+          Alcotest.(check bool) "oversize snapshot unavailable" true
+            (Logging.Parent.get_snapshot () = None);
+          direct_parent_check_unavailable (Option.get id) "oversize");
+      direct_parent_command (fun () -> failwith "intentional snapshot serializer failure")
+        (fun id ->
+          Alcotest.(check bool) "serializer failure retains report flow" true
+            (Option.is_some id);
+          Alcotest.(check bool) "serializer failure does not expose stale command" true
+            (Logging.Parent.get_snapshot () = None);
+          direct_parent_check_unavailable (Option.get id) "serialization_failure");
+      let _,_,content = direct_parent_snapshot_content () in
+      Alcotest.(check bool) "failed observer scopes restore outer" true
+        (content = `String "valid outer")))
+
+let direct_parent_unset () =
+  Alcotest.(check bool) "unset control requires absent observer environment" true
+    (Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" = None);
+  direct_parent_file_logger (fun () ->
+    let rendered = ref 0 in
+    let content = direct_parent_loggable (fun () ->
+      incr rendered; failwith "unset command serialization must never run") in
+    Alcotest.(check bool) "unset Normal file-only command remains filtered" true
+      (Logging.Specific.normal content Logging.Logging_constants.Content_type.cmd = None);
+    Logging.Mode.set_mode (Enabled Verbose);
+    Logging.Parent.with_specific (Some content)
+      Logging.Logging_constants.Content_type.cmd (fun id ->
+        Alcotest.(check bool) "existing Verbose command remains real" true
+          (Option.is_some id);
+        Alcotest.(check bool) "unset observer has no snapshot" true
+          (Logging.Parent.get_snapshot () = None);
+        let px,_,g = pending_context_ints "direct_unset" in
+        Alcotest.(check bool) "unset real native SAT unchanged" true
+          (Option.is_some (Smt.exec_sat
+            (Expr.Set.singleton (bin Equal px (Expr.int 23))) (Gamma.as_hashtbl g))));
+    Alcotest.(check int) "unset path never invokes command serializer" 0 !rendered)
+
+(* Primary preprocessing controls call the real Smt APIs. Dispatch/provenance
+   labels are not an independent solver-wire transcript. Run each group in a
+   fresh native directory; the existing file-only logger is restored on exit. *)
+let with_primary_check_trace f =
+  let saved_dump = !Config.dump_smt in
+  direct_parent_file_logger (fun () ->
+    Config.dump_smt := true;
+    Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump) (fun () ->
+      Logging.normal (fun m -> m "PRIMARY_CHECK_NORMAL_BEGIN");
+      f ()))
+
+let primary_check_native ?(phase_selection = 3) label fs gamma =
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = List.length (nonblank_counter_rows ()) in
+  let caller = "control-primary-" ^ label in
+  let model = Smt.exec_sat ~caller_kind:caller ~phase_selection fs gamma in
+  let fresh = nonblank_counter_rows () |> List.mapi (fun i row -> i,row)
+    |> List.filter_map (fun (i,row) -> if i >= before then Some row else None) in
+  Alcotest.(check int) (label ^ " one primary native result") 1 (List.length fresh);
+  let row = List.hd fresh in
+  List.iter (fun (key,value) -> Alcotest.(check string) (label ^ " " ^ key)
+    value (smt_result_field key row))
+    ["caller",caller; "raw_unknown","false"; "phase_selection",string_of_int phase_selection;
+     "timeout_ms",Option.value ~default:"30000" (Sys.getenv_opt "SMT_TIMEOUT");
+     "result",(if Option.is_some model then "sat" else "unsat")];
+  let query = smt_result_field "query" row in
+  let command =
+    Sexplib.Sexp.to_string_mach
+      (Sexplib.Sexp.of_string
+         (if phase_selection = 0 then
+            "(check-sat-using(or-else(try-for(then simplify solve-eqs smt fail-if-undecided)1000)(then simplify solve-eqs fpa2bv smt)))"
+          else
+            "(check-sat)"))
+  in
+  let dispatch = "SMT_PRIMARY_CHECK_DISPATCH query=" ^ query ^ " command=" ^ command in
+  let dispatches = nonblank_counter_read "file.log" |> String.split_on_char '\n'
+    |> List.filter (fun line -> line = dispatch) in
+  Alcotest.(check int) (label ^ " exact chosen-command dispatch") 1 (List.length dispatches);
+  let prefix = Fmt.str "GIL query:\nFS: %a\nGAMMA: %a\nEncoded as SMT Query:\n"
+    (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs
+    Fmt.(Dump.hashtbl string (of_to_string Type.str)) gamma in
+  Alcotest.(check bool) (label ^ " full original FS/Gamma retained") true
+    (String.starts_with ~prefix (nonblank_counter_read
+      (Filename.concat "gillian_smt_queries" query)));
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> ()
+   | Some directory ->
+       let context = Yojson.Safe.from_file
+         (Filename.concat directory (query ^ ".context.json")) in
+       Alcotest.(check bool) (label ^ " pre-submit exact primary command") true
+         (pending_context_field "primary_check_command"
+            (pending_context_field "provenance" context) = `String command));
+  Alcotest.(check bool) (label ^ " original FS unchanged") true
+    (List.equal Expr.equal original (Expr.Set.elements fs));
+  Alcotest.(check bool) (label ^ " original Gamma unchanged") true
+    (types = nonblank_counter_types gamma);
+  Printf.printf "PRIMARY_CHECK_NATIVE_RESULT[%s]=%s\n%!" label row;
+  model
+
+let primary_check_lift label model gamma expected =
+  let lifted = Hashtbl.create (List.length expected) in
+  Smt.lift_model model gamma (Hashtbl.add lifted)
+    (Expr.Set.of_list (List.map (fun (name,_) -> Expr.LVar name) expected));
+  Alcotest.(check int) (label ^ " every original alias recovered")
+    (List.length expected) (Hashtbl.length lifted);
+  List.iter (fun (name,want) ->
+    match want,Hashtbl.find_opt lifted name with
+    | Literal.Num want,Some (Expr.Lit (Literal.Num actual)) ->
+        if Float.is_nan want then
+          Alcotest.(check bool) (label ^ " native NaN " ^ name) true (Float.is_nan actual)
+        else Alcotest.(check int64) (label ^ " native binary64 bits " ^ name)
+          (Int64.bits_of_float want) (Int64.bits_of_float actual)
+    | _,Some (Expr.Lit actual) ->
+        Alcotest.(check bool) (label ^ " native value " ^ name) true (want = actual)
+    | _ -> Alcotest.fail (label ^ " missing original native alias " ^ name)) expected
+
+let primary_check_integer_aliases () = with_primary_check_trace (fun () ->
+  let x = Expr.LVar "#primary_int_x" and y = Expr.LVar "#primary_int_y"
+  and z = Expr.LVar "#primary_int_z" in
+  let gamma = Hashtbl.create 3 in
+  List.iter (fun name -> Hashtbl.add gamma name Type.IntType)
+    ["#primary_int_x";"#primary_int_y";"#primary_int_z"];
+  let fs = Expr.Set.of_list [bin Equal x (Expr.int 7);
+    bin Equal y (bin IPlus x (Expr.int 1));bin Equal z y] in
+  let model = match primary_check_native "integer-alias-SAT" fs gamma with
+    | Some model -> model | None -> Alcotest.fail "missing original integer alias model" in
+  let expected = ["#primary_int_x",Literal.Int (Z.of_int 7);
+    "#primary_int_y",Literal.Int (Z.of_int 8);"#primary_int_z",Literal.Int (Z.of_int 8)] in
+  primary_check_lift "eliminated integer aliases" model gamma expected;
+  let conflict = Expr.Set.add (not_ (bin Equal z (Expr.int 8))) fs in
+  Alcotest.(check bool) "alias disequality is native UNSAT" true
+    (Option.is_none (primary_check_native "integer-alias-UNSAT" conflict gamma));
+  Alcotest.(check bool) "remove only disequality restores native SAT" true
+    (Option.is_some (primary_check_native "integer-alias-countercontrol" fs gamma));
+  primary_check_lift "original model after later solver resets" model gamma expected)
+
+let primary_check_typed_aliases () = with_primary_check_trace (fun () ->
+  Alcotest.(check bool) "structural preservation guard accepts identical NaN bits" true
+    (List.equal Expr.equal [Expr.num nan] [Expr.num nan]);
+  Alcotest.(check bool) "structural preservation guard distinguishes signed zeros" false
+    (List.equal Expr.equal [Expr.num 0.] [Expr.num (-0.)]);
+  Alcotest.(check bool) "structural preservation guard rejects a changed literal" false
+    (List.equal Expr.equal [Expr.num 1.] [Expr.num 2.]);
+  let raw = Utils.Utf16.of_canonical
+    (Utils.Utf16.of_code_units [0;0xd800;0x41;0xdc00;0xffff]) in
+  List.iter (fun (label,typ,value) ->
+    let xn = "#primary_typed_" ^ label ^ "_x"
+    and yn = "#primary_typed_" ^ label ^ "_y" in
+    let x = Expr.LVar xn and y = Expr.LVar yn in
+    let gamma = Hashtbl.create 2 in
+    Hashtbl.add gamma xn typ;Hashtbl.add gamma yn typ;
+    let fs = Expr.Set.of_list [bin ValueEqual x (Expr.Lit value);bin ValueEqual y x] in
+    let model = match primary_check_native (label ^ "-SAT") fs gamma with
+      | Some model -> model | None -> Alcotest.fail (label ^ " missing native alias model") in
+    primary_check_lift label model gamma [xn,value;yn,value];
+    Alcotest.(check bool) (label ^ " full alias contradiction native UNSAT") true
+      (Option.is_none (primary_check_native (label ^ "-UNSAT")
+        (Expr.Set.add (not_ (bin ValueEqual y (Expr.Lit value))) fs) gamma));
+    primary_check_lift (label ^ " saved model after contradiction reset") model gamma
+      [xn,value;yn,value])
+    ["utf16-raw-units",Type.Utf16Type,Literal.Utf16String raw;
+     "bool-true",Type.BooleanType,Literal.Bool true;
+     "bool-false",Type.BooleanType,Literal.Bool false;
+     "positive-zero",Type.NumberType,Literal.Num 0.;
+     "negative-zero",Type.NumberType,Literal.Num (-0.);
+     "finite",Type.NumberType,Literal.Num 42.5;
+     "positive-infinity",Type.NumberType,Literal.Num infinity;
+     "negative-infinity",Type.NumberType,Literal.Num neg_infinity;
+     "nan",Type.NumberType,Literal.Num nan])
+
+let primary_check_declarations_and_cache () = with_primary_check_trace (fun () ->
+  let make tag value =
+    let datatype_name = "PrimaryCheckContext" ^ tag
+    and constructor_name = "PrimaryCheckBox" ^ tag in
+    let constructor : Constructor.t = {constructor_name;
+      constructor_source_path=None;constructor_loc=None;constructor_num_fields=1;
+      constructor_fields=[Some Type.IntType];constructor_datatype=datatype_name} in
+    let datatype : Datatype.t = {datatype_name;datatype_source_path=None;
+      datatype_loc=None;datatype_constructors=[constructor]} in
+    let table = Hashtbl.create 1 in Hashtbl.add table datatype_name datatype;
+    let env = Prog_env.Datatype_env.make' table in
+    let xn = "#primary_decl_" ^ tag ^ "_x" and yn = "#primary_decl_" ^ tag ^ "_y" in
+    let x = Expr.LVar xn and y = Expr.LVar yn in
+    let gamma = Hashtbl.create 2 in
+    Hashtbl.add gamma xn Type.IntType;Hashtbl.add gamma yn Type.IntType;
+    let fs = Expr.Set.of_list [bin Equal x (Expr.int value);bin Equal y x;
+      bin Equal (Expr.LVar ("#primary_decl_" ^ tag ^ "_box"))
+        (Expr.ConstructorApp (constructor_name,[y]))] in
+    env,fs,gamma,[xn,Literal.Int (Z.of_int value);yn,Literal.Int (Z.of_int value)] in
+  let env_a,fa,ga,expected_a = make "A" 31
+  and env_b,fb,gb,expected_b = make "B" 47 in
+  let get = function Some model -> model | None -> Alcotest.fail "missing datatype alias model" in
+  let ma = Prog_env.Datatype_env.using env_a (fun () ->
+    get (primary_check_native "datatype-A-SAT" fa ga)) in
+  let mb = Prog_env.Datatype_env.using env_b (fun () ->
+    get (primary_check_native "datatype-B-SAT" fb gb)) in
+  (* The original declaration/model must survive outside its datatype handler,
+     after a distinct native context, and through lift_model's plain check. *)
+  primary_check_lift "datatype A after B/reset" ma ga expected_a;
+  primary_check_lift "datatype B after A/reset" mb gb expected_b;
+  let before = nonblank_counter_rows () in
+  Prog_env.Datatype_env.using env_a (fun () ->
+    Alcotest.(check bool) "cache seed is actual optional native SAT" false
+      (Smt.proves_unsat ~caller_kind:"control-primary-datatype-cache" fa ga));
+  let fresh = nonblank_counter_rows () |> List.filter (fun row -> not (List.mem row before)) in
+  Alcotest.(check int) "one actual cache-seed result" 1 (List.length fresh);
+  let row = List.hd fresh in
+  List.iter (fun (key,want) -> Alcotest.(check string) ("cache seed " ^ key)
+    want (smt_result_field key row))
+    ["caller","control-primary-datatype-cache";"raw_unknown","true";"result","sat"];
+  let timeout = int_of_string (smt_result_field "timeout_ms" row) in
+  Alcotest.(check bool) "optional cap remains at most five seconds" true
+    (timeout > 0 && timeout <= 5000);
+  let rows = nonblank_counter_rows () and files = nonblank_counter_files () |> List.sort String.compare in
+  let cached = Prog_env.Datatype_env.using env_a (fun () -> get (Smt.check_sat fa ga)) in
+  Alcotest.(check bool) "cache hit adds no native result or dump" true
+    (rows = nonblank_counter_rows ()
+     && files = (nonblank_counter_files () |> List.sort String.compare));
+  primary_check_lift "cached original datatype aliases" cached ga expected_a;
+  primary_check_lift "original direct model remains independent" ma ga expected_a)
+
+(* Four complete primary requests share the same typed frame across phases.
+   Removing only the arithmetic link admits a concrete countermodel; restoring
+   that load-bearing conjunct must be UNSAT. No subset is used as a proof. *)
+let primary_phase_policy () = with_primary_check_trace (fun () ->
+  ignore (pending_context_directory ());
+  let xn = "#primary_phase_x" and yn = "#primary_phase_y"
+  and bn = "#primary_phase_frame" in
+  let x = Expr.LVar xn and y = Expr.LVar yn and b = Expr.LVar bn in
+  let gamma = Hashtbl.create 3 in
+  Hashtbl.add gamma xn Type.IntType; Hashtbl.add gamma yn Type.IntType;
+  Hashtbl.add gamma bn Type.BooleanType;
+  let frame = Expr.Set.of_list [bin Equal x (Expr.int 7);
+    not_ (bin Equal y (Expr.int 8)); bin Equal b (Expr.Lit (Literal.Bool true))] in
+  let link = bin Equal y (bin IPlus x (Expr.int 1)) in
+  let complete = Expr.Set.add link frame in
+  List.iter (fun phase_selection ->
+    let label = "phase-policy-" ^ string_of_int phase_selection in
+    let model = match primary_check_native ~phase_selection (label ^ "-SAT") frame gamma with
+      | Some model -> model
+      | None -> Alcotest.fail (label ^ " missing native countermodel") in
+    let values = Hashtbl.create 3 in
+    Smt.lift_model model gamma (Hashtbl.add values) (Expr.Set.of_list [x;y;b]);
+    let integer name = match Hashtbl.find_opt values name with
+      | Some (Expr.Lit (Literal.Int value)) -> value
+      | _ -> Alcotest.fail (label ^ " missing native Int " ^ name) in
+    let xv = integer xn and yv = integer yn in
+    let bv = match Hashtbl.find_opt values bn with
+      | Some (Expr.Lit (Literal.Bool value)) -> value
+      | _ -> Alcotest.fail (label ^ " missing native Bool frame") in
+    Alcotest.(check bool) (label ^ " concrete model satisfies every SAT-frame conjunct") true
+      (Z.equal xv (Z.of_int 7) && not (Z.equal yv (Z.of_int 8)) && bv);
+    Alcotest.(check bool) (label ^ " countermodel falsifies the omitted arithmetic link") false
+      (Z.equal yv (Z.add xv Z.one));
+    Alcotest.(check bool) (label ^ " restoring the load-bearing conjunct is native UNSAT") true
+      (Option.is_none (primary_check_native ~phase_selection (label ^ "-UNSAT") complete gamma)))
+    [0;3])
+
+(* Source-only ListSnocSplit regression controls. These use the public reducer,
+   original-expression Totality API and concrete evaluator, never the private
+   bound recognizer. The retained PC licenses a cast equality, not the goal. *)
+let slice_bound_with_modes total under f =
+  let old_total = !Config.Verification.total
+  and old_under = !Config.under_approximation in
+  Config.Verification.total := total;
+  Config.under_approximation := under;
+  Fun.protect ~finally:(fun () ->
+    Config.Verification.total := old_total;
+    Config.under_approximation := old_under) f
+
+let slice_bound_gamma () =
+  let g = Gamma.init () in
+  List.iter (fun (name, typ) -> Gamma.update g name typ)
+    ["#slice_prefix", Type.ListType; "#slice_tail", Type.ListType;
+     "#slice_numbers", Type.ListType; "#slice_n", Type.NumberType;
+     "#slice_m", Type.NumberType];
+  g
+
+let slice_bound_expression canonical prefix item tail operand =
+  let len e = Expr.UnOp (LstLen, e) in
+  let cast = Expr.UnOp (NumToInt, operand) in
+  let whole = Expr.NOp (LstCat, [prefix; Expr.EList [item]; tail]) in
+  let bridge = bin IPlus (Expr.int 1) (len prefix) in
+  let count = if canonical then
+      bin IPlus (bin IPlus bridge (len tail))
+        (bin ITimes (Expr.int (-1)) cast)
+    else bin IMinus (len whole) cast in
+  (cast, bridge, Expr.LstSub (whole, cast, count))
+
+let slice_bound_reduce label g facts original =
+  let pfs = Engine.PFS.of_list facts in
+  let before = Engine.PFS.to_list pfs in
+  let result = Engine.Reduction.reduce_lexpr ~pfs ~gamma:g original in
+  Alcotest.(check bool) (label ^ " retained PC unchanged") true
+    (List.equal Expr.equal before (Engine.PFS.to_list pfs));
+  result
+
+let slice_bound_has_cast expression =
+  let found = ref false in
+  ignore (Expr.map_opt (fun e ->
+    (match e with Expr.UnOp (NumToInt, _) -> found := true | _ -> ());
+    (Some e, true)) None expression);
+  !found
+
+let slice_bound_value expression =
+  Engine.CExprEval.evaluate_expr (Engine.CExprEval.CStore.init []) expression
+
+let slice_bound_truth expression =
+  match slice_bound_value expression with
+  | Literal.Bool value -> value
+  | _ -> Alcotest.fail "slice-bound concrete condition was not Boolean"
+
+let slice_bound_check_domain original =
+  let calls = ref 0 in
+  let require _ condition =
+    incr calls;
+    if not (slice_bound_truth condition) then
+      failwith "slice-bound original domain is not proved"
+  in
+  Engine.Totality.check_expression ~proof:true ~require
+    ~proves:slice_bound_truth ~evaluate:Fun.id original;
+  Alcotest.(check bool) "original slice domain actually checked" true (!calls > 0)
+
+let slice_bound_reject_domain label original =
+  let rejected = try slice_bound_check_domain original; false with
+    | Failure message when message = "slice-bound original domain is not proved" -> true
+  in
+  Alcotest.(check bool) label true rejected
+
+let slice_bound_symbolic_controls () = slice_bound_with_modes true false (fun () ->
+  let prefix = Expr.LVar "#slice_prefix" and tail = Expr.LVar "#slice_tail"
+  and n = Expr.LVar "#slice_n" in
+  let operand = bin FPlus n (Expr.num 1.) in
+  List.iter (fun canonical -> List.iter (fun reversed ->
+    let g = slice_bound_gamma () in
+    let before_types = Gamma.to_list g |> List.sort Stdlib.compare in
+    let cast, bridge, original =
+      slice_bound_expression canonical prefix (Expr.Lit Null) tail operand in
+    let equality = if reversed then bin Equal bridge cast else bin Equal cast bridge in
+    let label = Printf.sprintf "snoc tail canonical=%b reversed=%b" canonical reversed in
+    let result = slice_bound_reduce label g
+      [Expr.UnOp (IsInt, operand); equality] original in
+    Alcotest.(check bool) (label ^ " actual public reduction is suffix") true
+      (Expr.equal result tail);
+    Alcotest.(check bool) (label ^ " input types unchanged") true
+      (before_types = (Gamma.to_list g |> List.sort Stdlib.compare));
+    Alcotest.(check bool) (label ^ " original start still contains cast") true
+      (slice_bound_has_cast original)) [false; true]) [false; true])
+
+let slice_bound_concrete_controls () = slice_bound_with_modes true false (fun () ->
+  let u units = Literal.Utf16String
+    (Utils.Utf16.of_canonical (Utils.Utf16.of_code_units units)) in
+  let cases =
+    ["empty signed-zero", [], Literal.Null, [], -0.;
+     "empty positive-zero", [], Literal.Bool true,
+       [Literal.Num (-0.); Literal.Num 0.], 0.;
+     "heterogeneous lone surrogates", [Literal.Int (Z.of_int 7); Literal.Bool false],
+       u [0xd800], [Literal.Num (-0.); Literal.Num 0.; Literal.Null; u [0xdc00]], 2.;
+     "duplicate values", [Literal.String "dup"; Literal.String "dup"],
+       Literal.String "dup", [Literal.String "dup"; Literal.String "dup"], 2.]
+  in
+  List.iter (fun (name, prefix_values, item, tail_values, index) ->
+    List.iter (fun canonical -> List.iter (fun reversed ->
+      let prefix = Expr.EList (List.map (fun v -> Expr.Lit v) prefix_values)
+      and tail = Expr.EList (List.map (fun v -> Expr.Lit v) tail_values) in
+      let operand = bin FPlus (Expr.num index) (Expr.num 1.) in
+      let cast, bridge, original =
+        slice_bound_expression canonical prefix (Expr.Lit item) tail operand in
+      let equality = if reversed then bin Equal bridge cast else bin Equal cast bridge in
+      let facts = [Expr.UnOp (IsInt, operand); equality] in
+      Alcotest.(check bool) (name ^ " original premises really hold") true
+        (List.for_all slice_bound_truth facts);
+      slice_bound_check_domain original;
+      let expected = Literal.LList tail_values in
+      Alcotest.(check bool) (name ^ " original concrete sequence oracle") true
+        (Literal.equal expected (slice_bound_value original));
+      let result = slice_bound_reduce name (slice_bound_gamma ()) facts original in
+      Alcotest.(check bool) (name ^ " reduced sequence preserves exact values") true
+        (Literal.equal expected (slice_bound_value result))) [false; true])
+      [false; true]) cases;
+  let empty = Expr.LstSub (Expr.EList [], Expr.int 0, Expr.int 0) in
+  slice_bound_check_domain empty;
+  let result = slice_bound_reduce "empty whole list" (slice_bound_gamma ()) [] empty in
+  Alcotest.(check bool) "empty whole-list slice is still empty" true
+    (Literal.equal (LList []) (slice_bound_value result));
+  Alcotest.(check bool) "payload signed-zero bits are distinct" false
+    (Literal.equal (Num 0.) (Num (-0.))))
+
+let slice_bound_guard_controls () = slice_bound_with_modes true false (fun () ->
+  let prefix = Expr.LVar "#slice_prefix" and tail = Expr.LVar "#slice_tail"
+  and n = Expr.LVar "#slice_n" and m = Expr.LVar "#slice_m" in
+  let operand = bin FPlus n (Expr.num 1.) in
+  let cast, bridge, original =
+    slice_bound_expression true prefix (Expr.Lit Null) tail operand in
+  let integral = Expr.UnOp (IsInt, operand) in
+  let retained label g facts expression =
+    let result = slice_bound_reduce label g facts expression in
+    Alcotest.(check bool) (label ^ " does not discharge suffix identity") false
+      (Expr.equal result tail || Expr.equal result Expr.true_);
+    Alcotest.(check bool) (label ^ " cast is still present") true
+      (slice_bound_has_cast result)
+  in
+  retained "missing bridge" (slice_bound_gamma ()) [integral] original;
+  retained "child integrality is not whole integrality" (slice_bound_gamma ())
+    [Expr.UnOp (IsInt, n); bin Equal cast bridge] original;
+  retained "Number equalities are not integer bridges" (slice_bound_gamma ())
+    [integral; bin Equal n m; bin ValueEqual m n;
+     bin Equal (Expr.num 0.) (Expr.num (-0.))] original;
+  let other_operand = bin FPlus m (Expr.num 1.) in
+  let other_cast = Expr.UnOp (NumToInt, other_operand) in
+  List.iter (fun (label, alias) ->
+    retained label (slice_bound_gamma ())
+      [integral; Expr.UnOp (IsInt, other_operand); alias] original)
+    ["self alias", bin Equal cast cast;
+     "cast RHS alias", bin Equal cast other_cast;
+     "cast RHS arithmetic", bin Equal cast (bin IPlus (Expr.int 1) other_cast)];
+  retained "two-cast cycle" (slice_bound_gamma ())
+    [integral; Expr.UnOp (IsInt, other_operand);
+     bin Equal cast other_cast; bin Equal other_cast cast] original;
+  let g = slice_bound_gamma () in
+  Gamma.remove g "#slice_n";
+  retained "missing original Number type" g [integral; bin Equal cast bridge] original;
+  let g = slice_bound_gamma () in
+  Gamma.remove g "#slice_prefix"; Gamma.remove g "#slice_tail";
+  retained "missing original List types" g [integral; bin Equal cast bridge] original;
+  (* The left operands genuinely infer all missing types during this public
+     reduction. Those mutations cannot authorize the right slice against the
+     same root's frozen input gamma. No goal is added to the PC. *)
+  let g = Gamma.init () in
+  let whole = Expr.NOp (LstCat, [prefix; Expr.EList [Expr.Lit Null]; tail]) in
+  let typed_number = bin Equal (Expr.UnOp (TypeOf, operand)) (Expr.Lit (Type NumberType))
+  and typed_list = bin Equal (Expr.UnOp (TypeOf, whole)) (Expr.Lit (Type ListType)) in
+  let root = bin And typed_number (bin And typed_list (bin Equal original tail)) in
+  retained "frozen original types despite earlier inference" g
+    [integral; bin Equal cast bridge] root;
+  Alcotest.(check bool) "earlier Number inference actually occurred" true
+    (Gamma.get g "#slice_n" = Some NumberType);
+  Alcotest.(check bool) "earlier List inference actually occurred" true
+    (Gamma.get g "#slice_prefix" = Some ListType && Gamma.get g "#slice_tail" = Some ListType);
+  let partial = Expr.LstSub (Expr.EList [], Expr.int (-1), Expr.int 1) in
+  retained "partial target length is not a total bridge" (slice_bound_gamma ())
+    [integral; bin Equal cast (Expr.UnOp (LstLen, partial))] original;
+  slice_bound_reject_domain "partial target's original domain rejects"
+    (Expr.UnOp (LstLen, partial));
+  let number_at = bin LstNth (Expr.LVar "#slice_numbers") (Expr.int 0) in
+  let partial_operand = bin FPlus number_at (Expr.num 1.) in
+  let partial_cast, partial_bridge, partial_original =
+    slice_bound_expression true prefix (Expr.Lit Null) tail partial_operand in
+  retained "partial Number operand cannot supply bridge" (slice_bound_gamma ())
+    [Expr.UnOp (IsInt, partial_operand); bin Equal partial_cast partial_bridge] partial_original;
+  let concrete = Expr.EList [Expr.Lit (String "prefix")]
+  and suffix = Expr.EList [Expr.Lit (String "a"); Expr.Lit (String "b")] in
+  let c, _, missing =
+    slice_bound_expression false concrete (Expr.Lit (String "head")) suffix operand in
+  let at index e = Expr.subst_expr_for_expr ~to_subst:n ~subst_with:(Expr.num index) e in
+  let witness = at 0. missing in
+  slice_bound_check_domain witness;
+  Alcotest.(check bool) "missing-bridge original premises have a concrete witness" true
+    (slice_bound_truth (at 0. integral));
+  Alcotest.(check bool) "missing bridge admits head plus suffix, not suffix" true
+    (Literal.equal (LList [String "head"; String "a"; String "b"])
+       (slice_bound_value witness));
+  let wrong = bin Equal c (bin IPlus (Expr.int 2) (Expr.UnOp (LstLen, concrete))) in
+  Alcotest.(check bool) "wrong bridge has a defined concrete witness" true
+    (slice_bound_truth (at 2. wrong));
+  slice_bound_check_domain (at 2. missing);
+  let wrong_result = slice_bound_reduce "wrong bridge" (slice_bound_gamma ())
+    [integral; wrong] missing in
+  Alcotest.(check bool) "wrong bridge preserves actual final element" true
+    (Literal.equal (LList [String "b"]) (slice_bound_value wrong_result));
+  Alcotest.(check bool) "wrong bridge cannot establish the full suffix" false
+    (Literal.equal (slice_bound_value suffix) (slice_bound_value wrong_result));
+  let false_count = Expr.LstSub
+    (Expr.NOp (LstCat, [concrete; Expr.EList [Expr.Lit (String "head")]; suffix]),
+     c, Expr.int 1) in
+  let correct_bridge = bin Equal c (Expr.int 2) in
+  Alcotest.(check bool) "correct bridge has a concrete integral witness" true
+    (slice_bound_truth (at 1. integral) && slice_bound_truth (at 1. correct_bridge));
+  slice_bound_check_domain (at 1. false_count);
+  Alcotest.(check bool) "false-count original concrete sequence is short" true
+    (Literal.equal (LList [String "a"]) (slice_bound_value (at 1. false_count)));
+  let short = slice_bound_reduce "false count" (slice_bound_gamma ())
+    [integral; correct_bridge] false_count in
+  Alcotest.(check bool) "false count preserves a proper prefix of the suffix" true
+    (Literal.equal (LList [String "a"]) (slice_bound_value short));
+  let valid = slice_bound_reduce "false suffix" (slice_bound_gamma ())
+    [integral; correct_bridge] missing in
+  Alcotest.(check bool) "false suffix values are a real counterexample" false
+    (Literal.equal (LList [String "a"; String "a"]) (slice_bound_value valid)))
+
+let slice_bound_domain_controls () = slice_bound_with_modes true false (fun () ->
+  let singleton = Expr.EList [Expr.Lit Null] in
+  let check_bad label list start count operand target =
+    let cast = Expr.UnOp (NumToInt, operand) in
+    Alcotest.(check bool) (label ^ " retained exact cast bridge is true") true
+      (slice_bound_truth (bin Equal cast target));
+    Alcotest.(check bool) (label ^ " whole integrality really holds") true
+      (slice_bound_truth (Expr.UnOp (IsInt, operand)));
+    slice_bound_reject_domain label (Expr.LstSub (list, start cast, count cast))
+  in
+  let minus_one = bin FPlus (Expr.num (-2.)) (Expr.num 1.) in
+  check_bad "negative original start" singleton Fun.id (fun _ -> Expr.int 1)
+    minus_one (Expr.int (-1));
+  check_bad "negative original count" singleton (fun _ -> Expr.int 0) Fun.id
+    minus_one (Expr.int (-1));
+  check_bad "original start plus count exceeds length" singleton Fun.id (fun _ -> Expr.int 1)
+    (bin FPlus (Expr.num 1.) (Expr.num 1.)) (Expr.int 2);
+  let huge = 2. *. float_of_int max_int in
+  check_bad "original host-integer bound overflow even at zero count" (Expr.EList [])
+    Fun.id (fun _ -> Expr.int 0) (bin FPlus (Expr.num huge) (Expr.num 0.))
+    (Expr.int_z (Z.of_float huge));
+  let partial_list = Expr.LstSub (Expr.EList [], Expr.int (-1), Expr.int 1) in
+  let partial = Expr.LstSub
+    (Expr.NOp (LstCat, [partial_list; singleton]),
+     Expr.UnOp (NumToInt, bin FPlus (Expr.num 0.) (Expr.num 1.)), Expr.int 1) in
+  slice_bound_reject_domain "original partial list is checked before slice" partial;
+  let rejected = try
+    ignore (Engine.Reduction.reduce_lexpr ~gamma:(slice_bound_gamma ()) partial); false
+    with Engine.Reduction.ReductionException (_, message) -> message = "Invalid List Expression"
+  in
+  Alcotest.(check bool) "public reducer keeps the original malformed-list error" true rejected;
+  let partial_number = bin FPlus (bin LstNth (Expr.EList []) (Expr.int 0)) (Expr.num 1.) in
+  slice_bound_reject_domain "original partial Number operand rejects"
+    (Expr.LstSub (singleton, Expr.UnOp (NumToInt, partial_number), Expr.int 0));
+  List.iter (fun (label, value) ->
+    (* No inconsistent IsInt(nonfinite) PC is presented as a feasible model. *)
+    let operand = bin FPlus (Expr.num value) (Expr.num 0.) in
+    slice_bound_reject_domain label
+      (Expr.LstSub (singleton, Expr.UnOp (NumToInt, operand), Expr.int 0)))
+    ["original NaN cast domain rejects", nan;
+     "original positive infinity cast domain rejects", infinity;
+     "original negative infinity cast domain rejects", neg_infinity];
+  let prefix = Expr.LVar "#slice_prefix" and tail = Expr.LVar "#slice_tail" in
+  let operand = bin FPlus (Expr.LVar "#slice_n") (Expr.num 1.) in
+  let cast, bridge, original = slice_bound_expression false prefix (Expr.Lit Null) tail operand in
+  let facts = [Expr.UnOp (IsInt, operand); bin Equal cast bridge] in
+  let before = !Config.Verification.total, !Config.under_approximation in
+  List.iter (fun (label, total, under) ->
+    slice_bound_with_modes total under (fun () ->
+      let result = slice_bound_reduce label (slice_bound_gamma ()) facts original in
+      Alcotest.(check bool) (label ^ " does not enable new cast-bound shortcut") true
+        (slice_bound_has_cast result)))
+    ["legacy partial verification", false, false; "legacy under approximation", true, true];
+  Alcotest.(check bool) "legacy controls restore both original flags" true
+    (before = (!Config.Verification.total, !Config.under_approximation)))
+
+
+
+(* Generic original-implication cast/sign regressions. Public FOSolver calls,
+   concrete evaluation and actual native countermodels are the oracles. No
+   private recognizer/API or query-name routing is used. UNKNOWN is not caught. *)
+let cast_sign_gamma bindings =
+  let g = Gamma.init () in
+  List.iter (fun (name, typ) -> Gamma.update g name typ) bindings;
+  g
+
+let cast_sign_goal e =
+  bin ILessThanEqual (Expr.int 0) (Expr.UnOp (NumToInt, e))
+
+let cast_sign_premises e =
+  [Expr.UnOp (IsInt, e); bin FLessThanEqual (Expr.num 0.) e]
+
+let cast_sign_entails ?(matching = false)
+    ?(existentials = Utils.Containers.SS.empty) ?(pure = false)
+    label expected gamma facts goals =
+  let pfs = Engine.PFS.of_list facts in
+  let before = Engine.PFS.to_list pfs
+  and types = nonblank_counter_types (Gamma.as_hashtbl gamma)
+  and old_rows = nonblank_counter_rows () in
+  let result = Solver.check_entailment ~matching existentials pfs goals gamma in
+  Alcotest.(check bool) (label ^ " public implication result") expected result;
+  Alcotest.(check bool) (label ^ " original left PFS unchanged") true
+    (List.equal Expr.equal before (Engine.PFS.to_list pfs));
+  Alcotest.(check bool) (label ^ " original Gamma unchanged") true
+    (types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+  let fresh = nonblank_counter_rows () |> List.filter (fun row ->
+    not (List.mem row old_rows)) in
+  if pure then Alcotest.(check int) (label ^ " pure sufficient proof needs no native query")
+    0 (List.length fresh);
+  List.iter (fun row ->
+    Alcotest.(check bool) (label ^ " native evidence is definite") true
+      (List.mem (smt_result_field "result" row) ["sat"; "unsat"]);
+    Printf.printf "CAST_SIGN_NATIVE[%s] %s\n%!" label row) fresh;
+  (* An existing simplifier/cache may legitimately finish without a new query.
+     These rows are observations, not a private-helper no-fire assertion. *)
+  Printf.printf "CAST_SIGN_PUBLIC[%s]=%b native_rows=%d\n%!"
+    label result (List.length fresh)
+
+let cast_sign_atoms label =
+  let name suffix = "#cast_sign_" ^ label ^ "_" ^ suffix in
+  let n = Expr.LVar (name "n") and k = Expr.LVar (name "k")
+  and b = Expr.LVar (name "b") in
+  let g = cast_sign_gamma [name "n", Type.NumberType;
+    name "k", Type.NumberType; name "b", Type.BooleanType] in
+  (n, k, b, g)
+
+let cast_sign_countermodel label gamma facts goals wanted =
+  let fs = Expr.Set.of_list (not_ (Expr.conjunct goals) :: facts) in
+  let gt = Gamma.as_hashtbl gamma in
+  let original = Expr.Set.elements fs and before = nonblank_counter_types gt in
+  let model = match Smt.exec_sat fs gt with
+    | Some model -> model
+    | None -> Alcotest.fail (label ^ " expected a real complete countermodel") in
+  let lifted = Hashtbl.create (List.length wanted) in
+  Smt.lift_model model gt (Hashtbl.add lifted)
+    (Expr.Set.of_list (List.map (fun (name, _) -> Expr.LVar name) wanted));
+  List.iter (fun (name, value) ->
+    Alcotest.(check bool) (label ^ " native model value " ^ name) true
+      (match Hashtbl.find_opt lifted name with
+       | Some actual -> Expr.equal actual value | None -> false)) wanted;
+  let substitute expression = Expr.map_opt (function
+    | Expr.LVar name -> (match Hashtbl.find_opt lifted name with
+        | Some value -> Some value, false
+        | None -> Alcotest.fail (label ^ " missing replay variable " ^ name))
+    | e -> Some e, true) None expression |> Option.get in
+  Alcotest.(check bool) (label ^ " every original counterquery conjunct replays")
+    true (List.for_all (fun e -> slice_bound_truth (substitute e))
+      (Expr.Set.elements fs));
+  Alcotest.(check bool) (label ^ " native input facts unchanged") true
+    (List.equal Expr.equal original (Expr.Set.elements fs));
+  Alcotest.(check bool) (label ^ " native input types unchanged") true
+    (before = nonblank_counter_types gt);
+  Printf.printf "CAST_SIGN_COUNTERMODEL[%s] %s\n%!" label
+    (Fmt.str "%a" Smt.pp_model model)
+
+let cast_sign_original_controls () = with_primary_check_trace (fun () ->
+  (* Complete query674 original positive-left/type context, not its combined
+     counterquery. Alpha-renaming is structural after the existing GIL parser. *)
+  let original = parse_gil_set [
+    "((num_to_int #n) == #n)";
+    "(#reply == undefined)";
+    "(#loopInputMd == #loc_37)";
+    "(#input == #loc_36)";
+    "(#prototype == #loc_44)";
+    "(#kind == u16\"general\")";
+    "(#callback == #loc_43)";
+    "(is_int #n)";
+    "(0. <= #n)";
+    "(#n <= 4294967295.)";
+    "(! ((num_to_int #n) <= 0.))";
+    "((num_to_int #n) <= 9.00719925474e+15)";
+    "(0i i<= (as_int (#n - 0.)))";
+    "(is_int #lvar_132)";
+    "(is_int (num_to_int #n))";
+    "(is_int #lvar_133)";
+    "(is_int ((num_to_int #n) - #lvar_132))";
+    "(0. <= #lvar_133)";
+    "(0. <= ((num_to_int #n) - #lvar_132))";
+    "(#lvar_132 <= (num_to_int #n))";
+    "((num_to_int #n) <= 4294967295.)";
+    "(#lvar_133 <= #lvar_132)";
+    "(0i i<= (l-len #loopSuffix))";
+    "(0i i<= (l-len #loopLocals))";
+    "(0i i<= (l-len #loopPrefix))";
+    "(0i i<= (l-len #values))";
+    "(0i i<= (l-len #loopChosen))";
+  ] in
+  let original_types = [
+    ("#callback", Type.ObjectType);
+    ("#env", Type.ObjectType);
+    ("#input", Type.ObjectType);
+    ("#keys", Type.SetType);
+    ("#kind", Type.Utf16Type);
+    ("#loopChosen", Type.ListType);
+    ("#loopInputMd", Type.ObjectType);
+    ("#loopLocals", Type.ListType);
+    ("#loopOutKeys", Type.SetType);
+    ("#loopPrefix", Type.ListType);
+    ("#loopSuffix", Type.ListType);
+    ("#lvar_132", Type.NumberType);
+    ("#lvar_133", Type.NumberType);
+    ("#n", Type.NumberType);
+    ("#prototype", Type.ObjectType);
+    ("#reply", Type.UndefinedType);
+    ("#values", Type.ListType);
+  ] in
+  let original_goal = cast_sign_goal
+    (bin FMinus (Expr.UnOp (ToIntOp, Expr.LVar "#n"))
+      (Expr.LVar "#lvar_132")) in
+  List.iter (fun namespace ->
+    let name s = "#cast_original_" ^ namespace ^ "_" ^
+      String.sub s 1 (String.length s - 1) in
+    let rename e = Expr.map_opt (function
+      | Expr.LVar s -> Some (Expr.LVar (name s)), false
+      | e -> Some e, true) None e |> Option.get in
+    let facts = List.map rename (Expr.Set.elements original) in
+    let g = cast_sign_gamma (List.map (fun (n, t) -> name n, t) original_types) in
+    cast_sign_entails ~pure:true ("complete674-" ^ namespace) true g facts
+      [rename original_goal]) ["alpha"; "beta"];
+  List.iter (fun (label, make) ->
+    let n,k,_,g = cast_sign_atoms label in
+    let e = make n k in
+    cast_sign_entails ~pure:true label true g (cast_sign_premises e)
+      [cast_sign_goal e])
+    ["typed-atom", (fun n _ -> n);
+     "whole-sum", (fun n k -> bin FPlus n k);
+     "whole-tointeger-difference", (fun n k ->
+       bin FMinus (Expr.UnOp (ToIntOp, n)) k)])
+
+let cast_sign_concrete_controls () = with_primary_check_trace (fun () ->
+  List.iter (fun (label, value, integer) ->
+    let n,_,_,g = cast_sign_atoms label in
+    let cast = Expr.UnOp (NumToInt, Expr.num value) in
+    Alcotest.(check bool) (label ^ " concrete conversion value") true
+      (Literal.equal (Literal.Int (Z.of_string integer)) (slice_bound_value cast));
+    let expected = Z.sign (Z.of_string integer) >= 0 in
+    let binding = bin ValueEqual n (Expr.num value) in
+    cast_sign_entails label expected g [binding] [cast_sign_goal n];
+    (* Exact original literal bits, including -0, survive the public call. *)
+    match binding with
+    | Expr.BinOp (_, ValueEqual, Expr.Lit (Literal.Num retained)) ->
+        Alcotest.(check int64) (label ^ " original Number bits preserved")
+          (Int64.bits_of_float value) (Int64.bits_of_float retained)
+    | _ -> Alcotest.fail "expected original concrete Number binding")
+    ["negative-integer", -2., "-2"; "negative-fraction", -1.5, "-1";
+     "negative-fraction-truncates-to-zero", -0.5, "0";
+     "minus-zero", -0., "0"; "plus-zero", 0., "0";
+     "positive-fraction", 0.5, "0"; "uint32-limit", 4294967295., "4294967295"];
+  let x,_,_,g = cast_sign_atoms "strict-zero" in
+  let facts = cast_sign_premises x @ [bin ValueEqual x (Expr.num 0.)] in
+  let wrong = bin ILessThan (Expr.int 0) (Expr.UnOp (NumToInt, x)) in
+  cast_sign_entails "strict-is-not-nonstrict" false g facts [wrong];
+  let xn = match x with Expr.LVar n -> n | _ -> assert false in
+  cast_sign_countermodel "strict-zero" g facts [wrong] [xn, Expr.num 0.];
+  let x,y,_,g = cast_sign_atoms "other-operand" in
+  let facts = cast_sign_premises x @
+    [bin ValueEqual x (Expr.num 2.); bin ValueEqual y (Expr.num (-2.))] in
+  cast_sign_entails "guards-cannot-transfer-to-another-operand" false g facts
+    [cast_sign_goal y];
+  let name = function Expr.LVar n -> n | _ -> assert false in
+  cast_sign_countermodel "other-operand" g facts [cast_sign_goal y]
+    [name x, Expr.num 2.; name y, Expr.num (-2.)];
+  let x,_,_,g = cast_sign_atoms "negative-fraction-model" in
+  let facts = [bin ValueEqual x (Expr.num (-1.5))] in
+  cast_sign_entails "missing-integrality-negative-fraction" false g facts
+    [cast_sign_goal x];
+  cast_sign_countermodel "negative-fraction-model" g facts [cast_sign_goal x]
+    [name x, Expr.num (-1.5)])
+
+let cast_sign_provenance_controls () = with_primary_check_trace (fun () ->
+  let run label make =
+    let n,k,b,g = cast_sign_atoms label in
+    let e = bin FMinus (Expr.UnOp (ToIntOp, n)) k in
+    let facts, goals = make g n k b e in
+    (* b is independent and unconstrained: b=false is a genuine counterexample
+       even when the cast's sign is semantically valid. No inconsistent-PC
+       assumption is used to demand false. Native rows are recorded if emitted. *)
+    cast_sign_entails label false g facts goals in
+  run "missing-IsInt" (fun _ _ _ b e ->
+    [bin FLessThanEqual (Expr.num 0.) e], [cast_sign_goal e; b]);
+  run "missing-sign" (fun _ _ _ b e ->
+    [Expr.UnOp (IsInt, e)], [cast_sign_goal e; b]);
+  run "negative-guard-is-not-positive" (fun _ _ _ b e ->
+    [not_ (Expr.UnOp (IsInt, e)); bin FLessThanEqual (Expr.num 0.) e],
+    [cast_sign_goal e; b]);
+  run "disjunctive-guard-is-not-positive" (fun _ _ _ b e ->
+    [bin Or (Expr.UnOp (IsInt, e)) (Expr.Lit (Literal.Bool true));
+     bin FLessThanEqual (Expr.num 0.) e], [cast_sign_goal e; b]);
+  run "RHS-only-guards-are-not-premises" (fun _ _ _ b e ->
+    [], cast_sign_premises e @ [cast_sign_goal e; b]);
+  run "RHS-only-types-are-not-input-Gamma" (fun g n _ b e ->
+    (match n with Expr.LVar name -> Hashtbl.remove (Gamma.as_hashtbl g) name
+     | _ -> assert false);
+    [], [bin Equal (Expr.UnOp (TypeOf, n)) (Expr.Lit (Literal.Type Type.NumberType))]
+      @ cast_sign_premises e @ [cast_sign_goal e; b]);
+  run "circular-target-is-not-a-guard" (fun _ _ _ b e ->
+    [cast_sign_goal e], [cast_sign_goal e; b]);
+  (* Same original LHS/Gamma key, changed RHS. The old simplifier's cache key
+     omits RHS. Warm its learned type using the real public implication path;
+     the fresh caller Gamma must still lack that type on the second call. *)
+  let n,k,b,g = cast_sign_atoms "learned-cache" in
+  let name = match n with Expr.LVar n -> n | _ -> assert false in
+  Hashtbl.remove (Gamma.as_hashtbl g) name;
+  let e = bin FMinus (Expr.UnOp (ToIntOp, n)) k in
+  let facts = bin Equal (Expr.UnOp (TypeOf, n))
+    (Expr.Lit (Literal.Type Type.NumberType)) :: cast_sign_premises e in
+  cast_sign_entails "original-missing-type-cache-warm" true g facts [Expr.bool true];
+  Alcotest.(check bool) "learned type is not installed in original Gamma" true
+    (Gamma.get g name = None);
+  cast_sign_entails "cached-inferred-type-is-not-original" false g facts
+    [cast_sign_goal e; b];
+  Alcotest.(check bool) "cache control still leaves original type missing" true
+    (Gamma.get g name = None))
+
+let cast_sign_mode_domain_controls () = with_primary_check_trace (fun () ->
+  let before = !Config.Verification.total, !Config.under_approximation in
+  List.iter (fun (label, total, under, matching, quantified) ->
+    slice_bound_with_modes total under (fun () ->
+      let n,k,b,g = cast_sign_atoms label in
+      let e = bin FMinus (Expr.UnOp (ToIntOp, n)) k in
+      let existentials = if quantified then (
+        Gamma.update g "#cast_sign_unused_exists" Type.IntType;
+        Utils.Containers.SS.singleton "#cast_sign_unused_exists")
+        else Utils.Containers.SS.empty in
+      cast_sign_entails ~matching ~existentials label false g
+        (cast_sign_premises e) [cast_sign_goal e; b]))
+    ["legacy-not-total", false, false, false, false;
+     "under-approximation", true, true, false, false;
+     "matching-call", true, false, true, false;
+     "nonempty-original-existentials", true, false, false, true];
+  Alcotest.(check bool) "mode controls restore both original flags" true
+    (before = (!Config.Verification.total, !Config.under_approximation));
+  let partial = bin FPlus
+    (bin LstNth (Expr.EList []) (Expr.int 0)) (Expr.num 1.) in
+  (* Retained guard TEXT cannot certify evaluation of a nested partial term.
+     The original Totality API checks the actual original expression before
+     any reduction; no helper result or guard truth is used as its oracle. *)
+  let text_guards = cast_sign_premises partial in
+  Alcotest.(check int) "partial operand has both syntactic guard facts" 2
+    (List.length text_guards);
+  slice_bound_reject_domain "nested partial Number original domain still rejects"
+    (Expr.UnOp (NumToInt, partial));
+  slice_bound_reject_domain "integer-typed operand is not a Number cast domain"
+    (Expr.UnOp (NumToInt, Expr.int 1));
+  List.iter (fun (label, operand) ->
+    Alcotest.(check bool) (label ^ " is not a finite-integral certificate") false
+      (slice_bound_truth (Expr.UnOp (IsInt, operand)));
+    slice_bound_reject_domain (label ^ " original cast domain rejects")
+      (Expr.UnOp (NumToInt, operand)))
+    ["NaN", Expr.num nan; "positive-infinity", Expr.num infinity;
+     "negative-infinity", Expr.num neg_infinity;
+     "finite-input-overflow", bin FPlus (Expr.num Float.max_float)
+       (Expr.num Float.max_float)];
+  (* Existing negative/count-overflow/out-of-bounds domains remain genuine
+     checks, and both pre-existing verification flags are restored. *)
+  List.iter (fun (label, expression) -> slice_bound_reject_domain label expression)
+    ["negative original slice start still rejects",
+      Expr.LstSub (Expr.EList [Expr.Lit Null], Expr.int (-1), Expr.int 1);
+     "original list access outside bounds still rejects",
+      bin LstNth (Expr.EList []) (Expr.int 0)];
+  Alcotest.(check bool) "domain controls do not change verification flags" true
+    (before = (!Config.Verification.total, !Config.under_approximation)))
+
+(* Constructed public-call fixtures, not a claim to reproduce all query213 facts. *)
+let strict_successor_fixture label =
+  let name s = "#strict_successor_" ^ label ^ "_" ^ s in
+  let x = Expr.LVar (name "position") and y = Expr.LVar (name "start") in
+  let text = Expr.LVar (name "text") in
+  let g = Gamma.init () in
+  List.iter (fun (n,t) -> Gamma.update g (name n) t)
+    ["position",Type.NumberType;"start",Type.NumberType;"text",Type.Utf16Type];
+  let alias = bin Equal x y and lower = bin FLessThanEqual (Expr.num 0.) y
+  and upper = bin FLessThanEqual y (Expr.num 4294967294.) in
+  let extra = not_ (bin Equal text (nonblank_utf16 "")) in
+  let goal = bin FLessThan x (bin FPlus y (Expr.num 1.)) in
+  x,y,g,alias,lower,upper,extra,goal
+
+let strict_successor_public ?(reverse=false) label wanted facts goal g =
+  let xs = Expr.Set.elements facts in
+  let pfs = Engine.PFS.of_list (if reverse then List.rev xs else xs) in
+  let original = Engine.PFS.to_list pfs
+  and types = nonblank_counter_types (Gamma.as_hashtbl g) in
+  let before = nonblank_counter_rows () in
+  let result = Solver.check_entailment Utils.Containers.SS.empty pfs [goal] g in
+  List.iter (fun row -> Printf.printf "STRICT_SUCCESSOR_ROW[%s]=%s\n%!" label row)
+    (symbolic_prefix_new_rows before);
+  Printf.printf "STRICT_SUCCESSOR_PUBLIC[%s]=%b\n%!" label result;
+  Alcotest.(check bool) (label ^ " public entailment result") wanted result;
+  Alcotest.(check bool) (label ^ " exact caller PFS retained") true
+    (original = Engine.PFS.to_list pfs);
+  Alcotest.(check bool) (label ^ " caller Gamma retained") true
+    (types = nonblank_counter_types (Gamma.as_hashtbl g));
+  before
+
+let strict_successor_native label before result core g =
+  let row = nonblank_counter_observe label before
+    "optional-entailment-successor-order-core" result core (Gamma.as_hashtbl g) in
+  Alcotest.(check int) (label ^ " four distinct actual core atoms") 4
+    (Expr.Set.cardinal core);
+  Alcotest.(check string) (label ^ " optional UNKNOWN stays raw") "true"
+    (smt_result_field "raw_unknown" row);
+  Alcotest.(check string) (label ^ " original optional cap")
+    (if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then "1" else "5000")
+    (smt_result_field "timeout_ms" row);
+  if result = "unsat" then Alcotest.(check int)
+    (label ^ " one real native core result, no fallback or cache credit") 1
+    (List.length (symbolic_prefix_new_rows before))
+
+let strict_successor_controls () = with_nonblank_counter_trace (fun () ->
+  Alcotest.(check bool) "ordinary strict successor uses original30s environment"
+    true (Sys.getenv_opt "SMT_TIMEOUT" = None);
+  List.iter (fun (label,reverse) ->
+    let _,_,g,alias,lower,upper,extra,goal = strict_successor_fixture label in
+    let facts = Expr.Set.of_list [alias;lower;upper;extra] in
+    let core = Expr.Set.of_list [not_ goal;alias;lower;upper] in
+    Alcotest.(check bool) (label ^ " proper subset of constructed counterquery") true
+      (let full = Expr.Set.add (not_ goal) facts in
+       Expr.Set.subset core full && not (Expr.Set.equal core full));
+    Alcotest.(check bool) (label ^ " no integrality assumption") false
+      (Expr.Set.exists (function Expr.UnOp (IsInt,_) -> true | _ -> false) facts);
+    let before = strict_successor_public ~reverse label true facts goal g in
+    strict_successor_native label before "unsat" core g)
+    ["mixed-four-original-shapes",false;"renamed-reversed-input",true];
+  List.iter (fun (label,missing,offset,start,position) ->
+    let x,y,g,alias,lower,upper,extra,_ = strict_successor_fixture label in
+    let goal = bin FLessThan x (bin FPlus y (Expr.num offset)) in
+    let facts = Expr.Set.of_list (extra :: (match missing with
+      | "alias" -> [lower;upper]
+      | _ -> [alias;lower;upper])) in
+    let before = strict_successor_public label false facts goal g in
+    Alcotest.(check bool) (label ^ " no ineligible successor core dispatch") false
+      (List.exists (fun r -> smt_result_field "caller" r =
+        "optional-entailment-successor-order-core") (symbolic_prefix_new_rows before));
+    let concrete e = Expr.map_opt (fun e ->
+      if Expr.equal e x then Some (Expr.num position),false
+      else if Expr.equal e y then Some (Expr.num start),false
+      else match e with
+        | Expr.LVar n when String.ends_with ~suffix:"_text" n ->
+            Some (nonblank_utf16 "retained"),false
+        | _ -> Some e,true) None e |> Option.get in
+    Alcotest.(check bool) (label ^ " concrete witness satisfies every premise") true
+      (Expr.Set.for_all (fun e -> slice_bound_truth (concrete e)) facts);
+    Alcotest.(check bool) (label ^ " concrete witness falsifies the goal") false
+      (slice_bound_truth (concrete goal)))
+    ["missing-alias","alias",1.,0.,1.;"zero-increment","none",0.,0.,0.])
+
+let strict_successor_forced_unknown () = with_nonblank_counter_trace (fun () ->
+  Alcotest.(check bool) "forced strict successor requires separate1ms process" true
+    (Sys.getenv_opt "SMT_TIMEOUT" = Some "1");
+  let _,_,g,alias,lower,upper,extra,goal = strict_successor_fixture "forced" in
+  let facts = Expr.Set.of_list [alias;lower;upper;extra] in
+  let pfs = Engine.PFS.of_list (Expr.Set.elements facts) in
+  let original = Engine.PFS.to_list pfs
+  and types = nonblank_counter_types (Gamma.as_hashtbl g) in
+  let before = nonblank_counter_rows () in
+  let rejected = try ignore (Solver.check_entailment Utils.Containers.SS.empty
+    pfs [goal] g); false with
+    | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError message)
+        when message = "Incomplete totality proof: SMT returned unknown" -> true in
+  let fresh = symbolic_prefix_new_rows before in
+  List.iter (fun row -> Printf.printf "STRICT_SUCCESSOR_FORCED_ROW=%s\n%!" row) fresh;
+  Alcotest.(check bool) "actual public required UNKNOWN remains error" true rejected;
+  strict_successor_native "forced-optional" before "unknown"
+    (Expr.Set.of_list [not_ goal;alias;lower;upper]) g;
+  let required = List.filter (fun r -> smt_result_field "caller" r = "required-complete") fresh in
+  Alcotest.(check int) "one actual required fallback UNKNOWN" 1 (List.length required);
+  let row = List.hd required in
+  List.iter (fun (field,want) -> Alcotest.(check string)
+    ("forced required " ^ field) want (smt_result_field field row))
+    ["result","unknown";"raw_unknown","false";"timeout_ms","1";"phase_selection","3"];
+  Alcotest.(check bool) "required UNKNOWN retains its actual dump" true
+    (List.mem (smt_result_field "query" row) (nonblank_counter_files ()));
+  let callers = List.map (smt_result_field "caller") fresh |> List.filter (fun c ->
+    c = "optional-entailment-successor-order-core" || c = "required-complete") in
+  Alcotest.(check (list string)) "optional UNKNOWN precedes required rejection"
+    ["optional-entailment-successor-order-core";"required-complete"] callers;
+  Alcotest.(check bool) "forced caller PFS unchanged" true (original = Engine.PFS.to_list pfs);
+  Alcotest.(check bool) "forced caller Gamma unchanged" true
+    (types = nonblank_counter_types (Gamma.as_hashtbl g)))
+
+(* Public complete-query observations for the generic extra-Number path.
+   Every case has a fresh alpha namespace and keeps its entire FS/Gamma. *)
+let nonblank_extra_number_case label =
+  let fs,gamma,name = distinct_counter_case ("extra_numbers_" ^ label) in
+  let fs = List.fold_left (fun acc (role,value) ->
+    Hashtbl.add gamma (name role) Type.NumberType;
+    Expr.Set.add (bin ValueEqual (Expr.LVar (name role)) (Expr.num value)) acc)
+    fs ["#aaa_unlicensed",7.; "#zzz_unlicensed",9.] in
+  fs,gamma,name
+
+let nonblank_extra_number_witnesses () = with_nonblank_counter_trace (fun () ->
+  let first label (fs,gamma,name) values =
+    let lower,upper,position,head = values in
+    distinct_counter_run label (fs,gamma,name)
+      ["optional-nonblank-counter","sat",
+       distinct_counter_pins fs name lower upper position head]
+      (Some values) in
+  first "extra-number-defaults" (nonblank_extra_number_case "defaults")
+    (1.,2.,0.,"a");
+  let fs,gamma,name = nonblank_extra_number_case "literal_pins" in
+  let fs = distinct_counter_pins fs name 2. 3. (-0.) " b " in
+  first "extra-number-literal-pins" (fs,gamma,name) (2.,3.,(-0.)," b "))
+
+let nonblank_extra_number_role_guards () = with_nonblank_counter_trace (fun () ->
+  let fallback label ((fs,_,_) as case) =
+    distinct_counter_run label case ["required-complete","sat",fs] None in
+  let fs,gamma,name = nonblank_extra_number_case "ambiguous" in
+  let extra = name "#another_position" in
+  Hashtbl.add gamma extra Type.NumberType;
+  let fs = Expr.Set.union fs (Expr.Set.of_list [
+    Expr.UnOp (IsInt,Expr.LVar extra);
+    bin FLessThanEqual (Expr.num 0.) (Expr.LVar extra);
+    bin FLessThanEqual (Expr.LVar extra) (Expr.num 4294967295.);
+    bin FLessThanEqual (Expr.LVar extra) (Expr.LVar (name "#k"));
+  ]) in
+  fallback "extra-number-ambiguous-position" (fs,gamma,name);
+  let fs,gamma,name = nonblank_extra_number_case "unlicensed" in
+  let fs = Expr.Set.remove
+    (bin FLessThanEqual (Expr.LVar (name "#to")) (Expr.LVar (name "#k"))) fs in
+  (* This guard tests absence of the syntactic role link. Literal witness
+     pins preserve that absence while meeting the shared model-order check. *)
+  let fs = distinct_counter_pins fs name 1. 2. 0. "a" in
+  fallback "extra-number-missing-position-link" (fs,gamma,name))
+
+let nonblank_extra_number_failed_hints () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,name = nonblank_extra_number_case "failed_hints" in
+  (* Both local text candidates fail, but the original conjunction permits
+     another nonblank head. Neither hinted UNSAT may decide that conjunction. *)
+  let fs = List.fold_left (fun acc head -> Expr.Set.add
+    (not_ (bin ValueEqual (Expr.LVar (name "#dhHead")) (nonblank_utf16 head))) acc)
+    fs ["a";" a"] in
+  distinct_counter_run "extra-number-failed-hints-full-fallback" (fs,gamma,name)
+    ["optional-nonblank-counter","unsat",distinct_counter_pins fs name 1. 2. 0. "a";
+     "optional-nonblank-whitespace-counter","unsat",distinct_counter_pins fs name 1. 2. 0. " a";
+     "required-complete","sat",fs] None)
+
+(* Extend the existing finite-difference group after its original cases, using
+   the already-defined public-call and typed native-result observers. *)
+let finite_difference_strict_order_controls () = with_nonblank_counter_trace (fun () ->
+  let caller = "optional-entailment-finite-difference-core" in
+  let frame prefix =
+    let name original = if prefix = "" then original
+      else prefix ^ String.sub original 1 (String.length original - 1) in
+    let rename e = Expr.map_opt (function
+      | Expr.LVar original -> Some (Expr.LVar (name original)),false
+      | e -> Some e,true) None e |> Option.get in
+    let i = rename (Expr.LVar "#i") and n = rename (Expr.LVar "#n") in
+    let g = index_difference_context [name "#i";name "#n"] in
+    (* Exact twelve retained positive atoms from the saved complete request.
+       Restore the exact binary64 -MAX AST from encoded #xffefffffffffffff;
+       the diagnostic pretty-printer's decimal text is not an exact literal. *)
+    let facts = parse_gil_set ["(is_int #i)";"(is_int #n)";
+      "(is_int (#i + 1.))";"(0i i<= (as_int (#n - (#i + 1.))))";
+      "(0. <= #i)";"(0. <= #n)";"(#i < #n)";
+      "(#i <= 4294967294.)";"(#i <= 4294967295.)";
+      "(#n <= 4294967295.)";
+      "((as_int (#i + 1.)) == (1i i+ (as_int #i)))";
+      "((#i + 1.) <= #n)"] in
+    let facts = Expr.Set.fold (fun e acc -> Expr.Set.add (rename e) acc)
+      facts Expr.Set.empty in
+    let goal = bin FLessThanEqual (Expr.num (-. Float.max_float)) (bin FMinus n i) in
+    i,n,g,facts,goal in
+  let observe label before core g =
+    let row = nonblank_counter_observe label before caller "unsat" core (Gamma.as_hashtbl g) in
+    Alcotest.(check int) (label ^ " four distinct retained atoms") 4 (Expr.Set.cardinal core);
+    Alcotest.(check string) (label ^ " optional UNKNOWN remains raw") "true"
+      (smt_result_field "raw_unknown" row);
+    Alcotest.(check string) (label ^ " unchanged optional5s cap") "5000"
+      (smt_result_field "timeout_ms" row);
+    Alcotest.(check int) (label ^ " one real core result without fallback or cache") 1
+      (List.length (symbolic_prefix_new_rows before)) in
+  List.iter (fun (label,prefix,reverse,nonstrict) ->
+    let i,n,g,facts,goal = frame prefix in
+    let strict = bin FLessThan i n and le = bin FLessThanEqual i n in
+    Alcotest.(check int) (label ^ " full original positive frame cardinality") 12
+      (Expr.Set.cardinal facts);
+    Alcotest.(check bool) (label ^ " original frame has strict but no direct nonstrict") true
+      (Expr.Set.mem strict facts && not (Expr.Set.mem le facts));
+    let facts = if nonstrict then Expr.Set.add le facts else facts in
+    let core = Expr.Set.of_list [not_ goal;Expr.UnOp (IsInt,i);
+      Expr.UnOp (IsInt,n);strict] in
+    Alcotest.(check bool) (label ^ " exact original-member proper subcore") true
+      (let complete = Expr.Set.add (not_ goal) facts in
+       Expr.Set.subset core complete && not (Expr.Set.equal core complete));
+    let before = strict_successor_public ~reverse label true facts goal g in
+    observe label before core g)
+    ["strict-order-complete-original","",false,false;
+     "strict-order-renamed-reordered","#strict_renamed_",true,false;
+     "both-orders-public-normalization","#strict_both_",false,true];
+  let i,n,g,_,goal = frame "#strict_missing_order_" in
+  let facts = Expr.Set.of_list [Expr.UnOp (IsInt,i);Expr.UnOp (IsInt,n);
+    bin ValueEqual i (Expr.num Float.max_float);
+    bin ValueEqual n (Expr.num (-. Float.max_float))] in
+  let before = strict_successor_public "strict-order-removed" false facts goal g in
+  Alcotest.(check bool) "strict-order-removed declines finite-difference core" false
+    (List.exists (fun row -> smt_result_field "caller" row = caller)
+      (symbolic_prefix_new_rows before));
+  let full = Expr.Set.add (not_ goal) facts in
+  let before = nonblank_counter_rows () in
+  let model = match Smt.exec_sat full (Gamma.as_hashtbl g) with
+    | Some m -> m | None -> Alcotest.fail "Missing finite opposite-endpoint model" in
+  ignore (nonblank_counter_observe "strict-order-removed-model" before
+    "required-complete" "sat" full (Gamma.as_hashtbl g));
+  let lifted = Hashtbl.create 2 in
+  Smt.lift_model model (Gamma.as_hashtbl g) (Hashtbl.add lifted) (Expr.Set.of_list [i;n]);
+  let concrete e = Expr.map_opt (function
+    | Expr.LVar name -> Hashtbl.find_opt lifted name,false
+    | e -> Some e,true) None e |> Option.get in
+  Alcotest.(check bool) "strict-order-removed model replays every original premise" true
+    (Expr.Set.for_all (fun e -> slice_bound_truth (concrete e)) facts);
+  Alcotest.(check bool) "strict-order-removed model genuinely falsifies lower bound" false
+    (slice_bound_truth (concrete goal));
+  List.iter (fun missing ->
+    let label = "strict-missing-isint-" ^ missing in
+    let i,n,g,_,goal = frame ("#" ^ label ^ "_") in
+    let kept = if missing = "start" then n else i in
+    let facts = Expr.Set.of_list [Expr.UnOp (IsInt,kept);bin FLessThan i n] in
+    let before = strict_successor_public label true facts goal g in
+    Alcotest.(check bool) (label ^ " declines missing original integrality guard") false
+      (List.exists (fun row -> smt_result_field "caller" row = caller)
+        (symbolic_prefix_new_rows before));
+    ignore (nonblank_counter_observe label before "required-complete" "unsat"
+      (Expr.Set.add (not_ goal) facts) (Gamma.as_hashtbl g))) ["start";"finish"])
+
+(* Public, constructed successor-ceiling controls; not the full saved query823. *)
+let successor_ceiling_original_controls () = with_nonblank_counter_trace (fun () ->
+  let caller = "optional-entailment-successor-order-core" in
+  let fixture name upper =
+    let x = Expr.LVar name and g = Gamma.init () in
+    Gamma.update g name Type.NumberType;
+    let lower = bin FLessThanEqual (Expr.num 0.) x
+    and ceiling = bin FLessThanEqual x (Expr.num (upper -. 1.))
+    and marker = Expr.UnOp (IsInt,x) in
+    let goal = bin FLessThanEqual (bin FPlus x (Expr.num 1.)) (Expr.num upper) in
+    x,g,lower,ceiling,marker,goal in
+  List.iter (fun (label,name,upper,reverse) ->
+    let _,g,lower,ceiling,marker,goal = fixture name upper in
+    let facts = Expr.Set.of_list [lower;ceiling;marker] in
+    let core = Expr.Set.of_list [not_ goal;lower;ceiling] in
+    let before = strict_successor_public ~reverse label true facts goal g in
+    let row = nonblank_counter_observe label before caller "unsat" core
+      (Gamma.as_hashtbl g) in
+    Alcotest.(check bool) (label ^ " original optional policy and sole native core") true
+      (smt_result_field "raw_unknown" row = "true"
+       && smt_result_field "timeout_ms" row = "5000"
+       && List.length (symbolic_prefix_new_rows before) = 1))
+    ["ceiling-original","#ceiling_original_x",4294967295.,false;
+     "ceiling-renamed","#ceiling_renamed_x",17.,true];
+  let native_model label fs x g =
+    let gamma = Gamma.as_hashtbl g in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let model = match Smt.exec_sat fs gamma with
+      | Some model -> model | None -> Alcotest.fail (label ^ " missing native model") in
+    ignore (nonblank_counter_observe label before "required-complete" "sat" fs gamma);
+    Printf.printf "SUCCESSOR_CEILING_NATIVE_MODEL[%s]=%s\n%!" label
+      (Fmt.str "%a" Smt.pp_model model);
+    let lifted = Hashtbl.create 1 in
+    Smt.lift_model model gamma (Hashtbl.add lifted) (Expr.Set.singleton x);
+    let concrete e = Expr.map_opt (function
+      | Expr.LVar name -> Hashtbl.find_opt lifted name,false
+      | e -> Some e,true) None e |> Option.get in
+    Alcotest.(check bool) (label ^ " model replays full query with original FS/Gamma retained") true
+      (original = Expr.Set.elements fs && types = nonblank_counter_types gamma
+       && Expr.Set.for_all (fun e -> slice_bound_truth (concrete e)) fs) in
+  let x,g,lower,_,marker,goal = fixture "#ceiling_removed_x" 4294967295. in
+  let facts = Expr.Set.of_list [lower;marker] in
+  ignore (strict_successor_public "ceiling-removed" false facts goal g);
+  native_model "ceiling-removed-model" (Expr.Set.add (not_ goal) facts) x g;
+  let x,g,lower,ceiling,marker,_ = fixture "#ceiling_goal_removed_x" 17. in
+  native_model "ceiling-goal-removed-model"
+    (Expr.Set.of_list [lower;ceiling;marker]) x g)
+
+(* Public production-encoder controls for a neutral collection witness.
+   This source fixture is the nine-atom shape, not the whole verifier state. *)
+let neutral_collection_controls () = with_nonblank_counter_trace (fun () ->
+  let caller = "optional-neutral-collection" in
+  let fixture prefix =
+    let name short = "#neutral_collection_" ^ prefix ^ "_" ^ short in
+    let rename = function
+      | "#start" -> name "lower" | "#end" -> name "upper"
+      | "#keys" -> name "keys" | "#values" -> name "values"
+      | other -> other in
+    let map e = Expr.map_opt (function
+      | Expr.LVar x -> Some (Expr.LVar (rename x)),false
+      | e -> Some e,true) None e |> Option.get in
+    let original = parse_gil_set [
+      "(! (u16\"length\" -e- #keys))";
+      "(! ((num_to_utf16 #end) -e- #keys))";
+      "(is_int #end)"; "(is_int #start)";
+      "(0i i<= (l-len #values))";
+      "(0i i<= (as_int (#end - #start)))";
+      "(0. <= #start)"; "(#end <= 4294967295.)";
+      "(#start <= #end)" ] in
+    let fs = Expr.Set.fold (fun e acc -> Expr.Set.add (map e) acc)
+      original Expr.Set.empty in
+    let g = Gamma.init () in
+    List.iter (fun (short,typ) -> Gamma.update g (name short) typ)
+      ["lower",Type.NumberType;"upper",Type.NumberType;
+       "keys",Type.SetType;"values",Type.ListType];
+    fs,g,Expr.LVar (name "lower"),Expr.LVar (name "upper"),
+      Expr.LVar (name "keys"),Expr.LVar (name "values") in
+  let pins ?(upper_value=0.) fs lower upper keys values =
+    List.fold_left (fun acc (role,value) -> Expr.Set.add
+      (bin ValueEqual role value) acc) fs
+      [lower,Expr.num 0.;upper,Expr.num upper_value;
+       keys,Expr.ESet [];values,Expr.EList []] in
+  let run ?(matching=false) ?(reverse=false) label wanted
+      (fs,g,_,_,_,_) expected =
+    let gamma = Gamma.as_hashtbl g in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let actual = if matching then
+        Solver.check_satisfiability ~matching:true
+          (if reverse then List.rev original else original) g
+      else Option.is_some (Smt.check_sat fs gamma) in
+    let rows = symbolic_prefix_new_rows before in
+    List.iter (fun row -> Printf.printf "NEUTRAL_COLLECTION_ROW[%s]=%s\n%!"
+      label row) rows;
+    Alcotest.(check bool) (label ^ " public feasibility result") wanted actual;
+    nonblank_counter_retained label fs gamma original types;
+    Alcotest.(check bool) (label ^ " exact actual caller/result sequence") true
+      (List.map (fun row -> smt_result_field "caller" row,
+        smt_result_field "result" row) rows
+       = List.map (fun (kind,result,_) -> kind,result) expected);
+    List.iter (fun (kind,result,query) ->
+      let row = nonblank_counter_observe label before kind result query gamma in
+      Alcotest.(check bool) (label ^ " actual timeout/raw policy for " ^ kind) true
+        (smt_result_field "timeout_ms" row
+           = (if kind = caller then "1000" else "30000")
+         && smt_result_field "raw_unknown" row
+           = (if kind = caller then "true" else "false"))) expected in
+  List.iter (fun (label,reverse) ->
+    let ((fs,_,lower,upper,keys,values) as case) = fixture label in
+    run ~matching:true ~reverse label true case
+      [caller,"sat",pins fs lower upper keys values])
+    ["neutral-original",false;"neutral-renamed-permuted",true];
+  let ((fs,_,lower,upper,keys,values) as case) = fixture "direct-production" in
+  run "neutral-direct-production" true case
+    [caller,"sat",pins fs lower upper keys values];
+  List.iter (fun (label,commuted,reverse) ->
+    let fs,g,lower,upper,keys,values = fixture label in
+    let zero_equal = if commuted then bin Equal (Expr.num 0.) upper
+      else bin Equal upper (Expr.num 0.) in
+    let nonzero = Expr.Set.add (not_ zero_equal)
+      (Expr.Set.add (not_ (bin FLessThan upper (Expr.num 1.))) fs) in
+    run ~matching:true ~reverse label true (nonzero,g,lower,upper,keys,values)
+      [caller,"sat",pins ~upper_value:1. nonzero lower upper keys values])
+    ["neutral-unit-endpoint",false,false;
+     "neutral-unit-endpoint-renamed-permuted",true,true];
+  let fs,g,lower,upper,keys,values = fixture "unit-conflict" in
+  let conflict = Expr.Set.add (not_ (bin Equal upper (Expr.num 0.)))
+    (Expr.Set.add (bin Equal upper (Expr.num 0.)) fs) in
+  run "neutral-unit-retained-conflict" false (conflict,g,lower,upper,keys,values)
+    [caller,"unsat",pins ~upper_value:1. conflict lower upper keys values;
+     "required-complete","unsat",conflict];
+  let fs,g,lower,upper,keys,values = fixture "unit-too-small" in
+  let two = Expr.Set.add (not_ (bin Equal upper (Expr.num 0.)))
+    (Expr.Set.add (bin Equal upper (Expr.num 2.)) fs) in
+  run "neutral-unit-too-small-full-fallback" true (two,g,lower,upper,keys,values)
+    [caller,"unsat",pins ~upper_value:1. two lower upper keys values;
+     "required-complete","sat",two];
+  let fs,g,lower,upper,keys,values = fixture "lower-exclusion" in
+  let fixed = List.fold_left (fun acc e -> Expr.Set.add e acc) fs
+    [not_ (bin Equal lower (Expr.num 0.));
+     bin Equal lower (Expr.num 1.); bin Equal upper (Expr.num 2.)] in
+  run "neutral-lower-exclusion-does-not-change-upper-hint" true
+    (fixed,g,lower,upper,keys,values)
+    [caller,"unsat",pins fixed lower upper keys values;
+     "required-complete","sat",fixed];
+  let fs,g,lower,upper,keys,values = fixture "order-conflict" in
+  let conflict = Expr.Set.add (bin FLessThan upper lower) fs in
+  run "neutral-order-conflict" false (conflict,g,lower,upper,keys,values)
+    [caller,"unsat",pins conflict lower upper keys values;
+     "required-complete","unsat",conflict];
+  let fs,g,lower,upper,keys,values = fixture "nonempty-state" in
+  let nonempty = List.fold_left (fun acc (role,value) -> Expr.Set.add
+    (bin ValueEqual role value) acc) fs
+    [lower,Expr.num 0.;upper,Expr.num 0.;values,Expr.EList [];
+     keys,Expr.ESet [nonblank_utf16 "neutral-kept"]] in
+  run "neutral-nonempty-state" true (nonempty,g,lower,upper,keys,values)
+    [caller,"unsat",pins nonempty lower upper keys values;
+     "required-complete","sat",nonempty];
+  let fs,g,lower,upper,keys,values = fixture "missing-length-guard" in
+  let missing = Expr.Set.remove
+    (bin ILessThanEqual (Expr.int 0) (Expr.UnOp (LstLen,values))) fs in
+  let missing = Expr.Set.add
+    (not_ (bin ValueEqual values (Expr.EList [nonblank_utf16 "neutral-kept"])))
+    missing in
+  let fixed = List.fold_left (fun acc (role,value) -> Expr.Set.add
+    (bin ValueEqual role value) acc) missing
+    [lower,Expr.num 0.;upper,Expr.num 0.;keys,Expr.ESet []] in
+  run "neutral-missing-length-guard" true (fixed,g,lower,upper,keys,values)
+    ["required-complete","sat",fixed])
+
+(* Exact submitted q133 GIL frame: twelve facts and two Number types.
+   The pretty-printed maximum loses precision; retain its encoded binary64
+   value with Float.max_float. This is not the unavailable parent command. *)
+let subtraction_ceiling_original_controls () = with_nonblank_counter_trace (fun () ->
+  let fixture start_name end_name reverse =
+    let start = Expr.LVar start_name and finish = Expr.LVar end_name in
+    let gamma = Hashtbl.create 2 in
+    List.iter (fun name -> Hashtbl.add gamma name Type.NumberType)
+      [start_name;end_name];
+    let failed = not_ (bin FLessThanEqual
+      (bin FMinus (Expr.num 4294967295.) finish) (Expr.num Float.max_float)) in
+    let lower = bin FLessThanEqual (Expr.num 0.) finish
+    and upper = bin FLessThanEqual finish (Expr.num 4294967295.) in
+    let atoms = [failed;Expr.UnOp (IsInt,finish);Expr.UnOp (IsInt,start);
+      Expr.UnOp (IsInt,bin FPlus finish (Expr.num 1.));
+      bin ILessThanEqual (Expr.int 0) (Expr.UnOp (NumToInt,bin FMinus finish start));
+      lower;bin FLessThanEqual (Expr.num 0.) start;
+      bin FLessThanEqual finish (Expr.num 4294967294.);upper;
+      bin Equal start finish;bin FLessThanEqual start finish;
+      bin FLessThanEqual (bin FPlus finish (Expr.num 1.)) (Expr.num 4294967295.)] in
+    (if reverse then List.rev atoms else atoms),gamma,finish,failed,lower,upper in
+  let run_core label atoms gamma failed lower upper =
+    let fs = Expr.Set.of_list atoms and core = Expr.Set.of_list [failed;lower;upper] in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    Alcotest.(check bool) (label ^ " three distinct proper original atoms") true
+      (Expr.Set.cardinal core = 3 && Expr.Set.subset core fs
+       && Expr.Set.cardinal core < Expr.Set.cardinal fs);
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " public full check is UNSAT") true
+      (Option.is_none (Smt.check_sat fs gamma));
+    let row = nonblank_counter_observe label before "optional-original-core"
+      "unsat" core gamma in
+    Alcotest.(check string) (label ^ " optional UNKNOWN remains inconclusive") "true"
+      (smt_result_field "raw_unknown" row);
+    Alcotest.(check string) (label ^ " production optional cap remains five seconds") "5000"
+      (smt_result_field "timeout_ms" row);
+    Alcotest.(check int) (label ^ " one actual selected core without fallback") 1
+      (List.length (symbolic_prefix_new_rows before));
+    nonblank_counter_retained label fs gamma original types;
+    let cached = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " public full result survives cache") true
+      (Option.is_none (Smt.check_sat fs gamma));
+    Alcotest.(check int) (label ^ " cached full result adds no native query") 0
+      (List.length (symbolic_prefix_new_rows cached));
+    nonblank_counter_retained (label ^ " cached") fs gamma original types in
+  let atoms,gamma,_,failed,lower,upper = fixture "#start" "#end" false in
+  Alcotest.(check int) "subtraction captured frame keeps all twelve facts" 12
+    (Expr.Set.cardinal (Expr.Set.of_list atoms));
+  Alcotest.(check int) "subtraction captured frame keeps both original Number types" 2
+    (Hashtbl.length gamma);
+  run_core "subtraction-captured" atoms gamma failed lower upper;
+  let atoms,gamma,_,failed,lower,upper =
+    fixture "#subtraction_renamed_start" "#subtraction_renamed_end" true in
+  run_core "subtraction-renamed-reordered" atoms gamma failed lower upper;
+  let atoms,gamma,finish,failed,lower,upper =
+    fixture "#subtraction_bounds_start" "#subtraction_bounds_end" false in
+  let atoms = upper :: bin FLessThanEqual finish (Expr.num 4294967293.) :: atoms in
+  Alcotest.(check int) "subtraction redundant upper atoms preserve thirteen distinct facts" 13
+    (Expr.Set.cardinal (Expr.Set.of_list atoms));
+  run_core "subtraction-weakest-retained-upper" atoms gamma failed lower upper;
+  (* These weakened controls contain no IsInt or separate finiteness fact.
+     Removing nonnegativity really admits -Infinity; retaining the full q133
+     integrality frame would not be a valid SAT premise-removal control. *)
+  let public_control label expected fs gamma =
+    (* Tautological padding makes a candidate triple proper without restricting
+       a weakened control's domain or supplying any missing numeric premise. *)
+    let fs = Expr.Set.add (Expr.bool true) fs in
+    if label = "subtraction-wrong-operand" || label = "subtraction-nonfinite-literal" then
+      Alcotest.(check bool) (label ^ " padded frame makes a candidate triple proper") true
+        (Expr.Set.cardinal fs = 4 && 3 < Expr.Set.cardinal fs);
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let result = Smt.check_sat fs gamma in
+    Alcotest.(check bool) (label ^ " public full result") expected (Option.is_some result);
+    (match result with Some model ->
+       Printf.printf "SUBTRACTION_CEILING_NATIVE_MODEL[%s]=%s\n%!" label
+         (Fmt.str "%a" Smt.pp_model model)
+     | None -> ());
+    Alcotest.(check bool) (label ^ " declines original-core selection") false
+      (List.exists (fun row -> smt_result_field "caller" row = "optional-original-core")
+        (symbolic_prefix_new_rows before));
+    let row = nonblank_counter_observe label before "required-complete"
+      (if expected then "sat" else "unsat") fs gamma in
+    Alcotest.(check string) (label ^ " required UNKNOWN remains an error") "false"
+      (smt_result_field "raw_unknown" row);
+    Alcotest.(check string) (label ^ " required thirty-second cap unchanged") "30000"
+      (smt_result_field "timeout_ms" row);
+    nonblank_counter_retained label fs gamma original types in
+  let single name =
+    let gamma = Hashtbl.create 1 in Hashtbl.add gamma name Type.NumberType;
+    Expr.LVar name,gamma in
+  let x,gamma = single "#subtraction_without_lower" in
+  let failed = not_ (bin FLessThanEqual
+    (bin FMinus (Expr.num 4294967295.) x) (Expr.num Float.max_float)) in
+  public_control "subtraction-removed-nonnegative" true
+    (Expr.Set.of_list [failed;bin FLessThanEqual x (Expr.num 4294967295.)]) gamma;
+  let x,gamma = single "#subtraction_without_goal" in
+  public_control "subtraction-removed-goal" true (Expr.Set.of_list
+    [bin FLessThanEqual (Expr.num 0.) x;bin FLessThanEqual x (Expr.num 4294967295.)]) gamma;
+  let x,gamma = single "#subtraction_wrong_operand" in
+  let y = Expr.LVar "#subtraction_unrelated_bound" in
+  Hashtbl.add gamma "#subtraction_unrelated_bound" Type.NumberType;
+  public_control "subtraction-wrong-operand" true (Expr.Set.of_list
+    [not_ (bin FLessThanEqual (bin FMinus (Expr.num 1.) x) (Expr.num 1.));
+     bin FLessThanEqual (Expr.num 0.) y;bin FLessThanEqual y (Expr.num 10.)]) gamma;
+  let x,gamma = single "#subtraction_nonfinite_literal" in
+  public_control "subtraction-nonfinite-literal" true (Expr.Set.of_list
+    [not_ (bin FLessThanEqual (bin FMinus (Expr.num infinity) x) (Expr.num 1.));
+     bin FLessThanEqual (Expr.num 0.) x;bin FLessThanEqual x (Expr.num 10.)]) gamma;
+  let x,gamma = single "#subtraction_missing_upper" in
+  public_control "subtraction-missing-upper" false (Expr.Set.of_list
+    [not_ (bin FLessThanEqual (bin FMinus (Expr.num 1.) x) (Expr.num 1.));
+     bin FLessThanEqual (Expr.num 0.) x]) gamma;
+  Printf.printf "SUBTRACTION_CEILING_CONTROLS_FINISHED\n%!")
+
+
+(* Exact reduced query207 request, not its unavailable logging-parent command.
+   All twenty-three formulas and five Gamma bindings are retained in the full
+   public calls; the SAT deletions below are deliberately weakened controls. *)
+let strict_order_successor_original_controls () = with_nonblank_counter_trace (fun () ->
+  Alcotest.(check bool) "order core ordinary timeout environment" true
+    (Sys.getenv_opt "SMT_TIMEOUT" = None);
+  let original = parse_gil_set [
+    "(! (#start == #end))";
+    "(! (#start < (#end + 1.)))";
+    "(is_int #end)";
+    "(is_int #start)";
+    "(is_int (#end + 1.))";
+    "(is_int (#start + 1.))";
+    "(0i i<= (l-len #tailValues))";
+    "(0i i<= (as_int (4294967295. - (#end + 1.))))";
+    "(0i i<= (as_int (#end - #start)))";
+    "(0i i<= (as_int (#end - (#start + 1.))))";
+    "(0. <= #end)";
+    "(0. <= #start)";
+    "(0. <= (#start + 1.))";
+    "(#end <= 4294967294.)";
+    "(#end <= 4294967295.)";
+    "(#start < #end)";
+    "(#start <= 4294967294.)";
+    "((as_int (4294967295. - (#end + 1.))) i< (as_int (4294967295. - #end)))";
+    "((as_int (#end + 1.)) == (1i i+ (as_int #end)))";
+    "((as_int (#end - (#start + 1.))) i< (as_int (#end - #start)))";
+    "((as_int (#start + 1.)) == (1i i+ (as_int #start)))";
+    "((#end + 1.) <= 4294967295.)";
+    "((#start + 1.) <= #end)";
+  ] in
+  let fixture renamed reverse =
+    let roles = ["cell",Type.Utf16Type;"tailKeys",Type.SetType;
+      "start",Type.NumberType;"end",Type.NumberType;"tailValues",Type.ListType] in
+    let name role = if renamed then "#order_core_renamed_" ^ role else "#" ^ role in
+    let names = List.map (fun (role,_) -> "#" ^ role,name role) roles in
+    let rename e = Expr.map_opt (function
+      | Expr.LVar n ->
+          Some (Expr.LVar (Option.value (List.assoc_opt n names) ~default:n)), false
+      | e -> Some e, true) None e |> Option.get in
+    let gamma = Hashtbl.create 5 in
+    List.iter (fun (role,typ) -> Hashtbl.add gamma (name role) typ)
+      (if reverse then List.rev roles else roles);
+    let atoms = List.map rename (Expr.Set.elements original) in
+    let atoms = if reverse then List.rev atoms else atoms in
+    let a = Expr.LVar (name "start") and b = Expr.LVar (name "end") in
+    atoms,gamma,not_ (bin FLessThan a (bin FPlus b (Expr.num 1.))),
+      bin FLessThan a b in
+  let announce label before =
+    List.iter (fun row -> Printf.printf "ORDER_CORE_ROW[%s]=%s\n%!" label row)
+      (symbolic_prefix_new_rows before) in
+  let run_core label atoms gamma failed ordered =
+    let fs = Expr.Set.of_list atoms and core = Expr.Set.of_list [failed;ordered] in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    Alcotest.(check bool) (label ^ " two distinct proper original atoms") true
+      (Expr.Set.cardinal core = 2 && Expr.Set.subset core fs
+       && Expr.Set.cardinal core < Expr.Set.cardinal fs);
+    let before = nonblank_counter_rows () in
+    let result = Smt.check_sat fs gamma in
+    announce label before;
+    Alcotest.(check bool) (label ^ " public full check is UNSAT") true
+      (Option.is_none result);
+    let row = nonblank_counter_observe label before "optional-original-core"
+      "unsat" core gamma in
+    Alcotest.(check string) (label ^ " optional UNKNOWN stays inconclusive") "true"
+      (smt_result_field "raw_unknown" row);
+    Alcotest.(check string) (label ^ " optional five-second cap unchanged") "5000"
+      (smt_result_field "timeout_ms" row);
+    (* Inherited complete-query witness probes may precede this exact core.
+       Their multiplicity is not evidence that this selector fired. *)
+    Alcotest.(check bool) (label ^ " actual core avoids required fallback") false
+      (List.exists (fun row -> smt_result_field "caller" row = "required-complete")
+        (symbolic_prefix_new_rows before));
+    nonblank_counter_retained label fs gamma original types;
+    let cached = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " cached public full result") true
+      (Option.is_none (Smt.check_sat fs gamma));
+    Alcotest.(check int) (label ^ " cached result adds no native query") 0
+      (List.length (symbolic_prefix_new_rows cached));
+    nonblank_counter_retained (label ^ " cached") fs gamma original types in
+  let atoms,gamma,failed,ordered = fixture false false in
+  Alcotest.(check int) "order captured frame keeps all twenty-three original facts" 23
+    (Expr.Set.cardinal (Expr.Set.of_list atoms));
+  Alcotest.(check int) "order captured frame keeps all five Gamma bindings" 5
+    (Hashtbl.length gamma);
+  run_core "order-captured" atoms gamma failed ordered;
+  let atoms,gamma,failed,ordered = fixture true true in
+  run_core "order-renamed-reversed" atoms gamma failed ordered;
+  let public_control label wanted cardinal fs gamma =
+    Alcotest.(check int) (label ^ " exact control-frame cardinality") cardinal
+      (Expr.Set.cardinal fs);
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let result = Smt.check_sat fs gamma in
+    announce label before;
+    (match result with Some model ->
+       Printf.printf "ORDER_CORE_NATIVE_MODEL[%s]=%s\n%!" label
+         (Fmt.str "%a" Smt.pp_model model)
+     | None -> ());
+    Alcotest.(check bool) (label ^ " public full result") wanted (Option.is_some result);
+    Alcotest.(check bool) (label ^ " no ineligible original-core dispatch") false
+      (List.exists (fun row -> smt_result_field "caller" row = "optional-original-core")
+        (symbolic_prefix_new_rows before));
+    let row = nonblank_counter_observe label before "required-complete"
+      (if wanted then "sat" else "unsat") fs gamma in
+    Alcotest.(check string) (label ^ " required UNKNOWN remains an error") "false"
+      (smt_result_field "raw_unknown" row);
+    Alcotest.(check string) (label ^ " required thirty-second cap unchanged") "30000"
+      (smt_result_field "timeout_ms" row);
+    nonblank_counter_retained label fs gamma original types;
+    let cached = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " cached public full result") wanted
+      (Option.is_some (Smt.check_sat fs gamma));
+    Alcotest.(check int) (label ^ " cached result adds no native query") 0
+      (List.length (symbolic_prefix_new_rows cached));
+    nonblank_counter_retained (label ^ " cached") fs gamma original types in
+  let pair label =
+    let a = Expr.LVar ("#order_" ^ label ^ "_a")
+    and b = Expr.LVar ("#order_" ^ label ^ "_b") in
+    let gamma = Hashtbl.create 3 in
+    List.iter (fun n -> Hashtbl.add gamma n Type.NumberType)
+      ["#order_" ^ label ^ "_a";"#order_" ^ label ^ "_b"];
+    a,b,gamma in
+  let failed a b offset = not_ (bin FLessThan a (bin FPlus b (Expr.num offset))) in
+  let padded xs = Expr.Set.of_list (Expr.bool true :: xs) in
+  (* Neither deletion retains the other twenty-one q207 facts, integrality or
+     separate finiteness. These are genuine SAT weakenings plus TRUE padding. *)
+  let a,b,gamma = pair "without_prior" in
+  public_control "order-removed-prior" true 2 (padded [failed a b 1.]) gamma;
+  let a,b,gamma = pair "without_goal" in
+  public_control "order-removed-goal" true 2 (padded [bin FLessThan a b]) gamma;
+  (* Three atoms make a potential pair a PROPER subset, so no-fire checks
+     cannot pass merely because the existing cardinality gate masked a bug. *)
+  let a,b,gamma = pair "wrong_operand" in
+  let other = Expr.LVar "#order_wrong_operand_other" in
+  Hashtbl.add gamma "#order_wrong_operand_other" Type.NumberType;
+  public_control "order-wrong-operand" true 3
+    (padded [failed a b 1.;bin FLessThan a other]) gamma;
+  let a,b,gamma = pair "wrong_offset" in
+  public_control "order-wrong-offset" true 3
+    (padded [failed a b (-1.);bin FLessThan a b]) gamma;
+  (* An untyped endpoint is a valid wrapped-native fallback, not an invented
+     explicitly-Int FP-operation error oracle. Native typing guards remain. *)
+  let a,b,gamma = pair "missing_type" in
+  Hashtbl.remove gamma "#order_missing_type_a";
+  public_control "order-missing-original-Number-type" false 3
+    (padded [failed a b 1.;bin FLessThan a b]) gamma;
+  let a,b,gamma = pair "whole_core" in
+  public_control "order-whole-equals-core" false 2
+    (Expr.Set.of_list [failed a b 1.;bin FLessThan a b]) gamma;
+  Printf.printf "ORDER_CORE_CONTROLS_FINISHED\n%!")
+
+
+(* Original-fact successor congruence: public implication and unchanged-state
+   controls. The complete retained frame is test data, never a production key.
+   Zero/NaN extra goals also guard the all-original-RHS/no-global-alias boundary.
+   No UNKNOWN is caught and no private helper is called. *)
+let original_successor_alias_fact_controls () =
+  with_nonblank_counter_trace ~preserve_prior:true (fun () ->
+  let original = parse_gil_set [
+    "(#lvar_573 == #lvar_599)";
+    "(#lvar_575 == #length)";
+    "(#lvar_573 == #lvar_573)";
+    "(#lvar_575 == #lvar_575)";
+    "(#lvar_598 == #lvar_599)";
+    "(#keys == -u- (-{ (num_to_utf16 #lvar_599) }-, #lvar_601, #s05FilterRestKeys))";
+    "(#helperTemporalRef == #loc_355)";
+    "(#lvar_js_32 == #loc_335)";
+    "(#payload == #loc_354)";
+    "(#payloadOrder == u16\"type_first\")";
+    "(#lvar_537 == (as_int #enumRank0))";
+    "(#values == l+ (#lvar_600, {{ #s05FilterItem }}, #s05FilterRest))";
+    "(#validator == #loc_334)";
+    "(#text == u16\"\")";
+    "(#accepted == true)";
+    "(#closure == {{ $lg, #loc_335 }})";
+    "(#lvar_603 == l+ ({{ #s05FilterItem }}, #s05FilterRest))";
+    "(#this == undefined)";
+    "(#lvar_571 == (as_int (4294967295. - #lvar_599)))";
+    "(#order == u16\"payload_first\")";
+    "(#module == #loc_336)";
+    "(#data == #loc_350)";
+    "(#lvar_604 == -u- (-{ (num_to_utf16 #lvar_599) }-, #s05FilterRestKeys))";
+    "(#helperTemporalUndefined == #loc_338)";
+    "(! (#enumKey0 == none))";
+    "(0. <= #enumRank0)";
+    "(#before v== {{ u16\"d\", #old, true, true,\ntrue }})";
+    "(#enumRank0 <= 2.)";
+    "(#lvar_535 v== empty)";
+    "(is_int #length)";
+    "(0. <= #length)";
+    "(#length <= 4294967295.)";
+    "(0. <= #lvar_599)";
+    "(is_int #lvar_599)";
+    "(#lvar_599 <= 4294967295.)";
+    "(#lvar_573 < #lvar_575)";
+    "(#lvar_599 < #length)";
+    "(0i i<= (as_int (#lvar_599 - 0.)))";
+    "(is_int (#lvar_599 + 1.))";
+    "(0i i<= (as_int (4294967295. - (#lvar_599 + 1.))))";
+    "(#lvar_599 <= 4294967294.)";
+    "((as_int (#lvar_599 + 1.)) == (1i i+ (as_int #lvar_599)))";
+    "((as_int (4294967295. - (#lvar_599 + 1.))) i< (as_int (4294967295. - #lvar_599)))";
+    "((#lvar_599 + 1.) <= 4294967295.)";
+    "(0i i<= (as_int (#length - (#lvar_599 + 1.))))";
+    "(0. <= (#lvar_599 + 1.))";
+    "((#lvar_599 + 1.) <= #length)";
+    "(#lvar_602 v== #length)";
+    "(0i i<= (l-len #lvar_603))";
+    "(0i i<= (l-len #closure))";
+    "(0i i<= (l-len #s05FilterRest))";
+    "(0i i<= (l-len #lvar_600))";
+    "(0i i<= (l-len #values))";
+  ] in
+  let original_goals = Expr.Set.elements (parse_gil_set [
+    "(0i i<= (as_int (4294967295. - (#lvar_598 + 1.))))";
+    "((as_int (4294967295. - (#lvar_598 + 1.))) i< #lvar_571)";
+  ]) in
+  let bindings = [
+    "#accepted", Type.BooleanType;
+    "#closure", Type.ListType;
+    "#data", Type.ObjectType;
+    "#enumRank0", Type.NumberType;
+    "#helperTdz", Type.ObjectType;
+    "#helperTemporalRef", Type.ObjectType;
+    "#helperTemporalUndefined", Type.ObjectType;
+    "#keys", Type.SetType;
+    "#length", Type.NumberType;
+    "#lvar_514", Type.ObjectType;
+    "#lvar_515", Type.ObjectType;
+    "#lvar_516", Type.ObjectType;
+    "#lvar_518", Type.ObjectType;
+    "#lvar_537", Type.IntType;
+    "#lvar_546", Type.ObjectType;
+    "#lvar_547", Type.ObjectType;
+    "#lvar_549", Type.ObjectType;
+    "#lvar_560", Type.ObjectType;
+    "#lvar_571", Type.IntType;
+    "#lvar_573", Type.NumberType;
+    "#lvar_575", Type.NumberType;
+    "#lvar_576", Type.ObjectType;
+    "#lvar_577", Type.ObjectType;
+    "#lvar_579", Type.ObjectType;
+    "#lvar_589", Type.ObjectType;
+    "#lvar_598", Type.NumberType;
+    "#lvar_599", Type.NumberType;
+    "#lvar_600", Type.ListType;
+    "#lvar_601", Type.SetType;
+    "#lvar_602", Type.NumberType;
+    "#lvar_603", Type.ListType;
+    "#lvar_604", Type.SetType;
+    "#lvar_js_32", Type.ObjectType;
+    "#module", Type.ObjectType;
+    "#order", Type.Utf16Type;
+    "#payload", Type.ObjectType;
+    "#payloadOrder", Type.Utf16Type;
+    "#s05FilterItem", Type.Utf16Type;
+    "#s05FilterRest", Type.ListType;
+    "#s05FilterRestKeys", Type.SetType;
+    "#text", Type.Utf16Type;
+    "#this", Type.UndefinedType;
+    "#validator", Type.ObjectType;
+    "#values", Type.ListType;
+  ] in
+  let fresh_rows = ref [] in
+  let run label expected pure facts goals gamma =
+    let pfs = Engine.PFS.of_list facts in
+    let before = Fmt.str "%a" Engine.PFS.pp pfs
+    and types = nonblank_counter_types (Gamma.as_hashtbl gamma)
+    and old = nonblank_counter_rows () in
+    let result = Solver.check_entailment Utils.Containers.SS.empty pfs goals gamma in
+    Alcotest.(check bool) (label ^ " public result") expected result;
+    Alcotest.(check bool) (label ^ " original PFS/Gamma unchanged") true
+      (before = Fmt.str "%a" Engine.PFS.pp pfs
+       && types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+    let rows = symbolic_prefix_new_rows old in
+    fresh_rows := rows @ !fresh_rows;
+    if pure then Alcotest.(check int) (label ^ " original-fact proof uses no native query")
+      0 (List.length rows);
+    Printf.printf "RANK_ALIAS_PUBLIC[%s]=%b native_rows=%d\n%!"
+      label result (List.length rows)
+  in
+  Alcotest.(check bool) "rank alias retained frame has53 facts and44 Gamma bindings" true
+    (Expr.Set.cardinal original = 53 && List.length bindings = 44);
+  List.iter (fun (label, renamed) ->
+    let name n = if renamed then "#rank_alias_renamed_" ^
+      (if String.length n > 0 && n.[0] = '#' then
+         String.sub n 1 (String.length n - 1) else n) else n in
+    let rename e = Expr.map_opt (function
+      | Expr.LVar n -> Some (Expr.LVar (name n)), false
+      | e -> Some e, true) None e |> Option.get in
+    let atoms = List.map rename (Expr.Set.elements original) in
+    let atoms = if renamed then List.rev_map (function
+      | Expr.BinOp (a, Equal, b) -> Expr.BinOp (b, Equal, a)
+      | e -> e) atoms else atoms in
+    let g = Gamma.init () in
+    List.iter (fun (n, typ) -> Gamma.update g (name n) typ)
+      (if renamed then List.rev bindings else bindings);
+    run label true true atoms (List.map rename original_goals) g)
+    ["rank alias original complete frame", false;
+     "rank alias renamed symmetric reversed frame", true];
+  let fixture label ceiling =
+    let name n = "#rank_alias_" ^ label ^ "_" ^ n in
+    let x = Expr.LVar (name "x") and y = Expr.LVar (name "y")
+    and r = Expr.LVar (name "old") in
+    let g = Gamma.init () in
+    List.iter (fun n -> Gamma.update g (name n) Type.NumberType) ["x";"y"];
+    Gamma.update g (name "old") Type.IntType;
+    let rank n = Expr.UnOp (NumToInt,
+      bin FMinus (Expr.num ceiling) (bin FPlus n (Expr.num 1.))) in
+    let prior = Expr.UnOp (NumToInt, bin FMinus (Expr.num ceiling) y) in
+    let alias = bin Equal x y and old = bin Equal r prior
+    and natural = bin ILessThanEqual (Expr.int 0) (rank y)
+    and decreases = bin ILessThan (rank y) prior in
+    let goals = [bin ILessThanEqual (Expr.int 0) (rank x);
+      bin ILessThan (rank x) r] in
+    x,y,r,g,rank,[alias;old;natural;decreases],goals in
+  let pins x y a b = [bin ValueEqual x (Expr.num a);
+    bin ValueEqual y (Expr.num b)] in
+  List.iter (fun (label,a,b) ->
+    let x,y,_,g,_,facts,goals = fixture label 17. in
+    run label true true (facts @ pins x y a b) goals g)
+    ["rank alias positive-zero negative-zero",0.,(-0.);
+     "rank alias negative-zero positive-zero",(-0.),0.];
+  let x,y,_,g,_,facts,goals = fixture "missing_alias" 1. in
+  run "rank alias missing alias counterstate" false false
+    (List.tl facts @ pins x y 2. 0.) goals g;
+  let x,y,r,g,_,facts,goals = fixture "missing_support" 1. in
+  let alias = List.hd facts and natural = List.nth facts 2 in
+  run "rank alias missing strict fact and old-rank chain" false false
+    ([alias;natural;bin Equal r (Expr.int 0)] @ pins x y 0. 0.) goals g;
+  let x,y,r,g,_,facts,_ = fixture "mismatch" 1. in
+  let wrong = Expr.UnOp (NumToInt,
+    bin FMinus (Expr.num 2.) (bin FPlus x (Expr.num 1.))) in
+  run "rank alias differing rank constant counterstate" false false
+    (facts @ pins x y 0. 0.)
+    [bin ILessThanEqual (Expr.int 0) wrong;bin ILessThan wrong r] g;
+  let x,y,_,g,_,facts,goals = fixture "zero_extra" 17. in
+  let unequal_zero_sums = bin ValueEqual
+    (bin FPlus x (Expr.num (-0.))) (bin FPlus y (Expr.num (-0.))) in
+  run "rank alias zero-shift extra RHS remains false" false false
+    (facts @ pins x y 0. (-0.)) (goals @ [unequal_zero_sums]) g;
+  let x,y,_,g,_,facts,goals = fixture "nan_extra" 17. in
+  run "rank alias NaN extra RHS remains false" false false
+    (facts @ pins x y 0. 0.)
+    (goals @ [bin Equal (Expr.num nan) (Expr.num nan)]) g;
+  let x,y,r,g,_,facts,goals = fixture "ambiguous_old" 17. in
+  (* Preserve the existing public false-premise decline convention: two
+     incompatible original Int definitions must not yield an early proof. *)
+  run "rank alias ambiguous Int definitions decline" false false
+    (facts @ pins x y 0. 0. @ [bin Equal r (Expr.int 0)]) goals g;
+  Alcotest.(check bool) "rank alias actual native observations stay definite" true
+    (List.for_all (fun row -> List.mem (smt_result_field "result" row)
+      ["sat";"unsat"]) !fresh_rows))
+
+
+(* Exact retained lower-bound counterquery: twelve atoms and two Number
+   bindings. Premise omissions below weaken only the selected original pair;
+   native SAT is required and is not a claim about the full captured frame. *)
+let subtraction_lower_original_controls () = with_nonblank_counter_trace (fun () ->
+  Alcotest.(check bool) "subtraction lower ordinary timeout environment" true
+    (Sys.getenv_opt "SMT_TIMEOUT" = None);
+  let fixture start_name end_name reverse =
+    let start = Expr.LVar start_name and finish = Expr.LVar end_name in
+    let gamma = Hashtbl.create 2 in
+    List.iter (fun name -> Hashtbl.add gamma name Type.NumberType)
+      [start_name;end_name];
+    let failed = not_ (bin FLessThanEqual (Expr.num (-. Float.max_float))
+      (bin FMinus (Expr.num 4294967295.) finish)) in
+    let upper = bin FLessThanEqual finish (Expr.num 4294967295.) in
+    let atoms = [failed;Expr.UnOp (IsInt,finish);Expr.UnOp (IsInt,start);
+      Expr.UnOp (IsInt,bin FPlus finish (Expr.num 1.));
+      bin ILessThanEqual (Expr.int 0) (Expr.UnOp (NumToInt,bin FMinus finish start));
+      bin FLessThanEqual (Expr.num 0.) finish;
+      bin FLessThanEqual (Expr.num 0.) start;
+      bin FLessThanEqual finish (Expr.num 4294967294.);upper;
+      bin Equal start finish;bin FLessThanEqual start finish;
+      bin FLessThanEqual (bin FPlus finish (Expr.num 1.)) (Expr.num 4294967295.)] in
+    Expr.Set.of_list (if reverse then List.rev atoms else atoms),gamma,failed,upper in
+  let run_core label fs gamma failed upper =
+    let core = Expr.Set.of_list [failed;upper] in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    Alcotest.(check bool) (label ^ " two distinct proper original atoms") true
+      (Expr.Set.cardinal core = 2 && Expr.Set.subset core fs
+       && Expr.Set.cardinal core < Expr.Set.cardinal fs);
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " public full check is UNSAT") true
+      (Option.is_none (Smt.check_sat fs gamma));
+    let row = nonblank_counter_observe label before "optional-original-core"
+      "unsat" core gamma in
+    Alcotest.(check bool) (label ^ " unchanged optional policy") true
+      (smt_result_field "raw_unknown" row = "true"
+       && smt_result_field "timeout_ms" row = "5000");
+    let dump = nonblank_counter_read (Filename.concat "gillian_smt_queries"
+      (smt_result_field "query" row)) in
+    Alcotest.(check int) (label ^ " actual native pair has exactly two assertions") 2
+      (List.length (List.filter (String.starts_with ~prefix:"assert")
+        (String.split_on_char '(' dump)));
+    Alcotest.(check int) (label ^ " one native core without required fallback") 1
+      (List.length (symbolic_prefix_new_rows before));
+    nonblank_counter_retained label fs gamma original types in
+  List.iter (fun (label,start_name,end_name,reverse) ->
+    let fs,gamma,failed,upper = fixture start_name end_name reverse in
+    Alcotest.(check bool) (label ^ " all twelve facts and both original types") true
+      (Expr.Set.cardinal fs = 12 && Hashtbl.length gamma = 2);
+    run_core label fs gamma failed upper)
+    ["lower-captured","#start","#end",false;
+     "lower-renamed-reordered","#lower_z_start","#lower_a_end",true];
+  let single label =
+    let name = "#subtraction_lower_" ^ label in
+    let gamma = Hashtbl.create 1 in Hashtbl.add gamma name Type.NumberType;
+    Expr.LVar name,gamma in
+  let failed floor c x = not_ (bin FLessThanEqual (Expr.num floor)
+    (bin FMinus (Expr.num c) x)) in
+  let upper x limit = bin FLessThanEqual x (Expr.num limit) in
+  let required label wanted fs gamma =
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let result = Smt.check_sat fs gamma in
+    Alcotest.(check bool) (label ^ " public full result") wanted (Option.is_some result);
+    (match result with Some model ->
+       Printf.printf "SUBTRACTION_LOWER_NATIVE_MODEL[%s]=%s\n%!" label
+         (Fmt.str "%a" Smt.pp_model model)
+     | None -> ());
+    let row = nonblank_counter_observe label before "required-complete"
+      (if wanted then "sat" else "unsat") fs gamma in
+    Alcotest.(check bool) (label ^ " unchanged required policy") true
+      (smt_result_field "raw_unknown" row = "false"
+       && smt_result_field "timeout_ms" row = "30000");
+    Alcotest.(check int) (label ^ " required native result without optional dispatch") 1
+      (List.length (symbolic_prefix_new_rows before));
+    nonblank_counter_retained label fs gamma original types in
+  (* TRUE is tautological padding, not a numeric guard or model assumption.
+     Neither omission carries integrality, finiteness or nonnegativity. *)
+  let x,gamma = single "without_upper" in
+  required "lower-removed-upper" true
+    (Expr.Set.of_list [failed (-. Float.max_float) 4294967295. x;Expr.bool true]) gamma;
+  let x,gamma = single "without_goal" in
+  required "lower-removed-goal" true
+    (Expr.Set.of_list [upper x 4294967295.;Expr.bool true]) gamma;
+  Printf.printf "SUBTRACTION_LOWER_CONTROLS_FINISHED\n%!")
+
+(* Exact retained complete fallback for query2568: 31 GIL facts and all
+   11 Gamma entries. Four duplicate literal-parser facts are generated by the
+   unchanged encoder; this is not a claim about upstream program reachability. *)
+let natural_gap_original_controls () = with_nonblank_counter_trace (fun () ->
+  Alcotest.(check bool) "natural gap ordinary timeout environment" true
+    (Sys.getenv_opt "SMT_TIMEOUT" = None);
+  let captured = parse_gil_set [
+    "(! (#enumKey0 == none))";
+    "(! (#length v== (#lvar_1749 + 1.)))";
+    "(is_int #length)";
+    "(is_int #lvar_1750)";
+    "(is_int (#lvar_1750 + 1.))";
+    "(0i i<= (l-len #lvar_1751))";
+    "(0i i<= (l-len #s05FilterRest))";
+    "(0i i<= (as_int (4294967295. - (#lvar_1750 + 1.))))";
+    "(0i i<= (as_int (#length - (#lvar_1750 + 1.))))";
+    "(0i i<= (as_int (#lvar_1750 - 0.)))";
+    "(0. <= #enumRank0)";
+    "(0. <= #length)";
+    "(0. <= #lvar_1750)";
+    "(0. <= (#lvar_1750 + 1.))";
+    "(#before v== {{ u16\"d\", null,\ntrue, true, true }})";
+    "(#enumRank0 <= 2.)";
+    "(#length <= 4294967295.)";
+    "(#lvar_1686 v== empty)";
+    "(#lvar_1724 == #lvar_1724)";
+    "(#lvar_1724 == #lvar_1750)";
+    "(#lvar_1724 < #lvar_1726)";
+    "(#lvar_1726 == #length)";
+    "(#lvar_1726 == #lvar_1726)";
+    "(#lvar_1749 == #lvar_1750)";
+    "(#lvar_1750 < #length)";
+    "(#lvar_1750 <= 4294967294.)";
+    "(#lvar_1750 <= 4294967295.)";
+    "((as_int (4294967295. - (#lvar_1750 + 1.))) i< (as_int (4294967295. - #lvar_1750)))";
+    "((as_int (#lvar_1750 + 1.)) == (1i i+ (as_int #lvar_1750)))";
+    "((#lvar_1750 + 1.) <= 4294967295.)";
+    "((#lvar_1750 + 1.) <= #length)";
+  ] in
+  let bindings = ["#length",Type.NumberType;"#lvar_1749",Type.NumberType;
+    "#lvar_1750",Type.NumberType;"#lvar_1726",Type.NumberType;
+    "#s05FilterItem",Type.Utf16Type;"#lvar_1724",Type.NumberType;
+    "#s05FilterRestKeys",Type.SetType;"#s05FilterRest",Type.ListType;
+    "#enumRank0",Type.NumberType;"#lvar_1751",Type.ListType;
+    "#lvar_1752",Type.SetType] in
+  Alcotest.(check int) "natural gap complete captured FS" 31
+    (Expr.Set.cardinal captured);
+  let fixture prefix reverse =
+    let rename name = if prefix = "" then name else
+      "#" ^ prefix ^ String.sub name 1 (String.length name - 1) in
+    let move e = Expr.map_opt (function
+      | Expr.LVar name -> Some (Expr.LVar (rename name)), false
+      | e -> Some e, true) None e |> Option.get in
+    let orient = function
+      | Expr.BinOp (LVar "#lvar_1749", Equal, LVar "#lvar_1750") when reverse ->
+          bin Equal (Expr.LVar "#lvar_1750") (Expr.LVar "#lvar_1749")
+      | Expr.UnOp (Not, BinOp (left, ValueEqual, right)) when reverse ->
+          not_ (bin ValueEqual right left)
+      | e -> e in
+    let fs = Expr.Set.elements captured |> List.map (fun e ->
+      move (orient e)) |> Expr.Set.of_list in
+    let gamma = Hashtbl.create 11 in
+    List.iter (fun (name,typ) -> Hashtbl.add gamma (rename name) typ) bindings;
+    fs,gamma,rename in
+  let pins fs lower upper a b = fs
+    |> Expr.Set.add (bin ValueEqual lower (Expr.num a))
+    |> Expr.Set.add (bin ValueEqual upper (Expr.num b)) in
+  let model_values label model gamma lower upper a b =
+    Printf.printf "NATURAL_GAP_NATIVE_MODEL[%s]=%s\n%!" label
+      (Fmt.str "%a" Smt.pp_model model);
+    let lifted = Hashtbl.create 2 in
+    Smt.lift_model model gamma (Hashtbl.add lifted)
+      (Expr.Set.of_list [lower;upper]);
+    List.iter (fun (term,value) -> match term with
+      | Expr.LVar name -> (match Hashtbl.find_opt lifted name with
+          | Some (Expr.Lit (Literal.Num actual)) ->
+              Alcotest.(check int64) (label ^ " native model " ^ name)
+                (Int64.bits_of_float value) (Int64.bits_of_float actual)
+          | _ -> Alcotest.fail (label ^ " missing native Number model"))
+      | _ -> Alcotest.fail "natural gap model role") [lower,a;upper,b] in
+  let check_parser_facts label row =
+    let text = nonblank_counter_read (Filename.concat "gillian_smt_queries"
+      (smt_result_field "query" row)) |> String.to_seq
+      |> Seq.filter (fun c -> not (List.mem c [' ';'\t';'\r';'\n']))
+      |> String.of_seq in
+    let needle = "(assert(=(utf162num(seq.unit#x0064))((_to_fp1153)#x7ff8000000000001)))" in
+    let rec count from found =
+      if from + String.length needle > String.length text then found else
+      count (from + 1) (found + if String.sub text from (String.length needle)
+        = needle then 1 else 0) in
+    Alcotest.(check int) (label ^ " four actual duplicate parser facts") 4
+      (count 0 0) in
+  let run label prefix reverse conflict =
+    let fs,gamma,rename = fixture prefix reverse in
+    let lower = Expr.LVar (rename "#lvar_1750")
+    and upper = Expr.LVar (rename "#length") in
+    let fs = if conflict then pins fs lower upper 5. 7. else fs in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let model = match Smt.check_sat fs gamma with Some model -> model
+      | None -> Alcotest.fail (label ^ " missing complete native SAT") in
+    let row = nonblank_counter_observe label before "optional-natural-counter"
+      (if conflict then "unsat" else "sat") (pins fs lower upper 0. 2.) gamma in
+    Alcotest.(check bool) (label ^ " exact optional policy") true
+      (smt_result_field "raw_unknown" row = "true"
+       && smt_result_field "timeout_ms" row = "1000");
+    check_parser_facts label row;
+    if conflict then ignore (nonblank_counter_observe (label ^ " fallback")
+      before "required-complete" "sat" fs gamma)
+    else Alcotest.(check bool) (label ^ " late native witness avoids required fallback") true
+      (List.for_all (fun row -> smt_result_field "caller" row <> "required-complete")
+        (symbolic_prefix_new_rows before));
+    model_values label model gamma lower upper
+      (if conflict then 5. else 0.) (if conflict then 7. else 2.);
+    nonblank_counter_retained label fs gamma original types in
+  run "gap-captured" "" false false;
+  run "gap-renamed-oriented" "gap_z_" true false;
+  run "gap-hint-conflict" "gap_conflict_" false true;
+  List.iter (fun kind ->
+    let label = "gap-" ^ kind in
+    let fs,gamma,rename = fixture (kind ^ "_") false in
+    let lower = Expr.LVar (rename "#lvar_1750")
+    and upper = Expr.LVar (rename "#length")
+    and alias = Expr.LVar (rename "#lvar_1749") in
+    let fs = match kind with
+      | "missing-int" -> Expr.Set.remove (Expr.UnOp (IsInt,lower)) fs
+      | "missing-alias" -> Expr.Set.remove (bin Equal alias lower) fs
+      | "ambiguous" -> Expr.Set.add (not_ (bin ValueEqual upper
+          (bin FPlus (Expr.LVar (rename "#lvar_1724")) (Expr.num 1.)))) fs
+      | _ -> fs in
+    let fs = pins fs lower upper
+      (if kind = "noop" then 0. else 5.) (if kind = "noop" then 2. else 7.) in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " native fallback SAT") true
+      (Option.is_some (Smt.check_sat fs gamma));
+    Alcotest.(check bool) (label ^ " no late natural hint dispatched") true
+      (List.for_all (fun row -> smt_result_field "caller" row <>
+        "optional-natural-counter") (symbolic_prefix_new_rows before));
+    ignore (nonblank_counter_observe label before "required-complete" "sat" fs gamma);
+    nonblank_counter_retained label fs gamma original types)
+    ["missing-int";"missing-alias";"ambiguous";"noop"];
+  Printf.printf "NATURAL_GAP_CONTROLS_FINISHED\n%!")
+
+(* Exact31-fact/11-type retained fallback. Expr.pp rounds MAXFINITE, so only
+   that printed goal is reconstructed with its captured binary64 constant.
+   Omission and signed-zero fixtures below are weakened controls, not the full
+   original domain. Native optional UNSAT, never host alias substitution, decides. *)
+let alias_subtraction_original_controls () = with_nonblank_counter_trace (fun () ->
+  Alcotest.(check bool) "alias subtraction ordinary timeout environment" true
+    (Sys.getenv_opt "SMT_TIMEOUT" = None);
+  let captured_x = Expr.LVar "#lvar_1882" in
+  let captured_failed = not_ (bin FLessThanEqual (Expr.num (-. Float.max_float))
+    (bin FMinus (Expr.num 4294967295.)
+      (bin FPlus captured_x (Expr.num 1.)))) in
+  let captured = Expr.Set.add captured_failed (parse_gil_set [
+    "(! (#enumKey0 == none))";
+    "(! (#lvar_1686 == empty))";
+    "(is_int #length)";
+    "(is_int #lvar_1883)";
+    "(is_int (#lvar_1883 + 1.))";
+    "(0i i<= (l-len #lvar_1884))";
+    "(0i i<= (l-len #s05FilterRest))";
+    "(0i i<= (as_int (4294967295. - (#lvar_1883 + 1.))))";
+    "(0i i<= (as_int (#length - (#lvar_1883 + 1.))))";
+    "(0i i<= (as_int (#lvar_1883 - 0.)))";
+    "(0. <= #enumRank0)";
+    "(0. <= #length)";
+    "(0. <= #lvar_1883)";
+    "(0. <= (#lvar_1883 + 1.))";
+    "(#before v== {{ u16\"d\", null,\ntrue, true, true }})";
+    "(#enumRank0 <= 2.)";
+    "(#length <= 4294967295.)";
+    "(#lvar_1857 == #lvar_1857)";
+    "(#lvar_1857 == #lvar_1883)";
+    "(#lvar_1857 < #lvar_1859)";
+    "(#lvar_1859 == #length)";
+    "(#lvar_1859 == #lvar_1859)";
+    "(#lvar_1882 == #lvar_1883)";
+    "(#lvar_1883 < #length)";
+    "(#lvar_1883 <= 4294967294.)";
+    "(#lvar_1883 <= 4294967295.)";
+    "((as_int (4294967295. - (#lvar_1883 + 1.))) i< (as_int (4294967295. - #lvar_1883)))";
+    "((as_int (#lvar_1883 + 1.)) == (1i i+ (as_int #lvar_1883)))";
+    "((#lvar_1883 + 1.) <= 4294967295.)";
+    "((#lvar_1883 + 1.) <= #length)";
+  ]) in
+  let bindings = ["#lvar_1882",Type.NumberType;"#length",Type.NumberType;
+    "#lvar_1884",Type.ListType;"#s05FilterItem",Type.Utf16Type;
+    "#s05FilterRestKeys",Type.SetType;"#lvar_1885",Type.SetType;
+    "#s05FilterRest",Type.ListType;"#enumRank0",Type.NumberType;
+    "#lvar_1883",Type.NumberType;"#lvar_1859",Type.NumberType;
+    "#lvar_1857",Type.NumberType] in
+  Alcotest.(check int) "alias subtraction complete captured FS" 31
+    (Expr.Set.cardinal captured);
+  Alcotest.(check int) "alias subtraction complete captured Gamma" 11
+    (List.length bindings);
+  let fixture renamed =
+    let rename name = if not renamed then name else match name with
+      | "#lvar_1882" -> "#length"
+      | "#length" -> "#alias_sub_length"
+      | "#lvar_1883" -> "#lvar_1882"
+      | _ -> "#alias_sub_" ^ String.sub name 1 (String.length name - 1) in
+    let move e = Expr.map_opt (function
+      | Expr.LVar name -> Some (Expr.LVar (rename name)), false
+      | e -> Some e, true) None e |> Option.get in
+    let orient = function
+      | Expr.BinOp (LVar "#lvar_1882", Equal, LVar "#lvar_1883") when renamed ->
+          bin Equal (Expr.LVar "#lvar_1883") (Expr.LVar "#lvar_1882")
+      | e -> e in
+    let fs = Expr.Set.elements captured |> List.map (fun e -> move (orient e))
+      |> Expr.Set.of_list in
+    let gamma = Hashtbl.create 11 in
+    List.iter (fun (name,typ) -> Hashtbl.add gamma (rename name) typ) bindings;
+    fs,gamma,rename in
+  let atoms x y reverse =
+    let a = Expr.LVar x and b = Expr.LVar y in
+    let failed = not_ (bin FLessThanEqual (Expr.num (-. Float.max_float))
+      (bin FMinus (Expr.num 4294967295.) (bin FPlus a (Expr.num 1.)))) in
+    let link = if reverse then bin Equal b a else bin Equal a b in
+    failed,link,bin FLessThanEqual (bin FPlus b (Expr.num 1.))
+      (Expr.num 4294967295.) in
+  let gamma_for names =
+    let gamma = Hashtbl.create (List.length names) in
+    List.iter (fun name -> Hashtbl.add gamma name Type.NumberType) names;gamma in
+  let compact text = String.to_seq text
+    |> Seq.filter (fun c -> not (List.mem c [' ';'\t';'\r';'\n']))
+    |> String.of_seq in
+  let occurrences needle text =
+    let rec count from found =
+      if from + String.length needle > String.length text then found else
+      count (from + 1) (found + if String.sub text from (String.length needle)
+        = needle then 1 else 0) in count 0 0 in
+  let run_core label fs gamma x y reverse =
+    let failed,link,upper = atoms x y reverse in
+    let core = Expr.Set.of_list [failed;link;upper] in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    Alcotest.(check bool) (label ^ " three distinct proper original atoms") true
+      (Expr.Set.cardinal core = 3 && Expr.Set.subset core fs
+       && Expr.Set.cardinal core < Expr.Set.cardinal fs);
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " public full check is UNSAT") true
+      (Option.is_none (Smt.check_sat fs gamma));
+    let row = nonblank_counter_observe label before "optional-original-core"
+      "unsat" core gamma in
+    Alcotest.(check bool) (label ^ " unchanged optional policy") true
+      (smt_result_field "raw_unknown" row = "true"
+       && smt_result_field "timeout_ms" row = "5000");
+    let dump = nonblank_counter_read (Filename.concat "gillian_smt_queries"
+      (smt_result_field "query" row)) in
+    Alcotest.(check int) (label ^ " native selected triple assertion count") 3
+      (List.length (List.filter (String.starts_with ~prefix:"assert")
+        (String.split_on_char '(' dump)));
+    let encoded name = "$$" ^ String.sub name 1 (String.length name - 1) in
+    let x = encoded x and y = encoded y in
+    let expected = [Fmt.str "(assert(not(fp.leq((_to_fp1153)#xffefffffffffffff)(fp.subRNE((_to_fp1153)#x41efffffffe00000)(fp.addRNE%s((_to_fp1153)#x3ff0000000000000))))))" x;
+      Fmt.str "(assert(fp.eq%s%s))" (if reverse then y else x)
+        (if reverse then x else y);Fmt.str "(assert(fp.leq(fp.addRNE%s((_to_fp1153)#x3ff0000000000000))((_to_fp1153)#x41efffffffe00000)))" y] in
+    Alcotest.(check bool) (label ^ " native original encoded triple and MAXFINITE bits") true
+      (List.for_all (fun needle -> occurrences needle (compact dump) = 1) expected);
+    Alcotest.(check bool) (label ^ " no required fallback after native core") true
+      (List.for_all (fun row -> smt_result_field "caller" row <> "required-complete")
+        (symbolic_prefix_new_rows before));
+    nonblank_counter_retained label fs gamma original types in
+  List.iter (fun renamed ->
+    let fs,gamma,rename = fixture renamed in
+    run_core (if renamed then "alias-sub-colliding-renamed-reversed" else "alias-sub-captured")
+      fs gamma (rename "#lvar_1882") (rename "#lvar_1883") renamed) [false;true];
+  List.iter (fun (label,a,b,reverse) ->
+    let x = "#alias_sub_zero_x_" ^ label and y = "#alias_sub_zero_y_" ^ label in
+    let failed,link,upper = atoms x y reverse in
+    let fs = Expr.Set.of_list [failed;link;upper;Expr.bool true;
+      bin ValueEqual (Expr.LVar x) (Expr.num a);
+      bin ValueEqual (Expr.LVar y) (Expr.num b)] in
+    run_core ("alias-sub-zero-" ^ label) fs (gamma_for [x;y]) x y reverse)
+    ["positive-negative",0.,(-0.),false;"negative-positive",(-0.),0.,true];
+  List.iter (fun missing ->
+    let label = "alias-sub-without-" ^ missing in
+    let x = "#" ^ label ^ "_x" and y = "#" ^ label ^ "_y" in
+    let failed,link,upper = atoms x y false in
+    (* TRUE makes proper-subset eligibility possible without supplying a
+       removed premise or imposing finiteness/integrality on this weak frame. *)
+    let fs = Expr.Set.of_list (Expr.bool true ::
+      List.filter_map (fun (name,e) -> if name = missing then None else Some e)
+        ["goal",failed;"alias",link;"upper",upper]) in
+    let gamma = gamma_for [x;y] in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let model = match Smt.check_sat fs gamma with Some model -> model
+      | None -> Alcotest.fail (label ^ " missing actual native SAT model") in
+    Printf.printf "ALIAS_SUBTRACTION_NATIVE_MODEL[%s]=%s\n%!" label
+      (Fmt.str "%a" Smt.pp_model model);
+    let row = nonblank_counter_observe label before "required-complete" "sat" fs gamma in
+    Alcotest.(check bool) (label ^ " unchanged required policy") true
+      (smt_result_field "raw_unknown" row = "false"
+       && smt_result_field "timeout_ms" row = "30000");
+    Alcotest.(check bool) (label ^ " missing premise declines original core") true
+      (List.for_all (fun row -> smt_result_field "caller" row <> "optional-original-core")
+        (symbolic_prefix_new_rows before));
+    nonblank_counter_retained label fs gamma original types) ["alias";"upper";"goal"];
+  List.iter (fun structural ->
+    let label = if structural then "alias-sub-structural-not-numeric-equality"
+      else "alias-sub-ambiguous-onehop" in
+    let x = "#" ^ label ^ "_x" and y = "#" ^ label ^ "_y"
+    and z = "#" ^ label ^ "_z" in
+    let failed,link,upper = atoms x y false in
+    let fs = Expr.Set.of_list (if structural then
+      [failed;bin ValueEqual (Expr.LVar x) (Expr.LVar y);upper;Expr.bool true]
+      else [failed;link;upper;bin Equal (Expr.LVar x) (Expr.LVar z);Expr.bool true]) in
+    let gamma = gamma_for (if structural then [x;y] else [x;y;z]) in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " original complete fallback UNSAT") true
+      (Option.is_none (Smt.check_sat fs gamma));
+    let row = nonblank_counter_observe label before "required-complete" "unsat" fs gamma in
+    Alcotest.(check bool) (label ^ " required policy and original selector refusal") true
+      (smt_result_field "raw_unknown" row = "false"
+       && smt_result_field "timeout_ms" row = "30000"
+       && List.for_all (fun row -> smt_result_field "caller" row <> "optional-original-core")
+            (symbolic_prefix_new_rows before));
+    nonblank_counter_retained label fs gamma original types) [false;true];
+  Printf.printf "ALIAS_SUBTRACTION_CONTROLS_FINISHED\n%!")
+
+(* Exact original create_arguments_object rank atoms. The encoded goal below
+   is copied from the retained context, not computed from a test outcome. *)
+let literal_rank_split_controls () = with_nonblank_counter_trace (fun () ->
+  Alcotest.(check bool) "literal rank ordinary timeout environment" true
+    (Sys.getenv_opt "SMT_TIMEOUT" = None);
+  (* Expr identity is reflexive at NaN and preserves signed-zero/payload bits;
+     the shared legacy retention helper and all old groups stay unchanged. *)
+  let retained label fs gamma before before_types =
+    Alcotest.(check bool) (label ^ " original FS unchanged") true
+      (List.equal Expr.equal before (Expr.Set.elements fs));
+    Alcotest.(check bool) (label ^ " original Gamma unchanged") true
+      (before_types = nonblank_counter_types gamma)
+  in
+  let captured_encoded_goal = Sexplib.Sexp.of_string {rank_smt|(assert
+ (or
+  (<
+   (ite
+    (and
+     (fp.eq (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+      (fp.roundToIntegral RTZ
+       (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))))
+     (and
+      (fp.leq ((_ to_fp 11 53) #x0000000000000000)
+       (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000)))
+      (fp.lt (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+       ((_ to_fp 11 53) #x41efffffffe00000))))
+    (+
+     (ite
+      (and
+       (fp.leq ((_ to_fp 11 53) #x40f0000000000000)
+        (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000)))
+       (fp.lt (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+        ((_ to_fp 11 53) #x41f0000000000000)))
+      (bv2int
+       ((_ fp.to_ubv 32) RTZ
+        (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))))
+      (ite
+       (and
+        (fp.leq ((_ to_fp 11 53) #x0000000000000000)
+         (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000)))
+        (fp.lt (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+         ((_ to_fp 11 53) #x40f0000000000000)))
+       (bv2int
+        ((_ fp.to_ubv 16) RTZ
+         (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))))
+       (to_int
+        (fp.to_real
+         (fp.roundToIntegral RTZ
+          (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000)))))))
+     1)
+    (ite
+     (and
+      (fp.leq ((_ to_fp 11 53) #x40f0000000000000)
+       (fp.add RNE
+        (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+        ((_ to_fp 11 53) #x3ff0000000000000)))
+      (fp.lt
+       (fp.add RNE
+        (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+        ((_ to_fp 11 53) #x3ff0000000000000))
+       ((_ to_fp 11 53) #x41f0000000000000)))
+     (bv2int
+      ((_ fp.to_ubv 32) RTZ
+       (fp.add RNE
+        (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+        ((_ to_fp 11 53) #x3ff0000000000000))))
+     (ite
+      (and
+       (fp.leq ((_ to_fp 11 53) #x0000000000000000)
+        (fp.add RNE
+         (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+         ((_ to_fp 11 53) #x3ff0000000000000)))
+       (fp.lt
+        (fp.add RNE
+         (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+         ((_ to_fp 11 53) #x3ff0000000000000))
+        ((_ to_fp 11 53) #x40f0000000000000)))
+      (bv2int
+       ((_ fp.to_ubv 16) RTZ
+        (fp.add RNE
+         (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+         ((_ to_fp 11 53) #x3ff0000000000000))))
+      (to_int
+       (fp.to_real
+        (fp.roundToIntegral RTZ
+         (fp.add RNE
+          (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+          ((_ to_fp 11 53) #x3ff0000000000000))))))))
+   0)
+  (<=
+   (ite
+    (and (fp.eq $$lvar_165 (fp.roundToIntegral RTZ $$lvar_165))
+     (and (fp.leq ((_ to_fp 11 53) #x0000000000000000) $$lvar_165)
+      (fp.lt $$lvar_165 ((_ to_fp 11 53) #x41efffffffe00000))))
+    (+
+     (ite
+      (and (fp.leq ((_ to_fp 11 53) #x40f0000000000000) $$lvar_165)
+       (fp.lt $$lvar_165 ((_ to_fp 11 53) #x41f0000000000000)))
+      (bv2int ((_ fp.to_ubv 32) RTZ $$lvar_165))
+      (ite
+       (and (fp.leq ((_ to_fp 11 53) #x0000000000000000) $$lvar_165)
+        (fp.lt $$lvar_165 ((_ to_fp 11 53) #x40f0000000000000)))
+       (bv2int ((_ fp.to_ubv 16) RTZ $$lvar_165))
+       (to_int (fp.to_real (fp.roundToIntegral RTZ $$lvar_165)))))
+     1)
+    (ite
+     (and
+      (fp.leq ((_ to_fp 11 53) #x40f0000000000000)
+       (fp.add RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000)))
+      (fp.lt (fp.add RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+       ((_ to_fp 11 53) #x41f0000000000000)))
+     (bv2int
+      ((_ fp.to_ubv 32) RTZ
+       (fp.add RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))))
+     (ite
+      (and
+       (fp.leq ((_ to_fp 11 53) #x0000000000000000)
+        (fp.add RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000)))
+       (fp.lt (fp.add RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+        ((_ to_fp 11 53) #x40f0000000000000)))
+      (bv2int
+       ((_ fp.to_ubv 16) RTZ
+        (fp.add RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))))
+      (to_int
+       (fp.to_real
+        (fp.roundToIntegral RTZ
+         (fp.add RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))))))))
+   (ite
+    (and
+     (fp.eq (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+      (fp.roundToIntegral RTZ
+       (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))))
+     (and
+      (fp.leq ((_ to_fp 11 53) #x0000000000000000)
+       (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000)))
+      (fp.lt (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+       ((_ to_fp 11 53) #x41efffffffe00000))))
+    (+
+     (ite
+      (and
+       (fp.leq ((_ to_fp 11 53) #x40f0000000000000)
+        (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000)))
+       (fp.lt (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+        ((_ to_fp 11 53) #x41f0000000000000)))
+      (bv2int
+       ((_ fp.to_ubv 32) RTZ
+        (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))))
+      (ite
+       (and
+        (fp.leq ((_ to_fp 11 53) #x0000000000000000)
+         (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000)))
+        (fp.lt (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+         ((_ to_fp 11 53) #x40f0000000000000)))
+       (bv2int
+        ((_ fp.to_ubv 16) RTZ
+         (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))))
+       (to_int
+        (fp.to_real
+         (fp.roundToIntegral RTZ
+          (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000)))))))
+     1)
+    (ite
+     (and
+      (fp.leq ((_ to_fp 11 53) #x40f0000000000000)
+       (fp.add RNE
+        (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+        ((_ to_fp 11 53) #x3ff0000000000000)))
+      (fp.lt
+       (fp.add RNE
+        (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+        ((_ to_fp 11 53) #x3ff0000000000000))
+       ((_ to_fp 11 53) #x41f0000000000000)))
+     (bv2int
+      ((_ fp.to_ubv 32) RTZ
+       (fp.add RNE
+        (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+        ((_ to_fp 11 53) #x3ff0000000000000))))
+     (ite
+      (and
+       (fp.leq ((_ to_fp 11 53) #x0000000000000000)
+        (fp.add RNE
+         (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+         ((_ to_fp 11 53) #x3ff0000000000000)))
+       (fp.lt
+        (fp.add RNE
+         (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+         ((_ to_fp 11 53) #x3ff0000000000000))
+        ((_ to_fp 11 53) #x40f0000000000000)))
+      (bv2int
+       ((_ fp.to_ubv 16) RTZ
+        (fp.add RNE
+         (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+         ((_ to_fp 11 53) #x3ff0000000000000))))
+      (to_int
+       (fp.to_real
+        (fp.roundToIntegral RTZ
+         (fp.add RNE
+          (fp.sub RNE $$lvar_165 ((_ to_fp 11 53) #x3ff0000000000000))
+          ((_ to_fp 11 53) #x3ff0000000000000)))))))))))|rank_smt} in
+  let atoms name value reverse step =
+    let n = Expr.LVar name in
+    let rank = Expr.UnOp (NumToInt,
+      bin FPlus (bin FMinus n (Expr.num step)) (Expr.num step)) in
+    let p = if reverse then bin Equal (Expr.num value) n
+      else bin Equal n (Expr.num value) in
+    let q = bin Or (bin ILessThan rank (Expr.int 0))
+      (bin ILessThanEqual (Expr.UnOp (NumToInt, bin FPlus n (Expr.num step))) rank) in
+    p,q in
+  let gamma_for name =
+    let g = Hashtbl.create 2 in Hashtbl.add g name Type.NumberType;g in
+  let identity name value = bin ValueEqual (Expr.LVar name) (Expr.num value) in
+  let encoded name = "$$" ^ String.sub name 1 (String.length name - 1) in
+  let native_number value = Fmt.str "((_ to_fp 11 53) #x%016Lx)"
+    (Int64.bits_of_float value) in
+  let native_identity name value = Fmt.str "(= (Elem (Num %s)) (Elem (Num %s)))"
+    (encoded name) (native_number value) in
+  let rec rename_goal name = function
+    | Sexplib.Sexp.Atom "$$lvar_165" -> Sexplib.Sexp.Atom (encoded name)
+    | Sexplib.Sexp.List xs -> Sexplib.Sexp.List (List.map (rename_goal name) xs)
+    | atom -> atom in
+  let native_assertions row =
+    let text = nonblank_counter_read (Filename.concat "gillian_smt_queries"
+      (smt_result_field "query" row)) in
+    let marker = "Encoded as SMT Query:\n" in
+    let rec offset i =
+      if i + String.length marker > String.length text then
+        Alcotest.fail "literal rank missing native encoded section"
+      else if String.sub text i (String.length marker) = marker then
+        i + String.length marker else offset (i + 1) in
+    let start = offset 0 in
+    Sexplib.Sexp.scan_sexps (Lexing.from_string
+      (String.sub text start (String.length text - start)))
+    |> List.filter (function
+      | Sexplib.Sexp.List (Sexplib.Sexp.Atom "assert" :: _) -> true
+      | _ -> false) in
+  let observe label row expected gamma name value reverse mode =
+    (* Select one actual result row for the existing full FS/Gamma hook; no
+       solver replay or synthetic result attribution is performed. *)
+    let others = nonblank_counter_rows () |> List.filter ((<>) row) in
+    ignore (nonblank_counter_observe label others "optional-unsat"
+      (if mode = `SatBranch then "sat" else "unsat") expected gamma);
+    Alcotest.(check bool) (label ^ " unchanged optional policy") true
+      (smt_result_field "timeout_ms" row = "5000"
+       && smt_result_field "phase_selection" row = "3"
+       && smt_result_field "raw_unknown" row = "true");
+    let native_p = Sexplib.Sexp.of_string (Fmt.str "(assert (fp.eq %s %s))"
+      (if reverse then native_number value else encoded name)
+      (if reverse then encoded name else native_number value)) in
+    let literals = if value = 0. then [0.; Int64.float_of_bits Int64.min_int]
+      else [value] in
+    let expected_assertions = match mode with
+      | `Coverage ->
+          let uncovered = match literals with
+            | [one] -> "(not " ^ native_identity name one ^ ")"
+            | [a;b] -> Fmt.str "(and (not %s) (not %s))"
+                (native_identity name a) (native_identity name b)
+            | _ -> Alcotest.fail "literal rank impossible coverage" in
+          [native_p;Sexplib.Sexp.of_string ("(assert " ^ uncovered ^ ")")]
+      | (`Branch _ | `SatBranch) ->
+          let branch_value = match mode with `Branch bits -> Int64.float_of_bits bits
+            | _ -> value in
+          [native_p;rename_goal name captured_encoded_goal;
+           Sexplib.Sexp.of_string ("(assert " ^ native_identity name branch_value ^ ")")] in
+    Alcotest.(check bool) (label ^ " exact original p/q and wrapped IEEE case atoms") true
+      (List.sort Stdlib.compare (native_assertions row)
+       = List.sort Stdlib.compare expected_assertions) in
+  let positive label name value reverse captured =
+    let p,q = atoms name value reverse 1. in
+    let gamma = gamma_for name in
+    let fs = if captured then (
+      Hashtbl.add gamma "#value0" Type.NumberType;
+      Expr.Set.of_list [p;q;bin FLessThanEqual (Expr.num 0.) (Expr.LVar name);
+        bin ValueEqual (Expr.LVar "#lvar_180") (Expr.LVar "#value0")])
+      else Expr.Set.of_list [p;q;Expr.bool true] in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " public full check UNSAT") true
+      (Option.is_none (Smt.check_sat fs gamma));
+    let rows = symbolic_prefix_new_rows before in
+    let values = if value = 0. then [0.;Int64.float_of_bits Int64.min_int]
+      else [value] in
+    Alcotest.(check int) (label ^ " coverage followed by every signed branch")
+      (1 + List.length values) (List.length rows);
+    let covered = match values with
+      | [one] -> identity name one
+      | [a;b] -> bin Or (identity name a) (identity name b)
+      | _ -> Alcotest.fail "literal rank impossible case list" in
+    observe (label ^ "-coverage") (List.hd rows)
+      (Expr.Set.of_list [p;not_ covered]) gamma name value reverse `Coverage;
+    List.iter2 (fun row branch -> observe (label ^ "-branch") row
+      (Expr.Set.of_list [p;q;identity name branch]) gamma name value reverse
+      (`Branch (Int64.bits_of_float branch))) (List.tl rows) values;
+    retained label fs gamma original types in
+  positive "literal-rank-captured" "#lvar_165" 0. false true;
+  positive "literal-rank-alpha-reversed" "#literal_rank_alpha" 0. true true;
+  positive "literal-rank-finite-one" "#literal_rank_one" 1. false false;
+  let name = "#literal_rank_plateau" and value = 9007199254740992. in
+  let p,q = atoms name value false 1. in
+  let gamma = gamma_for name in
+  let fs = Expr.Set.of_list [p;q;identity name value;Expr.bool true] in
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let model = match Smt.check_sat fs gamma with Some m -> m
+    | None -> Alcotest.fail "literal rank nonzero plateau must have native SAT model" in
+  let rows = symbolic_prefix_new_rows before |> List.filter (fun row ->
+    smt_result_field "caller" row = "optional-unsat") in
+  Alcotest.(check int) "literal rank plateau coverage and failed branch" 2 (List.length rows);
+  observe "literal-rank-plateau-coverage" (List.hd rows)
+    (Expr.Set.of_list [p;not_ (identity name value)]) gamma name value false `Coverage;
+  observe "literal-rank-plateau-SAT" (List.nth rows 1)
+    (Expr.Set.of_list [p;q;identity name value]) gamma name value false `SatBranch;
+  ignore (nonblank_counter_observe "literal-rank-plateau-fallback" before
+    "required-complete" "sat" fs gamma);
+  primary_check_lift "literal-rank-plateau" model gamma [name,Literal.Num value];
+  retained "literal-rank-plateau" fs gamma original types;
+  List.iter (fun (label,value,step,ambiguous) ->
+    let name = "#literal_rank_guard_" ^ label in
+    let p,q = atoms name value false step in
+    (* FALSE is only a test frame to make complete fallback cheap; it is not
+       selected by the new helper or asserted in a production branch. *)
+    let fs = Expr.Set.of_list ([p;q;Expr.bool false] @
+      if ambiguous then [bin Equal (Expr.LVar name) (Expr.num 1.)] else []) in
+    let gamma = gamma_for name in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " complete false test frame remains UNSAT") true
+      (Option.is_none (Smt.check_sat fs gamma));
+    Alcotest.(check bool) (label ^ " literal split refuses without native branch probes") true
+      (List.for_all (fun row -> smt_result_field "caller" row <> "optional-unsat")
+        (symbolic_prefix_new_rows before));
+    retained label fs gamma original types)
+    ["NaN",Float.nan,1.,false;"infinity",Float.infinity,1.,false;
+     "wrong-step",0.,2.,false;"ambiguous",0.,1.,true];
+  let name = "#literal_rank_wrong_type" in
+  let p,q = atoms name 0. false 1. in
+  let fs = Expr.Set.of_list [p;q;Expr.bool false] in
+  let gamma = Hashtbl.create 1 in Hashtbl.add gamma name Type.BooleanType;
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let rejected = try ignore (Smt.check_sat fs gamma);false with
+    | Smt.SMT_error message -> message = "incompatible equality, type error!" in
+  Alcotest.(check bool) "literal rank wrong Gamma retains ordinary type rejection" true rejected;
+  Alcotest.(check bool) "literal rank wrong Gamma issues no strengthened probe" true
+    (List.for_all (fun row -> smt_result_field "caller" row <> "optional-unsat")
+      (symbolic_prefix_new_rows before));
+  retained "literal-rank-wrong-type" fs gamma original types;
+  Printf.printf "LITERAL_RANK_SPLIT_CONTROLS_FINISHED\n%!")
+
+(* Literal endpoints use the same original-fact/native-UNSAT path as variables.
+   These public-call fixtures cover selector use and genuine overflow controls;
+   they do not claim to reproduce the entire saved Input query. *)
+let literal_finite_difference_controls () = with_nonblank_counter_trace (fun () ->
+  let caller = "optional-entailment-finite-difference-core" in
+  let frame label =
+    let i = Expr.LVar ("#literal_difference_" ^ label) in
+    let g = index_difference_context ["#literal_difference_" ^ label] in
+    i,g in
+  let goal upper finish start =
+    let difference = bin FMinus (Expr.num finish) start in
+    if upper then bin FLessThanEqual difference (Expr.num Float.max_float)
+    else bin FLessThanEqual (Expr.num (-. Float.max_float)) difference in
+  List.iter (fun (label,successor,upper,strict,reverse) ->
+    let i,g = frame label in
+    let start = if successor then bin FPlus i (Expr.num 1.) else i in
+    let wanted = goal upper 4294967295. start in
+    let order = if upper then bin FLessThanEqual (Expr.num 0.) i
+      else bin (if strict then FLessThan else FLessThanEqual)
+        start (Expr.num 4294967295.) in
+    let integral = Expr.UnOp (IsInt,start) in
+    let facts = Expr.Set.of_list [integral;order;
+      bin FLessThanEqual (Expr.num 0.) i;
+      bin FLessThanEqual i (Expr.num 4294967294.);
+      Expr.UnOp (IsInt,i)] in
+    let core = Expr.Set.of_list [not_ wanted;integral;order] in
+    let full = Expr.Set.add (not_ wanted) facts in
+    Alcotest.(check bool) (label ^ " only original atoms and proper weakening") true
+      (Expr.Set.subset core full && not (Expr.Set.equal core full));
+    Alcotest.(check bool) (label ^ " raw selector preserves the exact original core") true
+      (match Solver.finite_difference_core full (Gamma.as_hashtbl g) (not_ wanted) with
+       | Some selected -> Expr.Set.equal selected core
+       | None -> false);
+    Alcotest.(check bool) (label ^ " equal full/core set is not a weakening") true
+      (Option.is_none
+        (Solver.finite_difference_core core (Gamma.as_hashtbl g) (not_ wanted)));
+    let before = strict_successor_public ~reverse label true facts wanted g in
+    let row = nonblank_counter_observe label before caller "unsat" core
+      (Gamma.as_hashtbl g) in
+    Alcotest.(check int) (label ^ " exactly three actual native core atoms") 3
+      (Expr.Set.cardinal core);
+    Alcotest.(check string) (label ^ " unchanged optional cap") "5000"
+      (smt_result_field "timeout_ms" row);
+    Alcotest.(check string) (label ^ " optional UNKNOWN stays inconclusive") "true"
+      (smt_result_field "raw_unknown" row);
+    Alcotest.(check int) (label ^ " native core, no fallback or cache credit") 1
+      (List.length (symbolic_prefix_new_rows before)))
+    ["direct-lower",false,false,false,false;
+     "strict-direct-lower",false,false,true,true;
+     "successor-lower",true,false,false,false;
+     "successor-lower-renamed-reordered",true,false,false,true;
+     "direct-upper",false,true,false,false;
+     "successor-upper",true,true,false,false];
+  List.iter (fun (label,upper,finish,value) ->
+    let i,g = frame label in
+    let wanted = goal upper finish i in
+    let facts = Expr.Set.of_list [Expr.UnOp (IsInt,i);
+      bin ValueEqual i (Expr.num value)] in
+    Alcotest.(check bool) (label ^ " raw selector declines absent order") true
+      (Option.is_none (Solver.finite_difference_core
+        (Expr.Set.add (not_ wanted) facts) (Gamma.as_hashtbl g) (not_ wanted)));
+    ignore (strict_successor_public label false facts wanted g);
+    let full = Expr.Set.add (not_ wanted) facts in
+    let before = nonblank_counter_rows () in
+    let model = match Smt.exec_sat full (Gamma.as_hashtbl g) with
+      | Some model -> model
+      | None -> Alcotest.fail "Missing literal-endpoint overflow countermodel" in
+    ignore (nonblank_counter_observe label before "required-complete" "sat" full
+      (Gamma.as_hashtbl g));
+    let lifted = Hashtbl.create 1 in
+    Smt.lift_model model (Gamma.as_hashtbl g) (Hashtbl.add lifted)
+      (Expr.Set.singleton i);
+    let concrete e = Expr.map_opt (function
+      | Expr.LVar name -> Hashtbl.find_opt lifted name,false
+      | e -> Some e,true) None e |> Option.get in
+    Alcotest.(check bool) (label ^ " native model replays all premises") true
+      (Expr.Set.for_all (fun e -> slice_bound_truth (concrete e)) facts);
+    Alcotest.(check bool) (label ^ " native model falsifies finite bound") false
+      (slice_bound_truth (concrete wanted)))
+    ["missing-lower-order",false,(-. Float.max_float),Float.max_float;
+     "missing-upper-nonnegative",true,Float.max_float,(-. Float.max_float)];
+  let i,g = frame "missing-integrality" in
+  let wanted = goal false 4294967295. i in
+  let facts = Expr.Set.of_list [bin FLessThanEqual (Expr.num 0.) i;
+    bin FLessThanEqual i (Expr.num 4294967295.)] in
+  Alcotest.(check bool) "raw missing integrality declines selector" true
+    (Option.is_none (Solver.finite_difference_core
+      (Expr.Set.add (not_ wanted) facts) (Gamma.as_hashtbl g) (not_ wanted)));
+  ignore (strict_successor_public "missing-integrality" true facts wanted g);
+  List.iter (fun (label,finish,wanted_result) ->
+    let i,g = frame label in
+    let wanted = goal true finish i in
+    let facts = Expr.Set.of_list [Expr.UnOp (IsInt,i);
+      bin FLessThanEqual (Expr.num 0.) i;
+      bin ValueEqual i (Expr.num 0.)] in
+    (* Test the exact original set before any public simplifier substitutes i.
+       The following public result is edge behavior, not selector evidence. *)
+    Alcotest.(check bool) (label ^ " raw endpoint guard declines selector") true
+      (Option.is_none (Solver.finite_difference_core
+        (Expr.Set.add (not_ wanted) facts) (Gamma.as_hashtbl g) (not_ wanted)));
+    ignore (strict_successor_public label wanted_result facts wanted g))
+    ["fractional-literal",0.5,true;"NaN-literal",Float.nan,false;
+     "positive-infinite-literal",Float.infinity,false;
+     "negative-infinite-literal",(-. Float.infinity),true])
+
 let tests =
   [
     Alcotest.test_case "sufficient proof and false goal" `Quick
@@ -1437,4 +12467,5041 @@ let tests =
     Alcotest.test_case "empty-length core sufficient check and rejections"
       `Quick
       (with_total length_zero_core);
+    Alcotest.test_case "original UTF16 code-order core and counterexamples"
+      `Quick (with_total utf16_code_order_core);
+    Alcotest.test_case "original finite_add shared core" `Quick
+      (with_total original_finite_add_core);
+    Alcotest.test_case "original code_upper shared core" `Quick
+      (with_total original_code_upper_core);
+    Alcotest.test_case "original length_index shared core" `Quick
+      (with_total original_length_index_core);
+    Alcotest.test_case "complete numeric dependencies avoid focused loss" `Quick
+      (with_total numeric_dependency_focus);
+    Alcotest.test_case "original mask_lower core" `Quick
+      (with_total original_mask_lower_core);
+    Alcotest.test_case "original mask_upper core" `Quick
+      (with_total original_mask_upper_core);
+    Alcotest.test_case "original mask_complement core" `Quick
+      (with_total original_mask_complement_core);
+    Alcotest.test_case "original numeric length projection and collisions" `Quick
+      (with_total original_length_projection);
+    Alcotest.test_case "UTF16 integer lengths retain numeric aliases" `Quick
+      (with_total utf16_length_alias_contained);
+    Alcotest.test_case "UTF16 focused lengths retain numeric dependencies" `Quick
+      (with_total utf16_length_focused_dependencies);
+    Alcotest.test_case "simplified rank goal retains numeric pieces" `Quick
+      (with_total simplified_rank_goal);
+    Alcotest.test_case "positive array counter keeps complete SAT query" `Quick
+      (with_total (array_counter_witness false));
+    Alcotest.test_case "zero array counter keeps complete SAT query" `Quick
+      (with_total (array_counter_witness true));
+    Alcotest.test_case "array predecessor keeps complete SAT query" `Quick
+      (with_total array_predecessor_witness);
+    Alcotest.test_case "independent array counters retain complete SAT query" `Quick
+      (with_total independent_array_counters);
+    Alcotest.test_case "carried counter roots retain complete SAT query" `Quick
+      (with_total carried_counter_witness);
+    Alcotest.test_case "singleton surrogate retains complete SAT query" `Quick
+      (with_total singleton_surrogate_witness);
+    Alcotest.test_case "fixed pair retains complete SAT query" `Quick
+      (with_total fixed_pair_witness);
+    Alcotest.test_case "paired surrogate retains complete SAT query" `Quick
+      (with_total paired_surrogate_witness);
+    Alcotest.test_case "ordinary singleton retains complete SAT query" `Quick
+      (with_total ordinary_singleton_witness);
+    Alcotest.test_case "carried bounds retain complete SAT query" `Quick
+      (with_total carried_bounds_witness);
+    Alcotest.test_case "literal-bound chain retains complete SAT query" `Quick
+      (with_total fixed_chain_witness);
+    Alcotest.test_case "bounded root preserves complete list query" `Quick
+      (with_total bounded_counter_witness);
+    Alcotest.test_case "rank disjunction uses original numeric cases" `Quick
+      (with_total rank_case_split);
+    Alcotest.test_case "original list-prefix restoration core" `Quick
+      (with_total list_prefix_restore);
+    Alcotest.test_case "original inverse list-prefix restoration core" `Quick
+      (with_total list_prefix_only_restore);
+    Alcotest.test_case "bounded natural counters retain complete SAT query" `Quick
+      (with_total natural_counter_query);
+    Alcotest.test_case "original literal counter contradiction core" `Quick
+      (with_total literal_counter_contradiction);
+    Alcotest.test_case "integer count bounds retain original aliases" `Quick
+      (with_total integer_order_count_core);
+    Alcotest.test_case "Uint32 aliases retain complete counterqueries" `Quick
+      (with_total uint32_alias_complete_query);
+    Alcotest.test_case "integer comparisons are Boolean values" `Quick
+      (with_total integer_comparison_boolean_values);
+    Alcotest.test_case "guarded index difference native strict descent" `Quick
+      (with_total index_difference_strict_descent);
+    Alcotest.test_case "guarded index difference native signed identity" `Quick
+      (with_total index_difference_signed);
+    Alcotest.test_case "guarded index difference fractional fallback models" `Quick
+      (with_total index_difference_fractional);
+    Alcotest.test_case "guarded index difference outside-range fallback models" `Quick
+      (with_total index_difference_outside_uint32);
+    Alcotest.test_case "nested guarded difference checked-state and boundary models" `Quick
+      (with_total index_difference_nested_checked);
+    Alcotest.test_case "nested guarded difference isolated fallback models" `Quick
+      (with_total index_difference_nested_fallbacks);
+    Alcotest.test_case "reached nested difference nonnegativity" `Quick
+      (with_total index_difference_nonnegative);
+    Alcotest.test_case "nested difference sign boundary and fallback models" `Quick
+      (with_total index_difference_sign_models);
+    Alcotest.test_case "original finite difference cores and endpoint countermodels" `Quick
+      (with_total (fun () -> finite_difference_original_cores ();
+        finite_difference_strict_order_controls ()));
+    Alcotest.test_case "direct difference original bounds nonnegativity" `Quick
+      (with_total index_difference_direct_bounds);
+    Alcotest.test_case "direct difference sign boundary and fallback models" `Quick
+      (with_total index_difference_direct_models);
+    Alcotest.test_case "ordered natural counters retain complete native SAT query" `Quick
+      (with_total ordered_natural_counter_query);
+    Alcotest.test_case "nested finite lower bound original core and countermodels" `Quick
+      (with_total nested_finite_difference_original_core);
+    Alcotest.test_case "nested finite upper bound original core and countermodels" `Quick
+      (with_total nested_upper_finite_difference_original_core);
+    Alcotest.test_case "trimmed natural counters complete native witness and rejection" `Quick
+      (with_total trimmed_natural_counter_query);
+    Alcotest.test_case "successor order original core and native countermodels" `Quick
+      (with_total (fun () -> successor_order_original_core ();
+        successor_ceiling_original_controls ();
+        original_successor_alias_fact_controls ()));
+    Alcotest.test_case "aliased-counter original native SAT witness" `Quick
+      (with_total aliased_counter_original_witness);
+    Alcotest.test_case "nonempty-counter original native SAT witness" `Quick
+      (with_total nonempty_counter_original_witness);
+    Alcotest.test_case "native SMT causal result attribution" `Quick
+      (with_total smt_causal_observability);
+    Alcotest.test_case "pure numeric goals retain complete bridge queries" `Quick
+      (with_total numeric_contained_eligibility);
+    Alcotest.test_case "numeric cast goals retain complete fallback and native models" `Quick
+      (with_total numeric_cast_probe_eligibility);
+    Alcotest.test_case "focused formatter goals retain complete native queries" `Quick
+      (with_total focused_formatter_probe_eligibility);
+    Alcotest.test_case "nonblank Keep full-frame native SAT and literal models" `Quick
+      (with_total nonblank_counter_native_query);
+    Alcotest.test_case "nonblank full-frame contradiction requires native UNSAT fallback" `Quick
+      (with_total nonblank_counter_full_frame_rejection);
+    Alcotest.test_case "nonblank structural aliases preserve original native fallback" `Quick
+      (with_total nonblank_counter_alias_fallback);
+    Alcotest.test_case "nonblank forced optional and required UNKNOWN contracts" `Quick
+      (with_total nonblank_counter_unknown_contract);
+    Alcotest.test_case "symbolic prefix actual final-post native UNSAT cores" `Quick
+      (with_total symbolic_prefix_full_queries);
+    Alcotest.test_case "symbolic prefix reversed and renamed native UNSAT cores" `Quick
+      (with_total symbolic_prefix_reversed_renamed);
+    Alcotest.test_case "symbolic prefix full-frame countermodels and missing-bridge fallback" `Quick
+      (with_total symbolic_prefix_negative_frames);
+    Alcotest.test_case "symbolic prefix actual optional and required UNKNOWN contracts" `Quick
+      (with_total symbolic_prefix_unknown_contract);
+    Alcotest.test_case "focused prefix length native SAT countermodels and fallback" `Quick
+      (with_total prefix_length_counter_query);
+    Alcotest.test_case "symbolic suffix captured, reversed and renamed native UNSAT cores" `Quick
+      (with_total symbolic_suffix_full_queries);
+    Alcotest.test_case "symbolic suffix reduced-domain native countermodels" `Quick
+      (with_total symbolic_suffix_reduced_countermodels);
+    Alcotest.test_case "symbolic suffix ineligible reduced-domain complete fallback" `Quick
+      (with_total symbolic_suffix_ineligible_fallbacks);
+    Alcotest.test_case "symbolic suffix actual optional and required UNKNOWN contracts" `Quick
+      (with_total symbolic_suffix_unknown_contract);
+    Alcotest.test_case "symbolic suffix all equality orientations native UNSAT cores" `Quick
+      (with_total symbolic_suffix_equality_masks);
+    Alcotest.test_case "native equality symmetry, value identity and type controls" `Quick
+      (with_total native_equality_symmetry_controls);
+    Alcotest.test_case "suffix alpha copy native inverse, namespace and model isolation" `Quick
+      (with_total suffix_alpha_copy_controls);
+    Alcotest.test_case "suffix role normalization identity, permutation and collision controls" `Quick
+      (with_total suffix_role_normalization_controls);
+    Alcotest.test_case "suffix fresh head occupied namespace and complete SAT rejection controls" `Quick
+      (with_total suffix_fresh_head_rejection_controls);
+    Alcotest.test_case "simultaneous binary64 successor order original core and causal controls" `Quick
+      (with_total symmetric_successor_order_controls);
+    Alcotest.test_case "nonblank whitespace full-frame native witnesses, order and deduplication" `Quick
+      (with_total nonblank_whitespace_native_controls);
+    Alcotest.test_case "nonblank whitespace actual first, second and required UNKNOWN contracts" `Quick
+      (with_total nonblank_whitespace_unknown_contract);
+    Alcotest.test_case "mixed list/cast contained exclusion with full native countermodels" `Quick
+      (with_total contained_list_cast_controls);
+    Alcotest.test_case "distinct nonblank captured full native models and identity controls" `Quick
+      (with_total distinct_counter_native_positives);
+    Alcotest.test_case "distinct nonblank native order deduplication and full conflicts" `Quick
+      (with_total distinct_counter_probe_and_conflict_controls);
+    Alcotest.test_case "distinct nonblank exact operator rounded typing and shape guards" `Quick
+      (with_total distinct_counter_guard_controls);
+    Alcotest.test_case "distinct nonblank ordinary model and actual forced UNKNOWN isolation" `Quick
+      (with_total distinct_counter_forced_unknown_controls);
+    Alcotest.test_case "nonzero pure-list complete native witness and fallback controls" `Quick
+      (with_total admission_nonzero_seed_controls);
   ]
+  @ (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+     | Some _ ->
+         [
+           Alcotest.test_case "pending query preserves original SAT and entailment operations" `Quick
+             (with_total pending_context_original_operations);
+           Alcotest.test_case "pending query nested and exceptional scopes restore" `Quick
+             (with_total pending_context_nested_exception);
+         ]
+     | None ->
+         [
+           Alcotest.test_case "pending query unset path preserves lazy native behavior" `Quick
+             (with_total pending_context_unset);
+         ])
+
+  @ (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+     | Some _ ->
+         [
+           Alcotest.test_case "direct command Normal file-only native snapshot" `Quick
+             (with_total direct_parent_normal_native);
+           Alcotest.test_case "direct command nested exception and state clone isolation" `Quick
+             (with_total direct_parent_nested_states);
+           Alcotest.test_case "direct command snapshot unavailable boundaries" `Quick
+             (with_total direct_parent_unavailable);
+         ]
+     | None ->
+         [
+           Alcotest.test_case "direct command unset serializer remains lazy" `Quick
+             (with_total direct_parent_unset);
+         ])
+
+  @ [
+      Alcotest.test_case "primary preprocessing restores eliminated integer aliases" `Quick
+        (with_total primary_check_integer_aliases);
+      Alcotest.test_case "primary preprocessing preserves typed native alias models" `Quick
+        (with_total primary_check_typed_aliases);
+      Alcotest.test_case "primary preprocessing restores declarations resets and cached models" `Quick
+        (with_total primary_check_declarations_and_cache);
+    ]
+
+  @ (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+     | Some _ ->
+         [ Alcotest.test_case "primary phase policy" `Quick
+             (with_total primary_phase_policy) ]
+     | None -> [])
+
+
+  @ [
+      Alcotest.test_case "slice-bound public symbolic snoc-tail bridges" `Quick
+        (with_total slice_bound_symbolic_controls);
+      Alcotest.test_case "slice-bound concrete sequences and bit boundaries" `Quick
+        (with_total slice_bound_concrete_controls);
+      Alcotest.test_case "slice-bound missing bridges and frozen-domain guards" `Quick
+        (with_total slice_bound_guard_controls);
+      Alcotest.test_case "slice-bound original Totality rejection and legacy modes" `Quick
+        (with_total slice_bound_domain_controls);
+    ]
+
+
+  @ [
+      Alcotest.test_case "integer cast sign original renamed implication and context" `Quick
+        (with_total cast_sign_original_controls);
+      Alcotest.test_case "integer cast sign concrete conversions and countermodels" `Quick
+        (with_total cast_sign_concrete_controls);
+      Alcotest.test_case "integer cast sign original-context and cache provenance" `Quick
+        (with_total cast_sign_provenance_controls);
+      Alcotest.test_case "integer cast sign caller gates and original domains" `Quick
+        (with_total cast_sign_mode_domain_controls);
+    ]
+
+  @ [
+      Alcotest.test_case
+        "strict binary64 successor public original-subset and guards" `Quick
+        (with_total strict_successor_controls);
+    ]
+  @ (if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then
+       [ Alcotest.test_case
+           "strict binary64 successor actual optional and required UNKNOWN" `Quick
+           (with_total strict_successor_forced_unknown) ]
+     else [])
+
+
+  @ [
+      Alcotest.test_case "nonblank extra Number complete native witnesses and literal pins" `Quick
+        (with_total nonblank_extra_number_witnesses);
+      Alcotest.test_case "nonblank extra Number ambiguous and unlicensed role fallback" `Quick
+        (with_total nonblank_extra_number_role_guards);
+      Alcotest.test_case "nonblank extra Number failed hints require original full SAT" `Quick
+        (with_total nonblank_extra_number_failed_hints);
+    ]
+
+  @ [
+      Alcotest.test_case "neutral collection complete native witnesses and fallback" `Quick
+        (with_total neutral_collection_controls);
+    ]
+
+
+  @ [
+      Alcotest.test_case "original subtraction ceiling public core and countermodels" `Quick
+        (with_total subtraction_ceiling_original_controls);
+    ]
+
+  @ [
+      Alcotest.test_case "original strict successor order public core and countermodels" `Quick
+        (with_total strict_order_successor_original_controls);
+    ]
+
+  @ [
+      Alcotest.test_case "original subtraction lower public pair and definite controls" `Quick
+        (with_total subtraction_lower_original_controls);
+    ]
+
+  @ [
+      Alcotest.test_case "natural strict-gap complete native witnesses and fallback" `Quick
+        (with_total natural_gap_original_controls);
+    ]
+
+  @ [
+      Alcotest.test_case "original alias subtraction lower public triple and definite controls" `Quick
+        (with_total alias_subtraction_original_controls);
+    ]
+
+  @ [
+      Alcotest.test_case "literal rank finite cases native coverage and signed branches" `Quick
+        (with_total literal_rank_split_controls);
+    ]
+
+  @ [
+      Alcotest.test_case "literal difference finite endpoints native cores and guards" `Quick
+        (with_total literal_finite_difference_controls);
+    ]
+
+
+(* Real native formatter regression. The existing capture helper owns/restores
+   only Config.dump_smt; this test changes no environment, logger or solver policy. *)
+let compact_public_native_formatter_roundtrip () =
+  let open Sexplib.Sexp in
+  let xn = "#fmt_compact_x" and yn = "#fmt_compact_y" and depth = 80 in
+  let gamma = Gamma.init () in
+  Gamma.update gamma xn Type.IntType; Gamma.update gamma yn Type.IntType;
+  let rec sum n = if n = 0 then Expr.LVar yn
+    else bin IPlus (Expr.LVar xn) (sum (n - 1)) in
+  let expression = sum depth in
+  let fs = Expr.Set.of_list
+    [ bin Equal (Expr.LVar xn) (Expr.int 1);
+      bin Equal (Expr.LVar yn) (Expr.int 0);
+      bin Equal expression (Expr.int depth) ] in
+  let parse_many text = Sexplib.Sexp.of_string ("(" ^ text ^ ")") in
+  let read_file path =
+    let channel = open_in_bin path in
+    Fun.protect ~finally:(fun () -> close_in channel)
+      (fun () -> really_input_string channel (in_channel_length channel)) in
+  let rec atom name = function
+    | Sexplib.Sexp.Atom value -> value = name
+    | List values -> List.exists (atom name) values in
+  let check_case caller sat fs =
+    let original = List.map
+        (fun e -> `String (Fmt.str "%a" Expr.pp e)) (Expr.Set.elements fs) in
+    let result, rows = Smt.with_native_smt_context
+      (fun () -> `Assoc [ "operation", `String caller;
+        "original_fs", `List original; "sum_depth", `Int depth ])
+      (fun () -> pending_context_capture (fun () ->
+        Smt.exec_sat ~caller_kind:caller fs (Gamma.as_hashtbl gamma))) in
+    Alcotest.(check bool) "actual native SAT/UNSAT result" sat
+      (Option.is_some result);
+    let row = match rows with
+      | [row] -> row
+      | _ -> Alcotest.fail "expected one direct public native emission" in
+    let field = pending_context_field in
+    let keys = match row with
+      | `Assoc fields -> List.sort String.compare (List.map fst fields)
+      | _ -> Alcotest.fail "expected complete context object" in
+    Alcotest.(check (list string)) "all original context fields retained"
+      (List.sort String.compare ["format";"query";"provenance";"caller";"timeout_ms";
+        "phase_selection";"raw_unknown";"initial_options";"original_fs";
+        "original_gamma";"declarations";"encoded_assertions";"encoded_assertion_dump"]) keys;
+    Alcotest.(check bool) "distinct public caller retained" true
+      (field "caller" row = `String caller);
+    Alcotest.(check bool) "original FS retained" true
+      (field "original_fs" row = `String (Fmt.str "%a"
+        (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs));
+    let scope = pending_context_scope caller rows in
+    Alcotest.(check bool) "original arguments/depth retained in provenance" true
+      (field "original_fs" scope = `List original
+       && field "sum_depth" scope = `Int depth);
+    let strings key = match field key row with
+      | `List values -> List.map (function `String s -> s
+          | _ -> Alcotest.fail ("expected ordered strings: " ^ key)) values
+      | _ -> Alcotest.fail ("expected string array: " ^ key) in
+    let declarations = List.map Sexplib.Sexp.of_string (strings "declarations")
+    and commands = List.map Sexplib.Sexp.of_string (strings "encoded_assertions") in
+    let declared name = List.exists (function
+      | Sexplib.Sexp.List [Atom "declare-const"; Atom n; Atom "Int"] -> n = name
+      | _ -> false) (declarations @ commands) in
+    let rec spine head n = function
+      | Sexplib.Sexp.List [Atom "+"; Atom h; tail] when h = head ->
+          spine head (n + 1) tail
+      | Atom leaf -> n = depth && leaf <> head && declared head && declared leaf
+      | _ -> false in
+    let rec has_sum = function
+      | Sexplib.Sexp.List ([Atom "+"; Atom head; _] as values) ->
+          spine head 0 (List values) || List.exists has_sum values
+      | List values -> List.exists has_sum values
+      | Atom _ -> false in
+    let goals = List.filter_map (function
+      | Sexplib.Sexp.List [Atom "assert"; goal] -> Some goal
+      | _ -> None) commands in
+    List.iter (fun value ->
+      Alcotest.(check bool) "complete nested integer goal/leaf identities retained" true
+        (List.exists (fun goal -> has_sum goal && atom (string_of_int value) goal) goals))
+      (if sat then [depth] else [depth; depth + 1]);
+    let expected = Sexplib.Sexp.List commands in
+    let human_strings = String.concat "\n"
+        (List.map Sexplib.Sexp.to_string_hum commands)
+    and human_dump = Fmt.str "%a"
+        (Fmt.list ~sep:(Fmt.any "\n") Smt.pp_sexp) commands in
+    List.iter (fun human ->
+      Alcotest.(check bool) "human baseline exceeds compact objective" true
+        (String.length human > 4096);
+      Alcotest.(check bool) "human baseline retains full ordered trees" true
+        (parse_many human = expected)) [human_strings; human_dump];
+    let encoded = String.concat "\n" (strings "encoded_assertions") in
+    let dump = match field "encoded_assertion_dump" row with
+      | `String s -> s | _ -> Alcotest.fail "missing encoded dump" in
+    let query = match field "query" row with
+      | `String s -> s | _ -> Alcotest.fail "missing actual native dump name" in
+    let file = read_file (Filename.concat "gillian_smt_queries" query) in
+    let marker = "Encoded as SMT Query:\n" in
+    let rec start i =
+      if i + String.length marker > String.length file then
+        Alcotest.fail "missing actual native SMT suffix"
+      else if String.sub file i (String.length marker) = marker then
+        i + String.length marker else start (i + 1) in
+    let i = start 0 in
+    let suffix = String.sub file i (String.length file - i) in
+    List.iter (fun text ->
+      Alcotest.(check bool) "actual compact output fits objective" true
+        (String.length text <= 4096);
+      Alcotest.(check bool) "actual compact output retains all ordered trees" true
+        (parse_many text = expected)) [encoded; dump; suffix];
+    List.iter (fun text ->
+      Alcotest.(check bool) "complete ordered declaration trees roundtrip" true
+        (parse_many text = Sexplib.Sexp.List declarations))
+      [ String.concat "\n" (List.map Sexplib.Sexp.to_string_mach declarations);
+        Fmt.str "%a" (Fmt.list ~sep:(Fmt.any "\n") Smt.pp_sexp) declarations ];
+    Alcotest.(check bool) "formal types retained" true
+      (Gamma.get gamma xn = Some Type.IntType && Gamma.get gamma yn = Some Type.IntType)
+  in
+  check_case "passive-compact-formatter-native-sat" true fs;
+  check_case "passive-compact-formatter-native-unsat" false
+    (Expr.Set.add (bin Equal expression (Expr.int (depth + 1))) fs)
+
+let tests =
+  tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ -> [Alcotest.test_case
+       "compact public native SMT formatter SAT/UNSAT ordered trees" `Quick
+       compact_public_native_formatter_roundtrip])
+
+
+(* Source-only integer-order projection candidates. Context-enabled groups
+   require actual native emissions/results, not selectors or cache hits. *)
+let integer_projection_caller = "optional-entailment-integer-order-projection"
+
+let integer_projection_fixture label distinct collision =
+  let g = Gamma.init () in
+  let variable suffix typ =
+    let name = "#integer_projection_" ^ label ^ suffix in
+    Gamma.update g name typ; Expr.LVar name in
+  let index = variable "_index" Type.NumberType in
+  let values = variable "_values" Type.ListType in
+  let other_index = if distinct = "number" then
+      variable "_other_index" Type.NumberType else index in
+  let other_values = if distinct = "list" then
+      variable "_other_values" Type.ListType else values in
+  let count = Expr.UnOp (NumToInt, index)
+  and other_count = Expr.UnOp (NumToInt, other_index)
+  and length = Expr.UnOp (LstLen, values)
+  and other_length = Expr.UnOp (LstLen, other_values) in
+  let step = bin ILessThanEqual (bin IPlus (Expr.int 1) other_count) other_length in
+  let failed = bin ILessThan length count in
+  let facts = [Expr.UnOp (IsInt, index); Expr.UnOp (IsInt, other_index);
+    bin ILessThanEqual (Expr.int 0) length;
+    bin ILessThanEqual (Expr.int 0) other_length; step] in
+  let facts = if not collision then facts else
+    List.fold_left (fun facts name ->
+      Gamma.update g name Type.IntType;
+      bin ILessThanEqual (Expr.int 0) (Expr.LVar name)
+      :: bin ILessThanEqual (Expr.LVar name) length :: facts) facts
+      ["#integer_order_projection_0"; "$$integer_order_projection_1"] in
+  (Expr.Set.of_list facts, g, failed, step)
+
+let integer_projection_expressions key scope =
+  match pending_context_field key scope with
+  | `List expressions -> Expr.Set.of_list (List.map (fun json ->
+      match Expr.of_yojson json with
+      | Ok expression -> expression
+      | Error error -> Alcotest.fail ("invalid projection expression: " ^ error)) expressions)
+  | _ -> Alcotest.fail ("expected projection expression array: " ^ key)
+
+let integer_projection_observe label expected_result facts gamma failed =
+  let original = Expr.Set.elements facts
+  and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let pfs = Engine.PFS.of_list original in
+  let before = nonblank_counter_rows () in
+  let entailed, contexts = pending_context_capture (fun () ->
+    Solver.check_entailment Utils.Containers.SS.empty pfs [not_ failed] gamma) in
+  Alcotest.(check bool) (label ^ " complete entailment result")
+    (expected_result = "unsat") entailed;
+  let context = match List.filter (fun row ->
+      pending_context_field "caller" row = `String integer_projection_caller) contexts with
+    | [context] -> context
+    | _ -> Alcotest.fail (label ^ " expected one actual projected native query") in
+  let query = match pending_context_field "query" context with
+    | `String query -> query | _ -> Alcotest.fail "missing projection query ID" in
+  let results = List.filter (fun row ->
+    smt_result_field "query" row = query
+    && smt_result_field "caller" row = integer_projection_caller)
+    (symbolic_prefix_new_rows before) in
+  Alcotest.(check int) (label ^ " actual projected result has a unique query join")
+    1 (List.length results);
+  Alcotest.(check string) (label ^ " actual projected native result") expected_result
+    (smt_result_field "result" (List.hd results));
+  let scope = pending_context_scope "integer-order-projection" [context] in
+  ignore (pending_context_scope "entailment" [context]);
+  let source = integer_projection_expressions "original_fs" scope
+  and core = integer_projection_expressions "original_core" scope
+  and projected = integer_projection_expressions "projected_fs" scope in
+  Alcotest.(check bool) (label ^ " original core remains a proper original subset") true
+    (Expr.Set.subset core source && not (Expr.Set.equal core source));
+  Alcotest.(check bool) (label ^ " native submission is exactly the recorded projection") true
+    (pending_context_field "original_fs" context = `String (Fmt.str "%a"
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) projected));
+  let aliases = match pending_context_field "aliases" scope with
+    | `List aliases -> List.map (fun entry ->
+        let term = match Expr.of_yojson (pending_context_field "term" entry) with
+          | Ok term -> term | Error error -> Alcotest.fail error in
+        let name = match pending_context_field "alias" entry with
+          | `String name -> name | _ -> Alcotest.fail "invalid alias name" in
+        (term,name)) aliases
+    | _ -> Alcotest.fail "missing projection aliases" in
+  Alcotest.(check bool) (label ^ " actual fresh aliases are present") true (aliases <> []);
+  let encoded name = String.concat "$$" (String.split_on_char '#' name) in
+  let names = List.map snd aliases in
+  Alcotest.(check int) (label ^ " distinct terms have distinct encoded aliases")
+    (List.length aliases) (List.length (List.sort_uniq String.compare (List.map encoded names)));
+  Alcotest.(check int) (label ^ " opaque structural terms are distinct")
+    (List.length aliases)
+    (Expr.Set.cardinal (Expr.Set.of_list (List.map fst aliases)));
+  List.iter (fun (term,name) ->
+    Alcotest.(check bool) (label ^ " only typed total opaque Int leaves are aliased") true
+      (match term with
+       | Expr.UnOp (NumToInt, LVar n) -> Gamma.get gamma n = Some Type.NumberType
+       | Expr.UnOp (LstLen, LVar n) -> Gamma.get gamma n = Some Type.ListType
+       | _ -> false);
+    Alcotest.(check bool) (label ^ " alias raw namespace is fresh") false
+      (List.mem_assoc name types);
+    Alcotest.(check bool) (label ^ " alias encoded namespace is fresh") false
+      (List.exists (fun (original,_) -> encoded original = encoded name) types)) aliases;
+  let restore e = Expr.map_opt (function
+    | Expr.LVar name as e ->
+        (match List.find_opt (fun (_,alias) -> alias = name) aliases with
+         | Some (term,_) -> Some term,false | None -> Some e,false)
+    | e -> Some e,true) None e |> Option.get in
+  let restored = Expr.Set.fold (fun e fs -> Expr.Set.add (restore e) fs)
+    projected Expr.Set.empty in
+  Alcotest.(check bool) (label ^ " uniform same-term reuse reconstructs the exact core")
+    true (Expr.Set.equal restored core);
+  let commands = match pending_context_field "encoded_assertions" context with
+    | `List commands -> List.map (function `String command -> Sexplib.Sexp.of_string command
+        | _ -> Alcotest.fail "invalid native command") commands
+    | _ -> Alcotest.fail "missing actual native commands" in
+  let declared name = List.exists (function
+    | Sexplib.Sexp.List [Atom "declare-const"; Atom n; Atom "Int"] -> n = encoded name
+    | _ -> false) commands in
+  List.iter (fun name -> Alcotest.(check bool)
+    (label ^ " actual alias declaration is mathematical Int") true (declared name)) names;
+  let rec pure_integer = function
+    | Sexplib.Sexp.Atom name ->
+        List.exists (fun command -> match command with
+          | Sexplib.Sexp.List [Atom "declare-const"; Atom n; Atom "Int"] -> n = name
+          | _ -> false) commands
+        || (try ignore (Z.of_string name); true with Invalid_argument _ -> false)
+    | List (Atom ("+" | "-" | "=" | "<" | "<=" | "not") :: arguments) ->
+        List.for_all pure_integer arguments
+    | _ -> false in
+  let assertions = List.filter_map (function
+    | Sexplib.Sexp.List [Atom "assert"; assertion] -> Some assertion
+    | _ -> None) commands in
+  Alcotest.(check bool) (label ^ " actual query has only Int arithmetic, no casts/FP/lists")
+    true (assertions <> [] && List.for_all pure_integer assertions
+      && List.for_all (function
+        | Sexplib.Sexp.List [Atom "declare-const"; _; Atom "Int"]
+        | List [Atom "assert"; _] -> true | _ -> false) commands);
+  Alcotest.(check bool) (label ^ " caller facts are unchanged") true
+    (original = Expr.Set.elements facts && original = Engine.PFS.to_list pfs);
+  Alcotest.(check bool) (label ^ " caller Gamma is unchanged") true
+    (types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+  (projected, aliases, core)
+
+let integer_projection_native_chain () = with_nonblank_counter_trace (fun () ->
+  let facts,gamma,failed,step = integer_projection_fixture "chain" "same" false in
+  let projected,aliases,core = integer_projection_observe "chain" "unsat" facts gamma failed in
+  Alcotest.(check int) "repeated cast and length use exactly two aliases" 2 (List.length aliases);
+  let abstract e = Expr.map_opt (fun e ->
+    match List.find_opt (fun (term,_) -> Expr.equal term e) aliases with
+    | Some (_,name) -> Some (Expr.LVar name),false
+    | None -> Some e,true) None e |> Option.get in
+  let gt = Hashtbl.copy (Gamma.as_hashtbl gamma) in
+  List.iter (fun (_,name) -> Hashtbl.add gt name Type.IntType) aliases;
+  List.iter (fun (label,omitted) ->
+    Alcotest.(check bool) (label ^ " is retained in the observed original core") true
+      (Expr.Set.mem omitted core);
+    let control = Expr.Set.remove (abstract omitted) projected in
+    let before = nonblank_counter_rows () in
+    let caller = "control-integer-projection-" ^ label in
+    Alcotest.(check bool) (label ^ " permits actual projected native SAT") true
+      (Option.is_some (Smt.exec_sat ~caller_kind:caller control gt));
+    ignore (nonblank_counter_observe label before caller "sat" control gt)
+  ) ["without-step",step; "without-failed-order",failed];
+  (* This rejection exercises the old complete fallback after projected SAT.
+     The isolated projected models above assert no full-query feasibility. *)
+  let missing_step = Expr.Set.remove step facts in
+  ignore (integer_projection_observe "missing-step" "sat" missing_step gamma failed))
+
+let integer_projection_identity_collisions () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun distinct ->
+    let facts,gamma,failed,_ = integer_projection_fixture distinct distinct false in
+    let _,aliases,_ = integer_projection_observe distinct "sat" facts gamma failed in
+    Alcotest.(check int) (distinct ^ " independent opaque leaves stay separate")
+      3 (List.length aliases)) ["number"; "list"];
+  let facts,gamma,failed,_ = integer_projection_fixture "collision" "same" true in
+  let _,aliases,_ = integer_projection_observe "collision" "unsat" facts gamma failed in
+  Alcotest.(check bool) "raw and encoded occupied target names are both skipped" true
+    (List.for_all (fun (_,name) ->
+      name <> "#integer_order_projection_0" && name <> "#integer_order_projection_1") aliases))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "integer projection actual native chain, SAT deletions and fallback" `Quick
+          (with_total integer_projection_native_chain);
+        Alcotest.test_case "integer projection opaque identity, namespace and input isolation" `Quick
+          (with_total integer_projection_identity_collisions)])
+
+
+(* Compact seed from the captured SliceStep sanitisation: the four numeric
+   facts and three Gamma bindings are exact; the fifth fact is its minimal
+   retained self-decomposition. No solver or capture-file dependency. *)
+let list_slice_occurs_fixture () =
+  let index = Expr.LVar "#index" and values = Expr.LVar "#values"
+  and tail = Expr.LVar "#lvar_1132" in
+  let count = Expr.UnOp (NumToInt, index) in
+  let prefix = Expr.LstSub (values, Expr.int 0, count) in
+  let decomposition = Expr.NOp (LstCat,
+    [prefix; Expr.EList [bin LstNth values count]; tail]) in
+  let numeric = [bin FLessThanEqual (Expr.num 0.) index;
+    Expr.UnOp (IsInt, index);
+    bin FLessThan index (Expr.num 4294967295.);
+    bin ILessThanEqual (bin IPlus (Expr.int 1) count) (Expr.UnOp (LstLen, values))] in
+  let equality = bin Equal values decomposition in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#index" Type.NumberType;
+  Gamma.update gamma "#values" Type.ListType;
+  Gamma.update gamma "#lvar_1132" Type.ListType;
+  (gamma, numeric, equality, prefix, values, index)
+
+let list_slice_occurs_captured_fixedpoint () =
+  List.iter (fun matching ->
+    let gamma,numeric,equality,prefix,_,_ = list_slice_occurs_fixture () in
+    let facts = numeric @ [equality] in
+    let pfs = Engine.PFS.of_list facts in
+    let types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    let reduced = Engine.Reduction.reduce_lexpr ~matching ~pfs ~gamma prefix in
+    Alcotest.(check bool) "captured prefix does not unfold its self-containing source" true
+      (Expr.equal prefix reduced);
+    Alcotest.(check bool) "direct prefix reduction retains every original fact" true
+      (List.equal Expr.equal facts (Engine.PFS.to_list pfs));
+    (* Only this test has a pass bound. Production sanitisation, reducer fuel,
+       equality/copy operations and solver limits retain their existing policy. *)
+    let rec settle pass =
+      if pass > 8 then Alcotest.fail "captured sanitisation failed to reach a fixedpoint in 8 passes";
+      let before = Engine.PFS.copy pfs in
+      Engine.Reduction.reduce_pfs_in_place ~matching gamma pfs;
+      if Engine.PFS.equal before pfs then pass else settle (pass + 1)
+    in
+    ignore (settle 1);
+    Alcotest.(check bool) "stable captured PFS retains the ordered five facts and self-equation" true
+      (List.equal Expr.equal facts (Engine.PFS.to_list pfs));
+    Alcotest.(check bool) "captured fixedpoint preserves Gamma exactly" true
+      (types = nonblank_counter_types (Gamma.as_hashtbl gamma))
+  ) [false;true]
+
+let list_slice_occurs_acyclic_replacement () =
+  List.iter (fun matching ->
+    let gamma,numeric,self,prefix,values,index = list_slice_occurs_fixture () in
+    let replacement = Expr.EList [index] in
+    List.iter (fun reverse ->
+      let equality = if reverse then bin Equal replacement values
+        else bin Equal values replacement in
+      List.iter (fun include_self ->
+        let facts = numeric @ (if include_self then [self;equality] else [equality]) in
+        let pfs = Engine.PFS.of_list facts in
+        let types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+        let reduced = Engine.Reduction.reduce_lexpr ~matching ~pfs ~gamma prefix in
+        Alcotest.(check bool) "acyclic source equality still performs useful slice replacement" false
+          (Utils.Containers.SS.mem "#values" (Expr.lvars reduced));
+        Alcotest.(check bool) "acyclic replacement retains all source facts, including a rejected self-alias" true
+          (List.equal Expr.equal facts (Engine.PFS.to_list pfs));
+        Alcotest.(check bool) "acyclic replacement preserves Gamma exactly" true
+          (types = nonblank_counter_types (Gamma.as_hashtbl gamma))
+      ) [false;true]
+    ) [false;true]
+  ) [false;true]
+
+let tests = tests @
+  [Alcotest.test_case "list slice self-alias captured prefix and actual fixedpoint" `Quick
+     (with_total list_slice_occurs_captured_fixedpoint);
+   Alcotest.test_case "list slice acyclic aliases and mixed-candidate selection" `Quick
+     (with_total list_slice_occurs_acyclic_replacement)]
+
+
+(* Exact last completed R11 PFS/Gamma shape, embedded rather than re-reading
+   run evidence. The two implicit native length-domain atoms are encoder
+   obligations, not added source premises. Only four original atoms are used
+   by the optional sequence/count core. *)
+let sequence_projection_fixture rename =
+  let index = Expr.LVar "#index" and values = Expr.LVar "#values"
+  and tail = Expr.LVar "#lvar_1134" in
+  let count = Expr.UnOp (NumToInt,index) in
+  let step = Expr.UnOp (NumToInt,bin FPlus index (Expr.num 1.)) in
+  let increment = bin IPlus (Expr.int 1) count in
+  let prefix = Expr.LstSub (values,Expr.int 0,count) in
+  let result = Expr.NOp (LstCat,[prefix;Expr.EList [bin LstNth values count]]) in
+  let failed = not_ (bin Equal (Expr.LstSub (values,Expr.int 0,step)) result) in
+  let natural = bin ILessThanEqual (Expr.int 0) count
+  and bridge = bin Equal step increment
+  and bound = bin ILessThanEqual increment (Expr.UnOp (LstLen,values)) in
+  let facts = Expr.Set.of_list
+    [ bin Equal values (Expr.NOp (LstCat,[prefix;Expr.EList [bin LstNth values count];tail]));
+      Expr.UnOp (IsInt,index); bin FLessThanEqual (Expr.num 0.) index;
+      bin FLessThan index (Expr.num 4294967295.); natural;bridge;bound ] in
+  let move e = Expr.map_opt (function
+    | Expr.LVar name -> Some (Expr.LVar (rename name)),false
+    | e -> Some e,true) None e |> Option.get in
+  let facts = Expr.Set.fold (fun e fs -> Expr.Set.add (move e) fs) facts Expr.Set.empty in
+  let gamma = Gamma.init () in
+  List.iter (fun (name,typ) -> Gamma.update gamma (rename name) typ)
+    ["#index",Type.NumberType;"#values",Type.ListType;"#lvar_1134",Type.ListType];
+  (facts,gamma,move failed,List.map move [natural;bridge;bound])
+
+let sequence_projection_caller = "optional-entailment-sequence-count-projection"
+
+let sequence_projection_observe label facts gamma failed =
+  let original = Expr.Set.elements facts
+  and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let pfs = Engine.PFS.of_list original in
+  let before = nonblank_counter_rows () in
+  let result,contexts = pending_context_capture (fun () ->
+    Solver.check_entailment Utils.Containers.SS.empty pfs [not_ failed] gamma) in
+  Alcotest.(check bool) (label ^ " original public entailment") true result;
+  let context = match List.filter (fun row ->
+    pending_context_field "caller" row = `String sequence_projection_caller) contexts with
+    | [context] -> context
+    | _ -> Alcotest.fail (label ^ " expected one real sequence/count projection") in
+  let scope = pending_context_scope "sequence-count-projection" [context] in
+  ignore (pending_context_scope "entailment" [context]);
+  let source = integer_projection_expressions "original_fs" scope
+  and core = integer_projection_expressions "original_core" scope
+  and projected = integer_projection_expressions "projected_fs" scope in
+  Alcotest.(check int) (label ^ " four original selected atoms") 4 (Expr.Set.cardinal core);
+  Alcotest.(check bool) (label ^ " selected atoms form a proper original subset") true
+    (Expr.Set.subset core source && not (Expr.Set.equal core source));
+  Alcotest.(check bool) (label ^ " projection submitted to the actual native solver") true
+    (pending_context_field "original_fs" context = `String (Fmt.str "%a"
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) projected));
+  let query = match pending_context_field "query" context with
+    | `String query -> query | _ -> Alcotest.fail "missing actual projection query ID" in
+  let rows = List.filter (fun row -> smt_result_field "query" row = query
+    && smt_result_field "caller" row = sequence_projection_caller)
+    (symbolic_prefix_new_rows before) in
+  Alcotest.(check int) (label ^ " unique actual query/result join") 1 (List.length rows);
+  Alcotest.(check string) (label ^ " actual projected native UNSAT") "unsat"
+    (smt_result_field "result" (List.hd rows));
+  let aliases = match pending_context_field "aliases" scope with
+    | `List entries -> List.map (fun entry ->
+        let term = match Expr.of_yojson (pending_context_field "term" entry) with
+          | Ok term -> term | Error error -> Alcotest.fail error in
+        let name = match pending_context_field "alias" entry with
+          | `String name -> name | _ -> Alcotest.fail "missing alias name" in
+        term,name) entries
+    | _ -> Alcotest.fail "missing actual projection aliases" in
+  Alcotest.(check int) (label ^ " precisely two distinct count terms") 2 (List.length aliases);
+  Alcotest.(check int) (label ^ " distinct structural counts do not coalesce") 2
+    (Expr.Set.cardinal (Expr.Set.of_list (List.map fst aliases)));
+  Alcotest.(check bool) (label ^ " distinct alias identities") true
+    (List.length (List.sort_uniq String.compare (List.map snd aliases)) = 2);
+  List.iter (fun (term,_) -> Alcotest.(check bool)
+    (label ^ " casts alone are opaque; native list length is preserved") true
+    (match term with Expr.UnOp (NumToInt,_) -> true | _ -> false)) aliases;
+  let restore e = Expr.map_opt (function
+    | Expr.LVar name as e ->
+        (match List.find_opt (fun (_,alias) -> alias = name) aliases with
+         | Some (term,_) -> Some term,false | None -> Some e,false)
+    | e -> Some e,true) None e |> Option.get in
+  let restored = Expr.Set.fold (fun e fs -> Expr.Set.add (restore e) fs)
+    projected Expr.Set.empty in
+  Alcotest.(check bool) (label ^ " uniform term reuse exactly reconstructs the selected core") true
+    (Expr.Set.equal restored core);
+  let commands = match pending_context_field "encoded_assertions" context with
+    | `List commands -> List.map (function `String command -> Sexplib.Sexp.of_string command
+        | _ -> Alcotest.fail "invalid actual native command") commands
+    | _ -> Alcotest.fail "missing actual native commands" in
+  let encoded name = String.concat "$$" (String.split_on_char '#' name) in
+  let declared = List.filter_map (function
+    | Sexplib.Sexp.List [Atom "declare-const";Atom name;sort] -> Some (name,sort)
+    | _ -> None) commands in
+  List.iter (fun (_,name) -> Alcotest.(check bool)
+    (label ^ " native aliases have mathematical Int sort") true
+    (List.assoc_opt (encoded name) declared = Some (Sexplib.Sexp.Atom "Int"))) aliases;
+  let rec pure = function
+    | Sexplib.Sexp.Atom name -> List.mem_assoc name declared
+        || (try ignore (Z.of_string name); true with Invalid_argument _ -> false)
+    | List (Atom ("+" | "-" | "=" | "<=" | "not" | "seq.extract"
+        | "seq.++" | "seq.unit" | "seq.nth" | "seq.len") :: arguments) ->
+        List.for_all pure arguments
+    | _ -> false in
+  let assertions = List.filter_map (function
+    | Sexplib.Sexp.List [Atom "assert";assertion] -> Some assertion | _ -> None) commands in
+  Alcotest.(check bool) (label ^ " actual assertions contain only native sequences and Int terms") true
+    (assertions <> [] && List.for_all pure assertions);
+  Alcotest.(check bool) (label ^ " only Int and sequence variables are declared") true
+    (List.for_all (fun (_,sort) -> match sort with
+      | Sexplib.Sexp.Atom "Int" | List [Atom "Seq";Atom "GIL_Literal"] -> true
+      | _ -> false) declared);
+  Alcotest.(check bool) (label ^ " the actual sequence length was not abstracted") true
+    (List.exists (fun assertion ->
+      let rec length = function
+        | Sexplib.Sexp.List [Atom "seq.len";_] -> true
+        | List xs -> List.exists length xs | _ -> false in
+      length assertion) assertions);
+  Alcotest.(check bool) (label ^ " caller PFS is unchanged") true
+    (original = Engine.PFS.to_list pfs && original = Expr.Set.elements facts);
+  Alcotest.(check bool) (label ^ " caller Gamma is unchanged") true
+    (types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+  (projected,aliases,core)
+
+let sequence_projection_native_core () = with_nonblank_counter_trace (fun () ->
+  let facts,gamma,failed,premises = sequence_projection_fixture Fun.id in
+  let projected,aliases,core = sequence_projection_observe "captured-R11" facts gamma failed in
+  let abstract e = Expr.map_opt (fun e ->
+    match List.find_opt (fun (term,_) -> Expr.equal term e) aliases with
+    | Some (_,name) -> Some (Expr.LVar name),false | None -> Some e,true) None e |> Option.get in
+  let gt = Hashtbl.copy (Gamma.as_hashtbl gamma) in
+  List.iter (fun (_,name) -> Hashtbl.add gt name Type.IntType) aliases;
+  List.iter2 (fun label omitted ->
+    Alcotest.(check bool) (label ^ " deletes exactly one retained original premise") true
+      (Expr.Set.mem omitted core);
+    let control = Expr.Set.remove (abstract omitted) projected in
+    let caller = "control-sequence-count-" ^ label in
+    let before = nonblank_counter_rows () in
+    let model = Smt.exec_sat ~caller_kind:caller control gt in
+    Alcotest.(check bool) (label ^ " has a real projected native SAT model") true
+      (Option.is_some model);
+    ignore (nonblank_counter_observe label before caller "sat" control gt);
+    Printf.printf "SEQUENCE_COUNT_PROJECTED_MODEL[%s]=%s\n%!" label
+      (Fmt.str "%a" Smt.pp_model (Option.get model));
+    (* Projected countermodels do not assert feasibility of the full R11 frame. *)
+    Alcotest.(check bool) (label ^ " optional native SAT cannot prove UNSAT") false
+      (Smt.proves_unsat ~caller_kind:(caller ^ "-optional") control gt)
+  ) ["without-natural";"without-bridge";"without-bound"] premises)
+
+let sequence_projection_namespace_and_fallback () = with_nonblank_counter_trace (fun () ->
+  let rename name = "#sequence_collision_" ^ String.sub name 1 (String.length name - 1) in
+  let facts,gamma,failed,_ = sequence_projection_fixture rename in
+  Gamma.update gamma "#sequence_count_projection_0" Type.IntType;
+  Gamma.update gamma "$$sequence_count_projection_1" Type.IntType;
+  (* This source-only name is absent from Gamma and simplified away. *)
+  let source_name = Expr.LVar "#sequence_count_projection_2" in
+  let facts = Expr.Set.add (bin Equal source_name source_name) facts in
+  let _,aliases,_ = sequence_projection_observe "namespace-collision" facts gamma failed in
+  Alcotest.(check bool) "raw, encoded and eliminated source namespaces are reserved" true
+    (List.for_all (fun (_,name) -> not (List.mem name
+      ["#sequence_count_projection_0";"#sequence_count_projection_1";
+       "#sequence_count_projection_2"])) aliases);
+  (* An incorrect prefix/head claim must use the unchanged complete fallback.
+     Pinning the numeric index eliminates FP search, while the list element
+     stays symbolic and supplies an actual native full-query countermodel. *)
+  let index = Expr.LVar "#sequence_false_index" and values = Expr.LVar "#sequence_false_values" in
+  let g = Gamma.init () in
+  Gamma.update g "#sequence_false_index" Type.NumberType;
+  Gamma.update g "#sequence_false_values" Type.ListType;
+  let count = Expr.UnOp (NumToInt,index)
+  and step = Expr.UnOp (NumToInt,bin FPlus index (Expr.num 1.)) in
+  let facts = [bin Equal index (Expr.num 0.);Expr.UnOp (IsInt,index);
+    bin FLessThanEqual (Expr.num 0.) index;bin FLessThan index (Expr.num 4294967295.);
+    bin ILessThanEqual (Expr.int 0) count;
+    bin Equal step (bin IPlus (Expr.int 1) count);
+    bin ILessThanEqual (bin IPlus (Expr.int 1) count) (Expr.UnOp (LstLen,values))] in
+  let wrong = bin Equal (Expr.LstSub (values,Expr.int 0,step))
+    (Expr.NOp (LstCat,[Expr.LstSub (values,Expr.int 0,count);Expr.EList [Expr.int 7]])) in
+  let before = nonblank_counter_rows () in
+  let result,contexts = pending_context_capture (fun () ->
+    Solver.check_entailment Utils.Containers.SS.empty (Engine.PFS.of_list facts) [wrong] g) in
+  Alcotest.(check bool) "a wrong prefix/head claim is rejected" false result;
+  Alcotest.(check bool) "wrong prefix shape cannot select the projection" false
+    (List.exists (fun row -> pending_context_field "caller" row
+      = `String sequence_projection_caller) contexts);
+  Alcotest.(check bool) "wrong prefix retains a real required complete SAT result" true
+    (List.exists (fun row -> smt_result_field "caller" row = "required-complete"
+      && smt_result_field "result" row = "sat") (symbolic_prefix_new_rows before)))
+
+let sequence_projection_guard_rejections () =
+  let check label =
+    let rename name = "#sequence_guard_" ^ label ^ "_"
+      ^ String.sub name 1 (String.length name - 1) in
+    let facts,gamma,failed,_ = sequence_projection_fixture rename in
+    let index = Expr.LVar (rename "#index") in
+    let original_gamma = Hashtbl.copy (Gamma.as_hashtbl gamma) in
+    (* Current Gamma deliberately retains both types. Removing an original
+       type must stay ineligible even if later simplification infers it. *)
+    let current_gamma = Hashtbl.copy (Gamma.as_hashtbl gamma) in
+    let facts = match label with
+      | "missing-is-int" -> Expr.Set.remove (Expr.UnOp (IsInt,index)) facts
+      | "missing-lower" -> Expr.Set.remove
+          (bin FLessThanEqual (Expr.num 0.) index) facts
+      | "missing-upper" | "weaker-upper" ->
+          let facts = Expr.Set.remove (bin FLessThan index (Expr.num 4294967295.)) facts in
+          if label = "weaker-upper" then Expr.Set.add
+            (bin FLessThan index (Expr.num 4294967296.)) facts else facts
+      | _ -> facts in
+    (match label with
+     | "missing-index-type" -> Hashtbl.remove original_gamma (rename "#index")
+     | "missing-list-type" -> Hashtbl.remove original_gamma (rename "#values")
+     | _ -> ());
+    let original_fs = Expr.Set.add failed facts in
+    let source = Expr.Set.elements original_fs
+    and original_types = nonblank_counter_types original_gamma
+    and current_types = nonblank_counter_types current_gamma in
+    let names = Expr.Set.fold (fun e names -> Utils.Containers.SS.union names
+      (Utils.Containers.SS.union (Expr.lvars e)
+        (Utils.Containers.SS.union (Expr.pvars e) (Expr.locs e))))
+      original_fs Utils.Containers.SS.empty in
+    let reserved_names = lazy (Hashtbl.fold
+      (fun name _ names -> Utils.Containers.SS.add name names)
+      original_gamma names) in
+    let selected = Solver.sequence_count_projection ~reserved_names ~original_gamma
+      original_fs current_gamma failed in
+    Alcotest.(check bool) (label ^ " pure selector eligibility") (label = "eligible")
+      (Option.is_some selected);
+    Alcotest.(check bool) (label ^ " original FS remains unchanged") true
+      (source = Expr.Set.elements original_fs);
+    Alcotest.(check bool) (label ^ " original Gamma remains unchanged") true
+      (original_types = nonblank_counter_types original_gamma);
+    Alcotest.(check bool) (label ^ " current Gamma remains unchanged") true
+      (current_types = nonblank_counter_types current_gamma);
+    Alcotest.(check bool) (label ^ " current inferred Number type is retained") true
+      (Hashtbl.find_opt current_gamma (rename "#index") = Some Type.NumberType);
+    Alcotest.(check bool) (label ^ " current inferred List type is retained") true
+      (Hashtbl.find_opt current_gamma (rename "#values") = Some Type.ListType);
+    (match selected with
+     | Some (core,projected,projected_gamma,aliases) ->
+         Alcotest.(check int) "eligible baseline selects the four original atoms" 4
+           (Expr.Set.cardinal core);
+         Alcotest.(check bool) "eligible baseline is a proper original subset" true
+           (Expr.Set.subset core original_fs && not (Expr.Set.equal core original_fs));
+         Alcotest.(check int) "eligible baseline projects two cast terms" 2 (List.length aliases);
+         Alcotest.(check int) "uniform projection retains four atoms" 4
+           (Expr.Set.cardinal projected);
+         Alcotest.(check bool) "projected Gamma is a separate copy" false
+           (projected_gamma == current_gamma || projected_gamma == original_gamma)
+     | None -> ());
+    Printf.printf "SEQUENCE_COUNT_PURE_ELIGIBILITY[%s]=%s\n%!" label
+      (if Option.is_some selected then "selected" else "ineligible")
+  in
+  List.iter check ["eligible";"missing-index-type";"missing-list-type";"missing-is-int";
+    "missing-lower";"missing-upper";"weaker-upper"]
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "sequence count original R11 native UNSAT and three SAT deletions" `Quick
+          (with_total sequence_projection_native_core);
+        Alcotest.test_case "sequence count namespace identity and false-prefix complete fallback" `Quick
+          (with_total sequence_projection_namespace_and_fallback);
+        Alcotest.test_case "sequence count original type and uint32 guard ineligibility" `Quick
+          (with_total sequence_projection_guard_rejections)])
+
+
+(* R12 query68's complete cached FS/Gamma, including its two original length
+   atoms. The new sufficient core keeps four unchanged numeric atoms only. *)
+let successor_bound_fixture bound =
+  let facts,gamma,_,_ = sequence_projection_fixture Fun.id in
+  let index = Expr.LVar "#index" and values = Expr.LVar "#values"
+  and tail = Expr.LVar "#lvar_1134" in
+  let step = Expr.UnOp (NumToInt,bin FPlus index (Expr.num 1.)) in
+  let failed = bin ILessThan (Expr.Lit (Int (Z.of_string bound))) step in
+  let facts = facts |> Expr.Set.add (bin ILessThanEqual (Expr.int 0) (Expr.UnOp (LstLen,values)))
+    |> Expr.Set.add (bin ILessThanEqual (Expr.int 0) (Expr.UnOp (LstLen,tail))) in
+  let core = Expr.Set.of_list [failed;Expr.UnOp (IsInt,index);
+    bin FLessThanEqual (Expr.num 0.) index;bin FLessThan index (Expr.num 4294967295.)] in
+  (facts,gamma,failed,core)
+
+let successor_bound_caller = "optional-entailment-numeric-successor-bound-core"
+
+let successor_bound_original_native () = with_nonblank_counter_trace (fun () ->
+  let facts,gamma,failed,expected = successor_bound_fixture "4611686018427387903" in
+  let original = Expr.Set.elements facts
+  and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  Alcotest.(check int) "cached R12 complete counterquery has ten atoms" 10
+    (Expr.Set.cardinal (Expr.Set.add failed facts));
+  let pfs = Engine.PFS.of_list original in
+  let before = nonblank_counter_rows () in
+  let result,contexts = pending_context_capture (fun () ->
+    Solver.check_entailment Utils.Containers.SS.empty pfs [not_ failed] gamma) in
+  Alcotest.(check bool) "original R12 successor bound is proved by public entailment" true result;
+  let context = match List.filter (fun row ->
+    pending_context_field "caller" row = `String successor_bound_caller) contexts with
+    | [context] -> context | _ -> Alcotest.fail "expected one actual successor-bound core query" in
+  let scope = pending_context_scope "numeric-successor-bound-core" [context] in
+  ignore (pending_context_scope "entailment" [context]);
+  let source = integer_projection_expressions "original_fs" scope
+  and core = integer_projection_expressions "original_core" scope in
+  Alcotest.(check int) "native successor-bound subset has four original atoms" 4 (Expr.Set.cardinal core);
+  Alcotest.(check bool) "exact unchanged goal and three original guards are selected" true
+    (Expr.Set.equal expected core);
+  Alcotest.(check bool) "selected successor core is a proper original subset" true
+    (Expr.Set.subset core source && not (Expr.Set.equal core source));
+  Alcotest.(check bool) "actual native submission equals the recorded original core" true
+    (pending_context_field "original_fs" context = `String (Fmt.str "%a"
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) core));
+  Alcotest.(check bool) "successor core does not manufacture aliases" false
+    (match scope with `Assoc fields -> List.mem_assoc "aliases" fields | _ -> true);
+  let query = match pending_context_field "query" context with
+    | `String query -> query | _ -> Alcotest.fail "missing native successor-bound query ID" in
+  let rows = List.filter (fun row -> smt_result_field "query" row = query
+      && smt_result_field "caller" row = successor_bound_caller)
+    (symbolic_prefix_new_rows before) in
+  Alcotest.(check int) "actual successor-bound result has one native query join" 1 (List.length rows);
+  Alcotest.(check string) "actual successor-bound native result is UNSAT" "unsat"
+    (smt_result_field "result" (List.hd rows));
+  let commands = match pending_context_field "encoded_assertions" context with
+    | `List commands -> List.map (function `String command -> Sexplib.Sexp.of_string command
+        | _ -> Alcotest.fail "invalid actual successor-bound SMT command") commands
+    | _ -> Alcotest.fail "missing actual successor-bound SMT commands" in
+  let declared = List.filter_map (function
+    | Sexplib.Sexp.List [Atom "declare-const";Atom name;sort] -> Some (name,sort)
+    | _ -> None) commands in
+  Alcotest.(check bool) "only the original Number index is declared, despite unused List Gamma entries" true
+    (declared = ["$$index", Sexplib.Sexp.List [Atom "_";Atom "FloatingPoint";Atom "11";Atom "53"]]);
+  let rec has_sequence = function
+    | Sexplib.Sexp.Atom atom -> String.starts_with ~prefix:"seq." atom || atom = "Seq"
+        || atom = "l-len" || String.starts_with ~prefix:"$$sequence_" atom
+    | List xs -> List.exists has_sequence xs in
+  Alcotest.(check bool) "actual native core has no sequence operators or projected aliases" false
+    (List.exists has_sequence commands);
+  Alcotest.(check bool) "native UNSAT avoids the old required complete fallback" false
+    (List.exists (fun row -> smt_result_field "caller" row = "required-complete")
+      (symbolic_prefix_new_rows before));
+  Alcotest.(check bool) "original successor-bound PFS is unchanged" true
+    (original = Engine.PFS.to_list pfs);
+  Alcotest.(check bool) "original successor-bound Gamma is unchanged" true
+    (types = nonblank_counter_types (Gamma.as_hashtbl gamma)))
+
+let successor_bound_native_countermodel () = with_nonblank_counter_trace (fun () ->
+  let facts,gamma,failed,expected = successor_bound_fixture "2" in
+  let full = Expr.Set.add failed facts in
+  let gt = Gamma.as_hashtbl gamma in
+  let original = Expr.Set.elements full and types = nonblank_counter_types gt in
+  let core = match Solver.successor_bound_core ~original_gamma:(Hashtbl.copy gt) full gt failed with
+    | Some core -> core | None -> Alcotest.fail "same successor selector must accept the literal-bound mutant" in
+  Alcotest.(check bool) "only the goal bound changes in the selected four atoms" true
+    (Expr.Set.equal core expected);
+  Alcotest.(check bool) "mutant remains an unchanged proper original subset" true
+    (Expr.Set.subset core full && not (Expr.Set.equal core full));
+  let before = nonblank_counter_rows () in
+  let caller = "control-numeric-successor-bound-two" in
+  let model = Smt.exec_sat ~caller_kind:caller core gt in
+  Alcotest.(check bool) "bound-two selected core has a genuine native SAT model" true
+    (Option.is_some model);
+  ignore (nonblank_counter_observe "bound-two" before caller "sat" core gt);
+  Printf.printf "SUCCESSOR_BOUND_NATIVE_MODEL[bound-two]=%s\n%!"
+    (Fmt.str "%a" Smt.pp_model (Option.get model));
+  Alcotest.(check bool) "optional SAT cannot prove the mutant successor-bound core" false
+    (Smt.proves_unsat ~caller_kind:"control-numeric-successor-bound-two-optional" core gt);
+  (* This is a selected-core rejection control, not a claim that the whole
+     original query with a changed postcondition has been verified or replayed. *)
+  Alcotest.(check bool) "mutant source frame is unchanged" true
+    (original = Expr.Set.elements full);
+  Alcotest.(check bool) "mutant source Gamma is unchanged" true
+    (types = nonblank_counter_types gt))
+
+let successor_bound_pure_eligibility () =
+  List.iter (fun label ->
+    let facts,gamma,failed,_ = successor_bound_fixture "4611686018427387903" in
+    let index = Expr.LVar "#index" in
+    let original_gamma = Hashtbl.copy (Gamma.as_hashtbl gamma)
+    and current_gamma = Hashtbl.copy (Gamma.as_hashtbl gamma) in
+    let facts = match label with
+      | "missing-is-int" -> Expr.Set.remove (Expr.UnOp (IsInt,index)) facts
+      | "missing-lower" -> Expr.Set.remove (bin FLessThanEqual (Expr.num 0.) index) facts
+      | "missing-upper" -> Expr.Set.remove (bin FLessThan index (Expr.num 4294967295.)) facts
+      | _ -> facts in
+    (match label with
+     | "missing-original-type" -> Hashtbl.remove original_gamma "#index"
+     | "missing-current-type" -> Hashtbl.remove current_gamma "#index"
+     | _ -> ());
+    let failed = match label with
+      | "wrong-step" -> bin ILessThan (Expr.Lit (Int (Z.of_string "4611686018427387903")))
+          (Expr.UnOp (NumToInt,bin FPlus index (Expr.num 2.)))
+      | _ -> failed in
+    let full = if label = "missing-goal" then facts else Expr.Set.add failed facts in
+    let source = Expr.Set.elements full
+    and original_types = nonblank_counter_types original_gamma
+    and current_types = nonblank_counter_types current_gamma in
+    let selected = Solver.successor_bound_core ~original_gamma full current_gamma failed in
+    Alcotest.(check bool) (label ^ " pure successor-bound eligibility") (label = "eligible")
+      (Option.is_some selected);
+    Alcotest.(check bool) (label ^ " source formulae remain unchanged") true
+      (source = Expr.Set.elements full);
+    Alcotest.(check bool) (label ^ " original Gamma remains unchanged") true
+      (original_types = nonblank_counter_types original_gamma);
+    Alcotest.(check bool) (label ^ " current Gamma remains unchanged") true
+      (current_types = nonblank_counter_types current_gamma);
+    if label = "missing-original-type" then
+      Alcotest.(check bool) "an inferred current Number type does not replace the missing original type" true
+        (Hashtbl.find_opt current_gamma "#index" = Some Type.NumberType)
+  ) ["eligible";"missing-original-type";"missing-current-type";"missing-is-int";
+     "missing-lower";"missing-upper";"wrong-step";"missing-goal"]
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "numeric successor bound original R12 native UNSAT and exact subset" `Quick
+          (with_total successor_bound_original_native);
+        Alcotest.test_case "numeric successor bound literal mutant actual native SAT" `Quick
+          (with_total successor_bound_native_countermodel);
+        Alcotest.test_case "numeric successor bound pure original-type and guard eligibility" `Quick
+          (with_total successor_bound_pure_eligibility)])
+
+
+(* One guarded counter-domain family: original and +1 counts, comparison
+   orientations and strict/inclusive array endpoints share the same selector. *)
+let counter_domain_simple_fixture label inclusive =
+  let index_name = "#counter_domain_" ^ label ^ "_index"
+  and values_name = "#counter_domain_" ^ label ^ "_values" in
+  let index = Expr.LVar index_name and values = Expr.LVar values_name in
+  let gamma = Gamma.init () in
+  Gamma.update gamma index_name Type.NumberType;
+  Gamma.update gamma values_name Type.ListType;
+  let guards = [Expr.UnOp (IsInt,index);bin FLessThanEqual (Expr.num 0.) index;
+    bin (if inclusive then FLessThanEqual else FLessThan) index (Expr.num 4294967295.)] in
+  (* Genuine independent list noise keeps a proper original numeric subset.
+     This synthetic unit frame is not a restriction on the program's arrays. *)
+  let noise = not_ (bin Equal (Expr.UnOp (LstLen,values)) (Expr.int 7)) in
+  (Expr.Set.of_list (noise :: guards),gamma,index,Expr.Set.of_list guards)
+
+let counter_domain_count index successor = Expr.UnOp (NumToInt,
+  if successor then bin FPlus index (Expr.num 1.) else index)
+
+let counter_domain_observe label facts gamma failed guards =
+  let input = Expr.Set.elements facts
+  and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let pfs = Engine.PFS.of_list input in
+  let before = nonblank_counter_rows () in
+  let result,contexts = pending_context_capture (fun () ->
+    Solver.check_entailment Utils.Containers.SS.empty pfs [not_ failed] gamma) in
+  Alcotest.(check bool) (label ^ " public guarded-domain entailment") true result;
+  let context = match List.filter (fun row ->
+    pending_context_field "caller" row = `String successor_bound_caller) contexts with
+    | [context] -> context | _ -> Alcotest.fail (label ^ " expected one actual guarded-family query") in
+  let scope = pending_context_scope "numeric-successor-bound-core" [context] in
+  ignore (pending_context_scope "entailment" [context]);
+  let source = integer_projection_expressions "original_fs" scope
+  and core = integer_projection_expressions "original_core" scope in
+  Alcotest.(check int) (label ^ " native family core has four unchanged atoms") 4 (Expr.Set.cardinal core);
+  Alcotest.(check bool) (label ^ " native family retains its original three guards") true
+    (Expr.Set.subset guards core);
+  Alcotest.(check bool) (label ^ " family core is a proper original subset") true
+    (Expr.Set.subset core source && not (Expr.Set.equal core source));
+  Alcotest.(check bool) (label ^ " actual native submission is exactly the selected core") true
+    (pending_context_field "original_fs" context = `String (Fmt.str "%a"
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) core));
+  let query = match pending_context_field "query" context with
+    | `String query -> query | _ -> Alcotest.fail "missing actual family query ID" in
+  let rows = List.filter (fun row -> smt_result_field "query" row = query
+      && smt_result_field "caller" row = successor_bound_caller)
+    (symbolic_prefix_new_rows before) in
+  Alcotest.(check int) (label ^ " one actual family native query/result join") 1 (List.length rows);
+  Alcotest.(check string) (label ^ " actual family native UNSAT") "unsat"
+    (smt_result_field "result" (List.hd rows));
+  let commands = match pending_context_field "encoded_assertions" context with
+    | `List values -> List.map (function `String s -> Sexplib.Sexp.of_string s
+        | _ -> Alcotest.fail "invalid native family command") values
+    | _ -> Alcotest.fail "missing native family commands" in
+  let declared = List.filter_map (function
+    | Sexplib.Sexp.List [Atom "declare-const";Atom name;sort] -> Some (name,sort)
+    | _ -> None) commands in
+  let original_names = Utils.Containers.SS.elements (Expr.lvars failed) in
+  let expected_name = match original_names with
+    | [name] -> String.concat "$$" (String.split_on_char '#' name)
+    | _ -> Alcotest.fail (label ^ " expected one original counter name") in
+  Alcotest.(check bool) (label ^ " only one native binary64 counter is declared") true
+    (match declared with
+     | [name,Sexplib.Sexp.List [Atom "_";Atom "FloatingPoint";Atom "11";Atom "53"]] ->
+         name = expected_name
+     | _ -> false);
+  let rec sequence = function
+    | Sexplib.Sexp.Atom name -> name = "Seq" || String.starts_with ~prefix:"seq." name
+    | List xs -> List.exists sequence xs in
+  Alcotest.(check bool) (label ^ " unused List Gamma entries do not introduce sequences") false
+    (List.exists sequence commands);
+  Alcotest.(check bool) (label ^ " no aliases are added by this family") false
+    (match scope with `Assoc fields -> List.mem_assoc "aliases" fields | _ -> true);
+  Alcotest.(check bool) (label ^ " caller PFS is unchanged") true
+    (input = Engine.PFS.to_list pfs);
+  Alcotest.(check bool) (label ^ " caller Gamma is unchanged") true
+    (types = nonblank_counter_types (Gamma.as_hashtbl gamma))
+
+let counter_domain_native_matrix () = with_nonblank_counter_trace (fun () ->
+  let facts,gamma,successor_failed,successor_core = successor_bound_fixture "4611686018427387903" in
+  let guards = Expr.Set.remove successor_failed successor_core in
+  counter_domain_observe "cached-R12-successor" facts gamma successor_failed guards;
+  let direct_failed = bin ILessThan (Expr.Lit (Int (Z.of_string "4611686018427387903")))
+    (counter_domain_count (Expr.LVar "#index") false) in
+  counter_domain_observe "cached-R13-original-index" facts gamma direct_failed guards;
+  let maximum = Expr.Lit (Int (Z.of_string "4611686018427387903")) in
+  List.iter (fun (label,inclusive,successor,shape) ->
+    let facts,gamma,index,guards = counter_domain_simple_fixture label inclusive in
+    let count = counter_domain_count index successor in
+    let failed = shape maximum count in
+    counter_domain_observe label facts gamma failed guards
+  ) [
+    "direct-inclusive-left-le",true,false,(fun maximum count -> bin ILessThanEqual maximum count);
+    "successor-inclusive-left-le",true,true,(fun maximum count -> bin ILessThanEqual maximum count);
+    "direct-strict-right-lt",false,false,(fun _ count -> bin ILessThan count (Expr.int (-1)));
+    "successor-strict-right-le",false,true,(fun _ count -> bin ILessThanEqual count (Expr.int (-1)));
+    "direct-inclusive-not-left-lt",true,false,(fun _ count -> not_ (bin ILessThan (Expr.int (-1)) count));
+    "successor-inclusive-not-right-le",true,true,(fun maximum count -> not_ (bin ILessThanEqual count maximum));
+    (* The strict source bound excludes the one endpoint that the SAT control
+       below admits under the inclusive array bound. *)
+    "successor-strict-array-end",false,true,(fun _ count -> bin ILessThan
+      (Expr.Lit (Int (Z.of_string "4294967295"))) count)
+  ])
+
+let counter_domain_native_models () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,inclusive,successor,bound) ->
+    let facts,gamma,index,_ = counter_domain_simple_fixture label inclusive in
+    let failed = bin ILessThan (Expr.Lit (Int (Z.of_string bound)))
+      (counter_domain_count index successor) in
+    let full = Expr.Set.add failed facts in
+    let gt = Gamma.as_hashtbl gamma in
+    let source = Expr.Set.elements full and types = nonblank_counter_types gt in
+    let core = match Solver.successor_bound_core ~original_gamma:(Hashtbl.copy gt) full gt failed with
+      | Some core -> core | None -> Alcotest.fail (label ^ " false bound must use the SAME selector") in
+    Alcotest.(check int) (label ^ " selected false-bound core retains four original atoms") 4
+      (Expr.Set.cardinal core);
+    Alcotest.(check bool) (label ^ " selected false-bound core remains a proper original subset") true
+      (Expr.Set.subset core full && not (Expr.Set.equal core full));
+    let caller = "control-counter-domain-" ^ label in
+    let before = nonblank_counter_rows () in
+    let model = Smt.exec_sat ~caller_kind:caller core gt in
+    Alcotest.(check bool) (label ^ " actual native SAT countermodel is retained") true
+      (Option.is_some model);
+    ignore (nonblank_counter_observe label before caller "sat" core gt);
+    let model = Option.get model in
+    Printf.printf "COUNTER_DOMAIN_NATIVE_MODEL[%s]=%s\n%!" label (Fmt.str "%a" Smt.pp_model model);
+    if inclusive then (
+      let lifted = Hashtbl.create 1 in
+      Smt.lift_model model gt (Hashtbl.add lifted) (Expr.Set.singleton index);
+      let name = match index with Expr.LVar name -> name | _ -> assert false in
+      Alcotest.(check bool) "inclusive successor countermodel reaches the exact last array length" true
+        (match Hashtbl.find_opt lifted name with
+         | Some (Expr.Lit (Num n)) -> Int64.bits_of_float n = Int64.bits_of_float 4294967295.
+         | _ -> false));
+    Alcotest.(check bool) (label ^ " optional SAT cannot become a proof") false
+      (Smt.proves_unsat ~caller_kind:(caller ^ "-optional") core gt);
+    Alcotest.(check bool) (label ^ " original source frame remains unchanged") true
+      (source = Expr.Set.elements full);
+    Alcotest.(check bool) (label ^ " original source Gamma remains unchanged") true
+      (types = nonblank_counter_types gt)
+  ) ["direct-false-bound",false,false,"2";
+     "successor-false-bound",false,true,"2";
+     "inclusive-successor-endpoint",true,true,"4294967295"])
+
+let counter_domain_pure_eligibility () =
+  let check label inclusive successor orientation op negative =
+    let facts,gamma,index,_ = counter_domain_simple_fixture label inclusive in
+    let current_gamma = Hashtbl.copy (Gamma.as_hashtbl gamma)
+    and original_gamma = Hashtbl.copy (Gamma.as_hashtbl gamma) in
+    let name = match index with Expr.LVar name -> name | _ -> assert false in
+    let literal = Expr.Lit (Int (Z.of_string "4611686018427387903")) in
+    let count = if label = "wrong-step" then Expr.UnOp (NumToInt,bin FPlus index (Expr.num 2.))
+      else counter_domain_count index successor in
+    let comparison = if orientation then bin op literal count else bin op count literal in
+    let failed = if negative then not_ comparison else comparison in
+    let upper_op = if inclusive then BinOp.FLessThanEqual else BinOp.FLessThan in
+    let facts = match label with
+      | "missing-is-int" -> Expr.Set.remove (Expr.UnOp (IsInt,index)) facts
+      | "missing-lower" | "weaker-lower" ->
+          let facts = Expr.Set.remove (bin FLessThanEqual (Expr.num 0.) index) facts in
+          if label = "weaker-lower" then Expr.Set.add (bin FLessThanEqual (Expr.num (-1.)) index) facts else facts
+      | "missing-upper" | "weaker-upper" ->
+          let facts = Expr.Set.remove (bin upper_op index (Expr.num 4294967295.)) facts in
+          if label = "weaker-upper" then Expr.Set.add (bin FLessThanEqual index (Expr.num 4294967296.)) facts else facts
+      | _ -> facts in
+    (match label with
+     | "missing-original-type" -> Hashtbl.remove original_gamma name
+     | "missing-current-type" -> Hashtbl.remove current_gamma name
+     | _ -> ());
+    let full = if label = "nonmember" then facts else Expr.Set.add failed facts in
+    let full = if label = "only-core" then Expr.Set.remove
+      (not_ (bin Equal (Expr.UnOp (LstLen,Expr.LVar ("#counter_domain_" ^ label ^ "_values"))) (Expr.int 7))) full
+      else full in
+    let source = Expr.Set.elements full
+    and types = nonblank_counter_types original_gamma
+    and current = nonblank_counter_types current_gamma in
+    let selected = Solver.successor_bound_core ~original_gamma full current_gamma failed in
+    Alcotest.(check bool) (label ^ " pure family eligibility") (label = "eligible")
+      (Option.is_some selected);
+    Alcotest.(check bool) (label ^ " original FS unchanged") true (source = Expr.Set.elements full);
+    Alcotest.(check bool) (label ^ " original Gamma unchanged") true
+      (types = nonblank_counter_types original_gamma);
+    Alcotest.(check bool) (label ^ " current Gamma unchanged") true
+      (current = nonblank_counter_types current_gamma);
+    if label = "missing-original-type" then
+      Alcotest.(check bool) "inferred current type cannot replace the original range/type evidence" true
+        (Hashtbl.find_opt current_gamma name = Some Type.NumberType)
+  in
+  List.iter (fun inclusive -> List.iter (fun successor ->
+    List.iter (fun orientation -> List.iter (fun op -> List.iter (fun negative ->
+      check "eligible" inclusive successor orientation op negative
+    ) [false;true]) [BinOp.ILessThan;ILessThanEqual]) [false;true]) [false;true]) [false;true];
+  List.iter (fun inclusive -> List.iter (fun successor ->
+    List.iter (fun label -> check label inclusive successor true BinOp.ILessThan false)
+      ["missing-original-type";"missing-current-type";"missing-is-int";"missing-lower";
+       "missing-upper";"weaker-lower";"weaker-upper";"wrong-step";"nonmember";"only-core"]
+  ) [false;true]) [false;true]
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "guarded counter domains cached bounds and native comparison family" `Quick
+          (with_total counter_domain_native_matrix);
+        Alcotest.test_case "guarded counter domains actual native false bounds and endpoint models" `Quick
+          (with_total counter_domain_native_models);
+        Alcotest.test_case "guarded counter domains pure grammar range and state controls" `Quick
+          (with_total counter_domain_pure_eligibility)])
+
+
+(* M8 query291 already retained the literal Int successor bound. These finite
+   controls select that original atom, without assuming a cast identity or
+   adding a range fact to the native query. The older controls above are intact. *)
+let tight_bound_fixture label inclusive upper maximum =
+  let facts,gamma,index,guards = counter_domain_simple_fixture label inclusive in
+  let count = counter_domain_count index true in
+  let bound = bin ILessThanEqual count (Expr.Lit (Int (Z.of_string upper))) in
+  let failed = bin ILessThan (Expr.Lit (Int (Z.of_string maximum))) count in
+  (Expr.Set.add bound facts,gamma,index,count,bound,failed,guards)
+
+let tight_bound_original_native () = with_nonblank_counter_trace (fun () ->
+  let facts,gamma,_,_,bound,failed,_ = tight_bound_fixture "tight_original" true
+    "4294967295" "4611686018427387903" in
+  let input = Expr.Set.elements facts
+  and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let pfs = Engine.PFS.of_list input in
+  let before = nonblank_counter_rows () in
+  let result,contexts = pending_context_capture (fun () ->
+    Solver.check_entailment Utils.Containers.SS.empty pfs [not_ failed] gamma) in
+  Alcotest.(check bool) "original tight successor bound is proved by public entailment" true result;
+  let context = match List.filter (fun row ->
+    pending_context_field "caller" row = `String successor_bound_caller) contexts with
+    | [context] -> context | _ -> Alcotest.fail "expected one actual tight-bound native query" in
+  let scope = pending_context_scope "numeric-successor-bound-core" [context] in
+  ignore (pending_context_scope "entailment" [context]);
+  let source = integer_projection_expressions "original_fs" scope
+  and core = integer_projection_expressions "original_core" scope in
+  let expected = Expr.Set.of_list [failed;bound] in
+  Alcotest.(check int) "actual tight-bound core has two unchanged original atoms" 2
+    (Expr.Set.cardinal core);
+  Alcotest.(check bool) "actual core is exactly the goal and existing same-count upper bound" true
+    (Expr.Set.equal expected core);
+  Alcotest.(check bool) "actual tight-bound core is a proper original subset" true
+    (Expr.Set.subset core source && not (Expr.Set.equal core source));
+  Alcotest.(check bool) "actual submission is the recorded original core" true
+    (pending_context_field "original_fs" context = `String (Fmt.str "%a"
+      (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) core));
+  let row = nonblank_counter_observe "tight-original" before successor_bound_caller
+    "unsat" core (Gamma.as_hashtbl gamma) in
+  Alcotest.(check bool) "actual UNSAT result joins the captured native context" true
+    (pending_context_field "query" context = `String (smt_result_field "query" row));
+  Alcotest.(check bool) "tight-bound native UNSAT avoids required complete fallback" false
+    (List.exists (fun row -> smt_result_field "caller" row = "required-complete")
+      (symbolic_prefix_new_rows before));
+  Alcotest.(check bool) "tight bound introduces no alias metadata" false
+    (match scope with `Assoc fields -> List.mem_assoc "aliases" fields | _ -> true);
+  Alcotest.(check bool) "public tight-bound PFS remains unchanged" true
+    (input = Engine.PFS.to_list pfs);
+  Alcotest.(check bool) "public tight-bound Gamma remains unchanged" true
+    (types = nonblank_counter_types (Gamma.as_hashtbl gamma)))
+
+let tight_bound_native_countermodels () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,inclusive,upper,maximum,value) ->
+    let facts,gamma,index,_,bound,failed,guards =
+      tight_bound_fixture label inclusive upper maximum in
+    let gt = Gamma.as_hashtbl gamma in
+    let full = Expr.Set.add failed facts in
+    let input = Expr.Set.elements facts and source = Expr.Set.elements full
+    and types = nonblank_counter_types gt in
+    let core = match Solver.successor_bound_core ~original_gamma:(Hashtbl.copy gt)
+      full gt failed with
+      | Some core -> core | None -> Alcotest.fail (label ^ " must use the same bound selector") in
+    Alcotest.(check bool) (label ^ " selects exactly two unchanged original atoms") true
+      (Expr.Set.equal core (Expr.Set.of_list [failed;bound]));
+    let pin = bin ValueEqual index (Expr.num value) in
+    let pinned_source = Expr.Set.add pin full in
+    let witness = Expr.Set.add pin (Expr.Set.union core guards) in
+    Alcotest.(check bool) (label ^ " native countermodel query retains original guards and pin") true
+      (Expr.Set.subset witness pinned_source);
+    let caller = "control-tight-bound-model-" ^ label in
+    let before = nonblank_counter_rows () in
+    let model = Smt.exec_sat ~caller_kind:caller witness gt in
+    Alcotest.(check bool) (label ^ " has an actual native SAT countermodel") true
+      (Option.is_some model);
+    ignore (nonblank_counter_observe label before caller "sat" witness gt);
+    let model = Option.get model in
+    Printf.printf "TIGHT_BOUND_NATIVE_MODEL[%s]=%s\n%!" label (Fmt.str "%a" Smt.pp_model model);
+    let lifted = Hashtbl.create 1 in
+    Smt.lift_model model gt (Hashtbl.add lifted) (Expr.Set.singleton index);
+    let name = match index with Expr.LVar name -> name | _ -> assert false in
+    Alcotest.(check bool) (label ^ " native model has the exact intended counter index") true
+      (match Hashtbl.find_opt lifted name with
+       | Some (Expr.Lit (Num n)) -> Int64.bits_of_float n = Int64.bits_of_float value
+       | _ -> false);
+    let caller = "control-tight-bound-optional-" ^ label in
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " selected-core SAT cannot become a proof") false
+      (Smt.proves_unsat ~caller_kind:caller core gt);
+    ignore (nonblank_counter_observe label before caller "sat" core gt);
+    let pfs = Engine.PFS.of_list input in
+    Alcotest.(check bool) (label ^ " false post is rejected by public entailment") false
+      (Solver.check_entailment Utils.Containers.SS.empty pfs [not_ failed] gamma);
+    Alcotest.(check bool) (label ^ " caller PFS remains unchanged") true
+      (input = Engine.PFS.to_list pfs);
+    Alcotest.(check bool) (label ^ " source formulae remain unchanged") true
+      (source = Expr.Set.elements full);
+    Alcotest.(check bool) (label ^ " source Gamma remains unchanged") true
+      (types = nonblank_counter_types gt)
+  ) ["tight_two",false,"3","2",2.;
+     "tight_inclusive_endpoint",true,"4294967296","4294967295",4294967295.])
+
+let tight_bound_pure_eligibility () =
+  let check label =
+    let facts,gamma,index,count,bound,failed,guards = tight_bound_fixture
+      ("tight_pure_" ^ label) true "4294967295" "4611686018427387903" in
+    let original_gamma = Hashtbl.copy (Gamma.as_hashtbl gamma)
+    and current_gamma = Hashtbl.copy (Gamma.as_hashtbl gamma) in
+    let name = match index with Expr.LVar name -> name | _ -> assert false in
+    let lower = bin ILessThanEqual (Expr.int 0) count in
+    let machine = Expr.Lit (Int (Z.of_string "4611686018427387903")) in
+    let failed = match label with
+      | "not-upper" | "not-upper-wrong-direction" -> not_ (bin ILessThanEqual count machine)
+      | "lower" -> bin ILessThan count (Expr.int 0)
+      | "not-lower" | "not-lower-wrong-direction" -> not_ lower
+      | "wrong-step-goal" -> bin ILessThan machine
+          (Expr.UnOp (NumToInt,bin FPlus index (Expr.num 2.)))
+      | _ -> failed in
+    let replacement = match label with
+      | "wrong-direction" | "not-upper-wrong-direction" | "lower" | "not-lower" -> lower
+      | "wrong-count" -> bin ILessThanEqual (counter_domain_count index false)
+          (Expr.Lit (Int (Z.of_string "4294967295")))
+      | "wrong-increment-bound" -> bin ILessThanEqual
+          (Expr.UnOp (NumToInt,bin FPlus index (Expr.num 2.)))
+          (Expr.Lit (Int (Z.of_string "4294967295")))
+      | _ -> bound in
+    let facts = Expr.Set.add replacement (Expr.Set.remove bound facts) in
+    let facts = match label with
+      | "absent-bound" -> Expr.Set.remove replacement facts
+      | "missing-is-int" -> Expr.Set.remove (Expr.UnOp (IsInt,index)) facts
+      | "missing-lower" | "weaker-lower" ->
+          let facts = Expr.Set.remove (bin FLessThanEqual (Expr.num 0.) index) facts in
+          if label = "weaker-lower" then Expr.Set.add
+            (bin FLessThanEqual (Expr.num (-1.)) index) facts else facts
+      | "missing-upper" | "weaker-upper" ->
+          let facts = Expr.Set.remove (bin FLessThanEqual index (Expr.num 4294967295.)) facts in
+          if label = "weaker-upper" then Expr.Set.add
+            (bin FLessThanEqual index (Expr.num 4294967296.)) facts else facts
+      | _ -> facts in
+    (match label with
+     | "missing-original-type" -> Hashtbl.remove original_gamma name
+     | "missing-current-type" -> Hashtbl.remove current_gamma name
+     | _ -> ());
+    let full = if label = "missing-goal" then facts else Expr.Set.add failed facts in
+    let full = if label = "only-old-core" then Expr.Set.add failed guards else full in
+    let source = Expr.Set.elements full
+    and original_types = nonblank_counter_types original_gamma
+    and current_types = nonblank_counter_types current_gamma in
+    let saved_total = !Config.Verification.total
+    and saved_under = !Config.under_approximation in
+    let selected = Fun.protect ~finally:(fun () ->
+      Config.Verification.total := saved_total; Config.under_approximation := saved_under)
+      (fun () ->
+        Config.Verification.total := label <> "not-total";
+        Config.under_approximation := label = "under-approximation";
+        Solver.successor_bound_core ~original_gamma full current_gamma failed) in
+    let expected = match label with
+      | "eligible" | "not-upper" | "lower" | "not-lower" ->
+          Some (Expr.Set.of_list [failed;replacement])
+      | "wrong-direction" | "not-upper-wrong-direction" | "not-lower-wrong-direction"
+      | "wrong-count" | "wrong-increment-bound" | "absent-bound" ->
+          Some (Expr.Set.add failed guards)
+      | _ -> None in
+    Alcotest.(check bool) (label ^ " exact pure selector result") true
+      (match selected,expected with
+       | None,None -> true
+       | Some core,Some expected -> Expr.Set.equal core expected
+       | _ -> false);
+    (match selected with
+     | Some core -> Alcotest.(check bool) (label ^ " is a proper unchanged original subset") true
+         (Expr.Set.subset core full && not (Expr.Set.equal core full))
+     | None -> ());
+    Alcotest.(check bool) (label ^ " original formulae remain unchanged") true
+      (source = Expr.Set.elements full);
+    Alcotest.(check bool) (label ^ " original Gamma remains unchanged") true
+      (original_types = nonblank_counter_types original_gamma);
+    Alcotest.(check bool) (label ^ " current Gamma remains unchanged") true
+      (current_types = nonblank_counter_types current_gamma);
+    Alcotest.(check bool) (label ^ " total and under-approximation modes are restored") true
+      (!Config.Verification.total = saved_total && !Config.under_approximation = saved_under)
+  in
+  List.iter check ["eligible";"not-upper";"lower";"not-lower";
+    "wrong-direction";"not-upper-wrong-direction";"not-lower-wrong-direction";
+    "wrong-count";"wrong-increment-bound";"absent-bound";"missing-original-type";
+    "missing-current-type";"missing-is-int";"missing-lower";"missing-upper";
+    "weaker-lower";"weaker-upper";"wrong-step-goal";"missing-goal";"not-total";
+    "under-approximation";"only-old-core"];
+  (* The old cached direct-index fixture has a natural lower bound already.
+     It must keep its four-atom upper-bound core, not prefer that lower bound. *)
+  let facts,gamma,old_failed,old_core = successor_bound_fixture "4611686018427387903" in
+  let failed = bin ILessThan (Expr.Lit (Int (Z.of_string "4611686018427387903")))
+    (counter_domain_count (Expr.LVar "#index") false) in
+  let gt = Gamma.as_hashtbl gamma in
+  Alcotest.(check bool) "cached direct-index lower bound preserves the old four-atom core" true
+    (match Solver.successor_bound_core ~original_gamma:(Hashtbl.copy gt)
+       (Expr.Set.add failed facts) gt failed with
+     | Some core -> Expr.Set.equal core (Expr.Set.add failed (Expr.Set.remove old_failed old_core))
+     | None -> false)
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "tight original Int bound public entailment and native two-atom UNSAT" `Quick
+          (with_total tight_bound_original_native);
+        Alcotest.test_case "tight original Int bound actual SAT models and false-post rejection" `Quick
+          (with_total tight_bound_native_countermodels);
+        Alcotest.test_case "tight original Int bound pure gates identity direction and mode controls" `Quick
+          (with_total tight_bound_pure_eligibility)])
+
+(* Source-only typed lookup alias controls. These require fresh native context
+   emissions and actual result rows. A selector, cache hit or later full proof
+   cannot satisfy the positive contained-query assertions. *)
+let typed_lookup_alias_text = function
+  | `String text -> text
+  | _ -> Alcotest.fail "expected native typed-lookup context text"
+
+let typed_lookup_alias_compact text =
+  let b = Buffer.create (String.length text) in
+  String.iter (fun c -> if not (List.mem c [' ';'\t';'\r';'\n']) then
+    Buffer.add_char b c) text;
+  Buffer.contents b
+
+let typed_lookup_alias_contains text part =
+  let text = typed_lookup_alias_compact text
+  and part = typed_lookup_alias_compact part in
+  let rec find i =
+    i + String.length part <= String.length text
+    && (String.sub text i (String.length part) = part || find (i + 1)) in
+  find 0
+
+let typed_lookup_alias_fixture label reverse witness_type concrete mode =
+  let name suffix = "#lookup_" ^ label ^ "_" ^ suffix in
+  let index = Expr.LVar (name "index")
+  and values = Expr.LVar (name "values")
+  and current = Expr.LVar (name "current")
+  and noise = Expr.LVar (name "bookkeeping") in
+  let next = bin FPlus index (Expr.num 1.) in
+  let previous = bin FMinus next (Expr.num 1.) in
+  let cast e = Expr.UnOp (NumToInt,e) in
+  let nth i = bin LstNth values i in
+  let lookup = nth (if concrete then Expr.int 0 else cast previous)
+  and original = nth (if concrete then Expr.int 0 else cast index) in
+  let other = nth (Expr.int 1) in
+  let equal value = if reverse then bin Equal value current
+    else bin Equal current value in
+  let link = equal lookup in
+  let bookkeeping = bin ILessThan (Expr.int 0) noise in
+  let facts = [
+    Expr.UnOp (IsInt,index); Expr.UnOp (IsInt,next);
+    bin FLessThanEqual (Expr.num 0.) index;
+    bin FLessThanEqual index (Expr.num 4294967295.);
+    bin FLessThanEqual next (Expr.num 4294967295.);
+    bin FLessThan (Expr.num 0.) next;
+    bin ILessThanEqual (Expr.int 0) (cast index);
+    bin ILessThanEqual (bin IPlus (Expr.int 1) (cast index))
+      (Expr.UnOp (LstLen,values));
+    bin ILessThanEqual (Expr.UnOp (LstLen,values)) (Expr.int 4294967295);
+    bin Equal previous index;
+    bin Equal (cast previous) (cast index);
+    bin Equal (Expr.UnOp (NumberToUtf16,previous))
+      (Expr.UnOp (NumberToUtf16,index));
+    bookkeeping ] in
+  let links = match mode with
+    | "missing" -> []
+    | "different-index" -> [equal other]
+    | _ -> if Expr.equal original lookup then [link]
+      else [equal original;link] in
+  let facts = facts @ links @ (if concrete then [
+    bin ValueEqual index (Expr.num 0.);
+    bin Equal (Expr.UnOp (LstLen,values)) (Expr.int 2) ] else []) in
+  let gamma = Gamma.init () in
+  List.iter (fun (suffix,typ) -> Gamma.update gamma (name suffix) typ)
+    ["index",Type.NumberType;"values",Type.ListType;"bookkeeping",Type.IntType];
+  Option.iter (Gamma.update gamma (name "current")) witness_type;
+  let goal = bin Equal (Expr.UnOp (TypeOf,lookup))
+    (Expr.Lit (Type Type.Utf16Type)) in
+  facts,gamma,current,lookup,link,bookkeeping,goal
+
+let typed_lookup_alias_observe label before contexts expected_result =
+  let caller = "optional-entailment-contained" in
+  let context = match List.filter (fun row ->
+    pending_context_field "caller" row = `String caller) contexts with
+    | [row] -> row
+    | _ -> Alcotest.fail (label ^ " requires one actual contained query") in
+  let query = pending_context_field "query" context |> typed_lookup_alias_text in
+  let rows = symbolic_prefix_new_rows before in
+  List.iter (fun row -> Alcotest.(check bool)
+    (label ^ " rejects every actual UNKNOWN") false
+    (smt_result_field "result" row = "unknown")) rows;
+  let joined = List.filter (fun row ->
+    smt_result_field "query" row = query
+    && smt_result_field "caller" row = caller) rows in
+  Alcotest.(check int) (label ^ " one actual native result joins context") 1
+    (List.length joined);
+  let row = List.hd joined in
+  List.iter (fun (key,value) -> Alcotest.(check string) (label ^ " " ^ key)
+    value (smt_result_field key row))
+    ["result",expected_result;"phase_selection","3";"raw_unknown","true"];
+  let fs = pending_context_field "original_fs" context |> typed_lookup_alias_text
+  and gamma = pending_context_field "original_gamma" context |> typed_lookup_alias_text in
+  (* These fixtures contain no quoted text literals; compacting whitespace
+     cannot equate different literal contents. Compare the real query header. *)
+  let prefix = "GIL query:\nFS: " ^ fs ^ "\nGAMMA: " ^ gamma ^
+    "\nEncoded as SMT Query:" in
+  let dump = nonblank_counter_read (Filename.concat "gillian_smt_queries" query) in
+  Alcotest.(check bool) (label ^ " context is the actual native FS/Gamma") true
+    (String.starts_with ~prefix:(typed_lookup_alias_compact prefix)
+      (typed_lookup_alias_compact dump));
+  ignore (pending_context_scope "entailment" [context]);
+  Printf.printf "TYPED_LOOKUP_ALIAS_NATIVE_RESULT[%s]=%s\n%!" label row;
+  context,fs,gamma,rows
+
+let typed_lookup_alias_native_positive () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun reverse ->
+    let label = if reverse then "reverse" else "forward" in
+    let facts,gamma,current,_,link,bookkeeping,goal =
+      typed_lookup_alias_fixture label reverse (Some Type.Utf16Type) false "direct" in
+    let pfs = Engine.PFS.of_list facts in
+    let original = Engine.PFS.to_list pfs
+    and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    let before = nonblank_counter_rows () in
+    let result,contexts = pending_context_capture (fun () ->
+      Solver.check_entailment Utils.Containers.SS.empty pfs [goal] gamma) in
+    Alcotest.(check bool) (label ^ " public typed lookup entailment") true result;
+    let context,fs,query_gamma,rows =
+      typed_lookup_alias_observe label before contexts "unsat" in
+    Alcotest.(check bool) (label ^ " exact original alias equality retained") true
+      (typed_lookup_alias_contains fs (Fmt.str "%a" Expr.pp link));
+    let current_name = match current with Expr.LVar name -> name | _ -> assert false in
+    Alcotest.(check bool) (label ^ " native Gamma retains existing Utf16 witness") true
+      (typed_lookup_alias_contains query_gamma ("(" ^ current_name ^ ", Utf16)"));
+    Alcotest.(check bool) (label ^ " original typed bookkeeping was omitted") false
+      (typed_lookup_alias_contains fs (Fmt.str "%a" Expr.pp bookkeeping));
+    let parent = pending_context_scope "entailment" [context] in
+    Alcotest.(check bool) (label ^ " omitted bookkeeping exists in original parent") true
+      (match pending_context_field "original_left_fs" parent with
+       | `List expressions -> List.mem (`String (Fmt.str "%a" Expr.pp bookkeeping)) expressions
+       | _ -> false);
+    Alcotest.(check bool) (label ^ " native contained UNSAT is not a later full proof") false
+      (List.exists (fun row -> smt_result_field "caller" row = "required-complete") rows);
+    Alcotest.(check bool) (label ^ " caller PFS unchanged") true
+      (original = Engine.PFS.to_list pfs);
+    Alcotest.(check bool) (label ^ " caller Gamma unchanged") true
+      (types = nonblank_counter_types (Gamma.as_hashtbl gamma))
+  ) [false;true])
+
+(* Negative controls keep a symbolic Int lookup through normalization. The
+   two original bounds define both i and i+1 without fixing the list length. *)
+let typed_lookup_alias_negative_fixture mode witness_type =
+  let name suffix = "#lookup_negative_" ^ mode ^ "_" ^ suffix in
+  let index = Expr.LVar (name "index")
+  and values = Expr.LVar (name "values")
+  and current = Expr.LVar (name "current")
+  and noise = Expr.LVar (name "bookkeeping") in
+  let lookup = bin LstNth values index in
+  let other = bin LstNth values (bin IPlus index (Expr.int 1)) in
+  let link = bin Equal current lookup in
+  let bookkeeping = bin ILessThan (Expr.int 0) noise in
+  let facts = [
+    bin ILessThanEqual (Expr.int 0) index;
+    bin ILessThanEqual (bin IPlus index (Expr.int 2))
+      (Expr.UnOp (LstLen,values));
+    bookkeeping ] in
+  let links = match mode with
+    | "missing" -> []
+    | "different-index" -> [bin Equal current other]
+    | _ -> [link] in
+  let gamma = Gamma.init () in
+  List.iter (fun (suffix,typ) -> Gamma.update gamma (name suffix) typ)
+    ["index",Type.IntType;"values",Type.ListType;"bookkeeping",Type.IntType];
+  Option.iter (Gamma.update gamma (name "current")) witness_type;
+  let goal = bin Equal (Expr.UnOp (TypeOf,lookup))
+    (Expr.Lit (Type Type.Utf16Type)) in
+  facts @ links,gamma,current,lookup,link,bookkeeping,goal
+
+let typed_lookup_alias_native_countercontrols () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (mode,witness_type,retained) ->
+    let facts,gamma,current,lookup,link,_,goal =
+      typed_lookup_alias_negative_fixture mode witness_type in
+    let pfs = Engine.PFS.of_list facts in
+    let original = Engine.PFS.to_list pfs
+    and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    let before = nonblank_counter_rows () in
+    let result,contexts = pending_context_capture (fun () ->
+      Solver.check_entailment Utils.Containers.SS.empty pfs [goal] gamma) in
+    Alcotest.(check bool) (mode ^ " false Utf16 goal rejects") false result;
+    let _,fs,query_gamma,rows =
+      typed_lookup_alias_observe mode before contexts "sat" in
+    (* Check the actual submitted counterquery, not only its unsimplified
+       parent provenance: a fresh scalar TypeOf goal cannot qualify this row. *)
+    Alcotest.(check bool) (mode ^ " actual query retains the exact TypeOf ListNth goal") true
+      (typed_lookup_alias_contains fs (Fmt.str "%a" Expr.pp (not_ goal)));
+    let index_name = match lookup with
+      | Expr.BinOp (_,LstNth,Expr.LVar name) -> name
+      | _ -> Alcotest.fail "negative lookup must have a symbolic Int index" in
+    Alcotest.(check bool) (mode ^ " actual query retains the symbolic Int index") true
+      (typed_lookup_alias_contains query_gamma ("(" ^ index_name ^ ", Int)"));
+    let current_name = match current with Expr.LVar name -> name | _ -> assert false in
+    Alcotest.(check bool) (mode ^ " exact alias retention follows only direct typed lookup") retained
+      (typed_lookup_alias_contains fs (Fmt.str "%a" Expr.pp link));
+    if retained then Alcotest.(check bool) (mode ^ " Number type is not promoted to Utf16") true
+      (typed_lookup_alias_contains query_gamma ("(" ^ current_name ^ ", Num)"))
+    else Alcotest.(check bool) (mode ^ " does not widen by absent/untyped/different lookup witness") false
+      (typed_lookup_alias_contains fs current_name);
+    Alcotest.(check bool) (mode ^ " complete native SAT confirms public rejection") true
+      (List.exists (fun row -> smt_result_field "caller" row = "required-complete"
+        && smt_result_field "result" row = "sat") rows);
+    Alcotest.(check bool) (mode ^ " caller PFS unchanged") true
+      (original = Engine.PFS.to_list pfs);
+    Alcotest.(check bool) (mode ^ " caller Gamma unchanged") true
+      (types = nonblank_counter_types (Gamma.as_hashtbl gamma))
+  ) ["missing",Some Type.Utf16Type,false;
+     "wrong-type",Some Type.NumberType,true;
+     "different-index",Some Type.Utf16Type,false;
+     "untyped",None,false])
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "typed lookup exact alias forward and reverse native contained UNSAT" `Quick
+          (with_total typed_lookup_alias_native_positive);
+        Alcotest.test_case "typed lookup missing wrong-type distinct-index and untyped native SAT rejection" `Quick
+          (with_total typed_lookup_alias_native_countercontrols)])
+
+(* Bound witness materialization, not the admitted logical list/index domain. *)
+let bounded_nth_fixture label index =
+  let xs_name = "#bounded_nth_" ^ label ^ "_xs"
+  and value_name = "#bounded_nth_" ^ label ^ "_value" in
+  let xs = Expr.LVar xs_name and value = Expr.LVar value_name in
+  let gamma = Gamma.init () in
+  Gamma.update gamma xs_name Type.ListType;
+  Gamma.update gamma value_name Type.Utf16Type;
+  let lookup = bin LstNth xs (Expr.Lit (Literal.Int index)) in
+  let link = bin Equal lookup value in
+  let facts = [bin ILessThanEqual (Expr.int 0) (Expr.UnOp (LstLen,xs));
+               (* Existing Int normal form: index < length iff index+1 <= length. *)
+               bin ILessThanEqual (Expr.Lit (Literal.Int (Z.succ index)))
+                 (Expr.UnOp (LstLen,xs)); link] in
+  xs_name,value_name,xs,value,lookup,link,gamma,Engine.PFS.of_list facts
+
+let bounded_nth_simplify pfs gamma =
+  Engine.Simplifications.simplify_pfs_and_gamma ~matching:true
+    ~save_spec_vars:(Utils.Containers.SS.empty,true) pfs gamma
+
+let bounded_nth_substitution_facts subst =
+  Gillian.Symbolic.Subst.to_list subst
+  |> List.map (fun (left,right) -> bin ValueEqual left right)
+
+let rec bounded_nth_explicit_sizes = function
+  | Expr.EList xs -> List.length xs :: List.concat_map bounded_nth_explicit_sizes xs
+  | Expr.NOp (_,xs) -> List.concat_map bounded_nth_explicit_sizes xs
+  | Expr.BinOp (a,_,b) -> bounded_nth_explicit_sizes a @ bounded_nth_explicit_sizes b
+  | Expr.UnOp (_,a) -> bounded_nth_explicit_sizes a
+  | _ -> []
+
+let bounded_nth_native label expected facts gamma =
+  let fs = Expr.Set.of_list facts in
+  let caller = "bounded-nth-" ^ label in
+  let before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () ->
+    Smt.exec_sat ~caller_kind:caller fs (Gamma.as_hashtbl gamma)) in
+  Alcotest.(check int) (label ^ " one fresh native context") 1 (List.length contexts);
+  Alcotest.(check bool) (label ^ " native model presence") (expected="sat")
+    (Option.is_some model);
+  ignore (nonblank_counter_observe label before caller expected fs
+    (Gamma.as_hashtbl gamma));
+  Option.iter (fun model -> Printf.printf "BOUNDED_NTH_NATIVE_MODEL[%s]=%s\n%!"
+    label (Fmt.str "%a" Smt.pp_model model)) model
+
+let bounded_nth_small () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun index ->
+    let label = "small" ^ string_of_int index in
+    let xs_name,value_name,_,_,_,link,gamma,pfs =
+      bounded_nth_fixture label (Z.of_int index) in
+    let subst,_ = bounded_nth_simplify pfs gamma in
+    let aliases = bounded_nth_substitution_facts subst in
+    let facts = Engine.PFS.to_list pfs @ aliases in
+    let sizes = List.concat_map bounded_nth_explicit_sizes facts in
+    Alcotest.(check int) (label ^ " actual prefix includes the indexed witness")
+      (index+1) (List.fold_left max 0 sizes);
+    (* These are original PRE types, not inferred extra witness facts. *)
+    Gamma.update gamma xs_name Type.ListType;
+    Gamma.update gamma value_name Type.Utf16Type;
+    bounded_nth_native label "unsat" (not_ link :: facts) gamma
+  ) [1;100])
+
+let bounded_nth_large () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,index) ->
+    let _,_,_,_,_,link,gamma,pfs = bounded_nth_fixture label index in
+    let original_types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    let original = Expr.Set.of_list (Engine.PFS.to_list pfs) in
+    let subst,existentials = bounded_nth_simplify pfs gamma in
+    Alcotest.(check bool) (label ^ " no prefix substitution") true
+      (Gillian.Symbolic.Subst.is_empty subst);
+    Alcotest.(check bool) (label ^ " no new existential witness") true
+      (Utils.Containers.SS.is_empty existentials);
+    let actual = Expr.Set.of_list (Engine.PFS.to_list pfs) in
+    Alcotest.(check bool) (label ^ " exact original facts retained") true
+      (Expr.Set.equal original actual);
+    Alcotest.(check bool) (label ^ " Gamma unchanged") true
+      (original_types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+    Alcotest.(check bool) (label ^ " no explicit list prefix") true
+      (List.concat_map bounded_nth_explicit_sizes (Expr.Set.elements actual) = []);
+    bounded_nth_native label "unsat" (not_ link :: Expr.Set.elements actual) gamma
+  ) ["first-skipped",Z.of_int 101;"uint32-max-index",Z.of_string "4294967294";
+     "arbitrary-large-int",Z.shift_left Z.one 100])
+
+let bounded_nth_wrong_fact () = with_nonblank_counter_trace (fun () ->
+  let xs_name,value_name,xs,value,lookup,_,gamma,pfs =
+    bounded_nth_fixture "counter" (Z.of_int 101) in
+  let other_name = "#bounded_nth_counter_other" in
+  let other = Expr.LVar other_name in
+  Gamma.update gamma other_name Type.Utf16Type;
+  List.iter (Engine.PFS.extend pfs)
+    [bin Equal (Expr.UnOp (LstLen,xs)) (Expr.int 103);
+     bin ValueEqual value (nonblank_utf16 "kept");
+     bin ValueEqual other (nonblank_utf16 "different")];
+  let subst,_ = bounded_nth_simplify pfs gamma in
+  let facts = Engine.PFS.to_list pfs @ bounded_nth_substitution_facts subst in
+  List.iter (fun (name,typ) -> Gamma.update gamma name typ)
+    [xs_name,Type.ListType;value_name,Type.Utf16Type;other_name,Type.Utf16Type];
+  let goal = bin Equal lookup other in
+  bounded_nth_native "wrong-value" "sat" (not_ goal :: facts) gamma;
+  Alcotest.(check bool) "actual public entailment rejects wrong large-index value"
+    false (Solver.check_entailment Utils.Containers.SS.empty
+      (Engine.PFS.of_list facts) [goal] gamma))
+
+let bounded_nth_negative_domain () = with_nonblank_counter_trace (fun () ->
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#bounded_negative_xs" Type.ListType;
+  let xs = Expr.LVar "#bounded_negative_xs" in
+  let pfs = Engine.PFS.of_list
+    [bin ILessThanEqual (Expr.int 0) (Expr.UnOp (LstLen,xs))] in
+  let lookup = bin LstNth xs (Expr.int (-1)) in
+  match Engine.Totality.check_proof_expression ~context:"bounded nth negative"
+    ~evaluate:(Engine.Reduction.reduce_lexpr ~pfs ~gamma)
+    ~assertion:(fun condition ->
+      Solver.check_entailment Utils.Containers.SS.empty pfs [condition] gamma)
+    lookup with
+  | () -> Alcotest.fail "negative nth domain was accepted"
+  | exception Gillian.Utils.Gillian_result.Exc.Gillian_error
+      (AnalysisFailures [{msg; _}]) ->
+      Alcotest.(check bool) "real totality entry rejects the negative index" true
+        (String.starts_with ~prefix:"bounded nth negative is not proved defined:" msg);
+      Printf.printf "BOUNDED_NTH_NEGATIVE_DOMAIN_REJECTED=%s\n%!" msg)
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "bounded nth small actual prefix native UNSAT" `Quick
+          (with_total bounded_nth_small);
+        Alcotest.test_case "bounded nth large exact retention native UNSAT" `Quick
+          (with_total bounded_nth_large);
+        Alcotest.test_case "bounded nth wrong witness native SAT public rejection" `Quick
+          (with_total bounded_nth_wrong_fact);
+        Alcotest.test_case "bounded nth negative actual totality rejection" `Quick
+          (with_total bounded_nth_negative_domain)])
+
+(* Typed-alias sufficient-core controls. The old 0..153 definitions/registry
+   above are untouched. These fixtures contain no quoted literal text, so the
+   existing whitespace-only comparison preserves every actual expression.
+   Test names are distinct from the earlier fixtures to require fresh queries. *)
+let typed_alias_core_expected_fs fs =
+  Fmt.str "%a" (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs
+
+let typed_alias_core_check_gamma label expected context =
+  let actual = pending_context_field "original_gamma" context
+    |> typed_lookup_alias_text in
+  let binding_count = String.fold_left
+    (fun count c -> if c = ',' then count + 1 else count) 0 actual in
+  Alcotest.(check int) (label ^ " exact original typed Gamma binding count")
+    (List.length expected) binding_count;
+  List.iter (fun (name,typ) ->
+    Alcotest.(check bool) (label ^ " actual Gamma retains " ^ name) true
+      (typed_lookup_alias_contains actual
+        ("(" ^ name ^ ", " ^ Type.str typ ^ ")"))) expected
+
+let typed_alias_core_native_positive () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun reverse ->
+    let label = if reverse then "core_reverse" else "core_forward" in
+    let facts,gamma,_,_,link,bookkeeping,goal =
+      typed_lookup_alias_fixture label reverse (Some Type.Utf16Type) false "direct" in
+    let pfs = Engine.PFS.of_list facts in
+    let original = Engine.PFS.to_list pfs
+    and original_types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    let full = Expr.Set.of_list (not_ goal :: facts)
+    and core = Expr.Set.of_list [not_ goal;link] in
+    Alcotest.(check int) (label ^ " exactly two unchanged atoms") 2
+      (Expr.Set.cardinal core);
+    Alcotest.(check bool) (label ^ " proper literal original subset") true
+      (Expr.Set.subset core full && not (Expr.Set.equal core full));
+    let before = nonblank_counter_rows () in
+    let result,contexts = pending_context_capture (fun () ->
+      Solver.check_entailment Utils.Containers.SS.empty pfs [goal] gamma) in
+    Alcotest.(check bool) (label ^ " public entailment") true result;
+    let context,fs,_,rows =
+      typed_lookup_alias_observe label before contexts "unsat" in
+    Alcotest.(check int) (label ^ " sole fresh native sufficient query") 1
+      (List.length rows);
+    Alcotest.(check string) (label ^ " actual query is exactly the two original atoms")
+      (typed_lookup_alias_compact (typed_alias_core_expected_fs core))
+      (typed_lookup_alias_compact fs);
+    typed_alias_core_check_gamma label original_types context;
+    let parent = pending_context_scope "entailment" [context] in
+    Alcotest.(check bool) (label ^ " alias is in original caller PRE") true
+      (match pending_context_field "original_left_fs" parent with
+       | `List expressions ->
+           List.mem (`String (Fmt.str "%a" Expr.pp link)) expressions
+           && List.mem (`String (Fmt.str "%a" Expr.pp bookkeeping)) expressions
+       | _ -> false);
+    Alcotest.(check bool) (label ^ " original caller goal retained") true
+      (pending_context_field "original_right_fs" parent
+        = `List [`String (Fmt.str "%a" Expr.pp goal)]);
+    Alcotest.(check bool) (label ^ " caller PFS unchanged") true
+      (original = Engine.PFS.to_list pfs);
+    Alcotest.(check bool) (label ^ " caller Gamma unchanged") true
+      (original_types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+    Printf.printf "TYPED_ALIAS_CORE_SELECTED[%s]=two-original-atoms-native-UNSAT\n%!"
+      label
+  ) [false;true])
+
+let typed_alias_core_decline_fixture mode witness_type =
+  let name suffix = "#typed_alias_core_decline_" ^ mode ^ "_" ^ suffix in
+  let index = Expr.LVar (name "index")
+  and values = Expr.LVar (name "values")
+  and current = Expr.LVar (name "current")
+  and bookkeeping = Expr.LVar (name "bookkeeping") in
+  let lookup = bin LstNth values index in
+  let link = bin Equal current lookup in
+  let facts = [
+    bin ILessThanEqual (Expr.int 0) index;
+    bin ILessThanEqual (bin IPlus index (Expr.int 2)) (Expr.UnOp (LstLen,values));
+    bin ILessThan (Expr.int 0) bookkeeping ] in
+  let links = match mode with
+    | "missing" -> []
+    | "different-index" ->
+        [bin Equal current (bin LstNth values (bin IPlus index (Expr.int 1)))]
+    | _ -> [link] in
+  let gamma = Gamma.init () in
+  List.iter (fun (suffix,typ) -> Gamma.update gamma (name suffix) typ)
+    ["index",Type.IntType;"values",Type.ListType;"bookkeeping",Type.IntType];
+  Option.iter (Gamma.update gamma (name "current")) witness_type;
+  let goal = bin Equal (Expr.UnOp (TypeOf,lookup))
+    (Expr.Lit (Type Type.Utf16Type)) in
+  facts @ links,gamma,index,values,link,goal
+
+let typed_alias_core_native_declines () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (mode,witness_type,retained) ->
+    let facts,gamma,index,values,link,goal =
+      typed_alias_core_decline_fixture mode witness_type in
+    let pfs = Engine.PFS.of_list facts in
+    let original = Engine.PFS.to_list pfs
+    and original_types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    let used = List.fold_left
+      (fun names fact -> Utils.Containers.SS.union names (Expr.lvars fact))
+      (Expr.lvars goal) facts in
+    let expected_types = List.filter
+      (fun (name,_) -> Utils.Containers.SS.mem name used) original_types in
+    (* This describes the unchanged ordinary contained query after its existing
+       Int normalization/definedness pass; it is never added to solver inputs.
+       In particular 2+i is the canonical form of the original i+2 bound. *)
+    let expected = Expr.Set.of_list
+      ([not_ goal;bin ILessThanEqual (Expr.int 0) index;
+        bin ILessThanEqual (Expr.int 0) (Expr.UnOp (LstLen,values));
+        bin ILessThanEqual (bin IPlus (Expr.int 2) index) (Expr.UnOp (LstLen,values))]
+       @ (if retained then [link] else [])) in
+    let before = nonblank_counter_rows () in
+    let result,contexts = pending_context_capture (fun () ->
+      Solver.check_entailment Utils.Containers.SS.empty pfs [goal] gamma) in
+    Alcotest.(check bool) (mode ^ " false Utf16 goal rejects") false result;
+    let context,fs,_,rows =
+      typed_lookup_alias_observe mode before contexts "sat" in
+    Alcotest.(check string) (mode ^ " actual ordinary contained query retained")
+      (typed_lookup_alias_compact (typed_alias_core_expected_fs expected))
+      (typed_lookup_alias_compact fs);
+    Alcotest.(check bool) (mode ^ " no two-atom override") true
+      (Expr.Set.cardinal expected > 2);
+    typed_alias_core_check_gamma mode expected_types context;
+    Alcotest.(check bool) (mode ^ " genuine required fallback SAT") true
+      (List.exists (fun row -> smt_result_field "caller" row = "required-complete"
+        && smt_result_field "result" row = "sat") rows);
+    Alcotest.(check bool) (mode ^ " caller PFS unchanged") true
+      (original = Engine.PFS.to_list pfs);
+    Alcotest.(check bool) (mode ^ " caller Gamma unchanged") true
+      (original_types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+    Printf.printf "TYPED_ALIAS_CORE_DECLINED[%s]=ordinary-SAT-complete-SAT\n%!" mode
+  ) ["missing",Some Type.Utf16Type,false;
+     "wrong-type",Some Type.NumberType,true;
+     "different-index",Some Type.Utf16Type,false;
+     "untyped",None,false])
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "typed alias core exact original forward reverse native UNSAT" `Quick
+          (with_total typed_alias_core_native_positive);
+        Alcotest.test_case "typed alias core original missing wrong-type distinct untyped native SAT decline" `Quick
+          (with_total typed_alias_core_native_declines)])
+
+
+(* Compact high-index Boolean SAT controls. Everything above, including the
+   old 0..155 registry, is byte-exact. These use actual public SAT, native
+   results/dumps/contexts and caller nonmutation; no solver is mocked. *)
+let compact_nth_fixture label reverse typ index length =
+  let name suffix = "#compact_nth_" ^ label ^ "_" ^ suffix in
+  let xs = Expr.LVar (name "xs") and item = Expr.LVar (name "item") in
+  let gamma = Gamma.init () in
+  Gamma.update gamma (name "xs") Type.ListType;
+  Gamma.update gamma (name "item") typ;
+  let nth = bin LstNth xs (Expr.Lit (Int index)) in
+  let alias = if reverse then bin Equal nth item else bin Equal item nth in
+  let facts = [bin ILessThanEqual (Expr.int 0) (Expr.UnOp (LstLen,xs));
+    bin Equal (Expr.UnOp (LstLen,xs)) (Expr.Lit (Int length));
+    bin ILessThanEqual (Expr.UnOp (LstLen,xs)) (Expr.Lit (Int length)); alias] in
+  xs,item,nth,facts,gamma
+
+let compact_nth_run ?(matching = false) label projected expected facts gamma =
+  let original = facts and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let before = nonblank_counter_rows () in
+  let result,contexts = pending_context_capture (fun () ->
+    Solver.check_satisfiability ~matching facts gamma) in
+  Alcotest.(check bool) (label ^ " public Boolean SAT") expected result;
+  Alcotest.(check bool) (label ^ " caller assertions unchanged") true
+    (List.equal Expr.equal original facts);
+  Alcotest.(check bool) (label ^ " caller Gamma unchanged") true
+    (types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+  let outer = pending_context_scope "satisfiability" contexts in
+  Alcotest.(check bool) (label ^ " actual native matching mode retained") true
+    (pending_context_field "matching" outer = `Bool matching);
+  Alcotest.(check bool) (label ^ " actual original caller assertions retained") true
+    (pending_context_field "original_fs" outer = `List
+      (List.map (fun e -> `String (Fmt.str "%a" Expr.pp e)) original));
+  let original_gamma = pending_context_field "original_gamma" outer
+    |> typed_lookup_alias_text in
+  Alcotest.(check int) (label ^ " original Gamma binding count") (List.length types)
+    (String.fold_left (fun n c -> if c = ':' then n+1 else n) 0 original_gamma);
+  List.iter (fun (name,typ) -> Alcotest.(check bool)
+    (label ^ " original Gamma retains " ^ name) true
+    (typed_lookup_alias_contains original_gamma (name ^ ":" ^ Type.str typ))) types;
+  let scopes = List.concat_map pending_context_scopes contexts in
+  let selected = List.exists (fun scope ->
+    pending_context_field "operation" scope = `String "compact-literal-nth-satisfiability") scopes in
+  Alcotest.(check bool) (label ^ " actual guarded projection scope") projected selected;
+  let rows = nonblank_counter_rows () |> List.filter (fun row -> not (List.mem row before)) in
+  Alcotest.(check int) (label ^ " every fresh request has one actual result")
+    (List.length contexts) (List.length rows);
+  Alcotest.(check bool) (label ^ " actual native observations present") true (rows <> []);
+  Alcotest.(check bool) (label ^ " actual native status supports Boolean result") true
+    (List.exists (fun row -> smt_result_field "result" row = if expected then "sat" else "unsat") rows);
+  List.iter (fun context ->
+    let query = pending_context_field "query" context |> typed_lookup_alias_text in
+    let row = match List.filter (fun row -> smt_result_field "query" row = query) rows with
+      | [row] -> row | _ -> Alcotest.fail (label ^ " native query/result is not unique") in
+    let status = smt_result_field "result" row in
+    Alcotest.(check bool) (label ^ " no actual UNKNOWN") true
+      (status = "sat" || status = "unsat");
+    Alcotest.(check bool) (label ^ " actual caller join") true
+      (pending_context_field "caller" context = `String (smt_result_field "caller" row));
+    Alcotest.(check bool) (label ^ " actual raw-permission join") true
+      (pending_context_field "raw_unknown" context = `Bool (smt_result_field "raw_unknown" row = "true"));
+    Alcotest.(check bool) (label ^ " actual timeout join") true
+      (pending_context_field "timeout_ms" context = `String (smt_result_field "timeout_ms" row));
+    Alcotest.(check bool) (label ^ " actual phase join") true
+      (pending_context_field "phase_selection" context = `Int (int_of_string (smt_result_field "phase_selection" row)));
+    let fs = pending_context_field "original_fs" context |> typed_lookup_alias_text
+    and gamma_text = pending_context_field "original_gamma" context |> typed_lookup_alias_text
+    and encoded = pending_context_field "encoded_assertion_dump" context |> typed_lookup_alias_text in
+    let dump = nonblank_counter_read (Filename.concat "gillian_smt_queries" query) in
+    (* These fixtures have no quoted literals; preserve the complete token
+       sequence while allowing only the existing formatter's whitespace. *)
+    Alcotest.(check string) (label ^ " full native FS/Gamma/encoded dump join")
+      (typed_lookup_alias_compact ("GIL query:\nFS: " ^ fs ^ "\nGAMMA: " ^ gamma_text
+        ^ "\nEncoded as SMT Query:\n" ^ encoded))
+      (typed_lookup_alias_compact dump);
+    if projected then (
+      Alcotest.(check bool) (label ^ " no retained high-index sequence read") false
+        (typed_lookup_alias_contains encoded "seq.nth");
+      (* MAX SAT fixtures observe only List length and nth. The conflict
+         intentionally retains Utf16Len residuals, whose seq.len encoding is
+         required and must not be mistaken for huge List materialization. *)
+      if expected then Alcotest.(check bool) (label ^ " no concrete huge List seq.len") false
+        (typed_lookup_alias_contains encoded "seq.len"));
+    Printf.printf "COMPACT_NTH_NATIVE[%s]=%s\n%!" label row
+  ) contexts
+
+let compact_nth_maximum () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun reverse ->
+    let label = if reverse then "max_reverse" else "max_forward" in
+    let _,_,_,facts,gamma = compact_nth_fixture label reverse Type.Utf16Type
+      (Z.of_string "4294967294") (Z.of_string "4294967295") in
+    compact_nth_run label true true facts gamma
+  ) [false;true])
+
+let compact_nth_conflict_and_declines () = with_nonblank_counter_trace (fun () ->
+  let _xs,item,nth,facts,gamma = compact_nth_fixture "conflict" false Type.Utf16Type
+    (Z.of_string "4294967294") (Z.of_string "4294967295") in
+  let other_name = "#compact_nth_conflict_other" in
+  let other = Expr.LVar other_name in
+  Gamma.update gamma other_name Type.Utf16Type;
+  compact_nth_run "same-index-conflict" true false
+    (facts @ [bin Equal other nth;
+      bin Equal (Expr.UnOp (Utf16Len,item)) (Expr.int 1);
+      bin Equal (Expr.UnOp (Utf16Len,other)) (Expr.int 2)]) gamma;
+  (* Numeric ordinary equality is never licensed by this UTF16-only rule,
+     including both IEEE zero signs. Actual native SAT remains authoritative. *)
+  List.iter (fun value ->
+    let label = if Int64.bits_of_float value = Int64.min_int then "minus_zero" else "plus_zero" in
+    let _,item,_,facts,gamma = compact_nth_fixture label false Type.NumberType
+      (Z.of_int 101) (Z.of_int 102) in
+    compact_nth_run label false true (facts @ [bin ValueEqual item (Expr.num value)]) gamma
+  ) [0.;-0.];
+  let xs,_,_,facts,gamma = compact_nth_fixture "foreign" false Type.Utf16Type
+    (Z.of_int 101) (Z.of_int 103) in
+  compact_nth_run "different-index-foreign-observation" false true
+    (facts @ [bin Equal (Expr.UnOp (TypeOf,bin LstNth xs (Expr.int 102)))
+      (Expr.Lit (Type Type.Utf16Type))]) gamma;
+  let xs,_,_,facts,gamma = compact_nth_fixture "no_exact_length" false Type.Utf16Type
+    (Z.of_int 101) (Z.of_int 102) in
+  let facts = List.filter (function
+    | Expr.BinOp (Expr.UnOp (LstLen,_),Equal,Expr.Lit (Int _)) -> false
+    | _ -> true) facts @ [bin ILessThanEqual (Expr.int 102) (Expr.UnOp (LstLen,xs))] in
+  (* The two retained bounds102 <= len <= 102 entail exact length102.
+     Preserve this original fixture as a legitimate derived-exact positive. *)
+  compact_nth_run "derived-exact-length" true true facts gamma;
+  let xs,_,_,facts,gamma = compact_nth_fixture "genuinely_nonexact_length" false Type.Utf16Type
+    (Z.of_int 101) (Z.of_int 103) in
+  let facts = List.filter (function
+    | Expr.BinOp (Expr.UnOp (LstLen,_),Equal,Expr.Lit (Int _)) -> false
+    | _ -> true) facts @ [bin ILessThanEqual (Expr.int 102) (Expr.UnOp (LstLen,xs))] in
+  (* Both102 and103 remain possible; no exact length witness licenses the rule. *)
+  compact_nth_run "nonexact-length-102-or-103" false true facts gamma;
+  let xs,_,lookup,facts,gamma = compact_nth_fixture "out_of_bounds" false Type.Utf16Type
+    (Z.of_int 101) (Z.of_int 101) in
+  (* The original expression, not a projected surrogate, must be rejected by
+     the real totality API. A failed PRE is not converted into SAT credit. *)
+  let pfs = Engine.PFS.of_list facts in
+  (match Engine.Totality.check_proof_expression ~context:"compact nth outside"
+     ~evaluate:(Engine.Reduction.reduce_lexpr ~pfs ~gamma)
+     ~assertion:(fun condition -> Solver.check_entailment Utils.Containers.SS.empty
+       pfs [condition] gamma) lookup with
+   | () -> Alcotest.fail "out-of-bounds original lookup was accepted"
+   | exception Gillian.Utils.Gillian_result.Exc.Gillian_error
+       (AnalysisFailures [{msg; _}]) ->
+       Alcotest.(check bool) "original out-of-bounds lookup is rejected" true
+         (String.starts_with ~prefix:"compact nth outside is not proved defined:" msg));
+  ignore xs)
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "compact nth full UInt32 MAX forward reverse actual native SAT" `Quick
+          (with_total compact_nth_maximum);
+        Alcotest.test_case "compact nth native alias conflict numeric-zero foreign bound declines" `Quick
+          (with_total compact_nth_conflict_and_declines)])
+
+(* Matching-mode Boolean SAT uses the same public API, original FS/Gamma and
+   native authority. The existing156/157 calls keep their default false mode. *)
+let compact_nth_matching_maximum () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun reverse ->
+    let label = if reverse then "matching_max_reverse" else "matching_max_forward" in
+    let _,_,_,facts,gamma = compact_nth_fixture label reverse Type.Utf16Type
+      (Z.of_string "4294967294") (Z.of_string "4294967295") in
+    compact_nth_run ~matching:true label true true facts gamma
+  ) [false;true])
+
+let compact_nth_matching_conflict_and_declines () = with_nonblank_counter_trace (fun () ->
+  let _,item,nth,facts,gamma = compact_nth_fixture "matching_conflict" false Type.Utf16Type
+    (Z.of_string "4294967294") (Z.of_string "4294967295") in
+  let other_name = "#compact_nth_matching_conflict_other" in
+  let other = Expr.LVar other_name in
+  Gamma.update gamma other_name Type.Utf16Type;
+  compact_nth_run ~matching:true "matching-same-index-conflict" true false
+    (facts @ [bin Equal other nth;
+      bin Equal (Expr.UnOp (Utf16Len,item)) (Expr.int 1);
+      bin Equal (Expr.UnOp (Utf16Len,other)) (Expr.int 2)]) gamma;
+  (* Ordinary numeric equality, including both zero signs, stays on the exact
+     old native fallback. Use bounded lengths so the decline is observable. *)
+  List.iter (fun value ->
+    let label = if Int64.bits_of_float value = Int64.min_int
+      then "matching_minus_zero" else "matching_plus_zero" in
+    let _,item,_,facts,gamma = compact_nth_fixture label false Type.NumberType
+      (Z.of_int 101) (Z.of_int 102) in
+    compact_nth_run ~matching:true label false true
+      (facts @ [bin ValueEqual item (Expr.num value)]) gamma
+  ) [0.;-0.];
+  let xs,_,_,facts,gamma = compact_nth_fixture "matching_foreign" false Type.Utf16Type
+    (Z.of_int 101) (Z.of_int 103) in
+  compact_nth_run ~matching:true "matching-different-index-foreign-observation" false true
+    (facts @ [bin Equal (Expr.UnOp (TypeOf,bin LstNth xs (Expr.int 102)))
+      (Expr.Lit (Type Type.Utf16Type))]) gamma;
+  let xs,_,_,facts,gamma = compact_nth_fixture "matching_nonexact_length" false Type.Utf16Type
+    (Z.of_int 101) (Z.of_int 103) in
+  let facts = List.filter (function
+    | Expr.BinOp (Expr.UnOp (LstLen,_),Equal,Expr.Lit (Int _)) -> false
+    | _ -> true) facts @ [bin ILessThanEqual (Expr.int 102) (Expr.UnOp (LstLen,xs))] in
+  (* Both102 and103 remain possible: no exact length witness may be invented. *)
+  compact_nth_run ~matching:true "matching-nonexact-length-102-or-103" false true facts gamma)
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "compact nth matching full UInt32 MAX forward reverse actual native SAT" `Quick
+          (with_total compact_nth_matching_maximum);
+        Alcotest.test_case "compact nth matching native alias conflict numeric-zero foreign bound declines" `Quick
+          (with_total compact_nth_matching_conflict_and_declines)])
+
+
+(* Positive finite numeric identity controls. Old 0..159 tests above are
+   byte-exact. The first fixture embeds all 26 original q31 public facts and its
+   original two-binding Gamma. Other native fixtures only rename every LVar and
+   independently reverse the numeric/formatter Equal orientations. *)
+let positive_finite_identity_q31_strings = [
+    "(0i i<= (as_int #index))";
+    "((typeOf #index) == Num)";
+    "((typeOf #values) == List)";
+    "((typeOf #s) == Obj)";
+    "((typeOf #m) == Obj)";
+    "((typeOf #current) == Utf16)";
+    "((typeOf #a) == Obj)";
+    "(#lvar_1144 == #values)";
+    "(#lvar_1143 == #s)";
+    "(#lvar_1142 == #m)";
+    "(#lvar_1141 == #index)";
+    "(#lvar_1140 == #current)";
+    "(#lvar_1139 == #a)";
+    "(is_int (#index + 1.))";
+    "(0. <= (#index + 1.))";
+    "((#index + 1.) <= 4294967295.)";
+    "(is_int #index)";
+    "(0. <= #index)";
+    "(#index <= 4294967295.)";
+    "(((#index + 1.) - 1.) == #index)";
+    "((num_to_utf16 ((#index + 1.) - 1.)) == (num_to_utf16 #index))";
+    "(0. < (#index + 1.))";
+    "(0. < #index)";
+    "((l-len #values) i<= 4294967295i)";
+    "((as_int ((#index + 1.) - 1.)) == (as_int #index))";
+    "((1i i+ (as_int #index)) i<= (l-len #values))";
+  ]
+
+let positive_finite_identity_fixture label reverse_equal reverse_format =
+  let name x = if label = "q31_exact" then x else x ^ "_" ^ label in
+  let rename = object
+    inherit [_] Visitors.endo
+    method! visit_LVar () _ x = Expr.LVar (name x)
+  end in
+  let facts = List.map (fun text ->
+    let one = parse_gil_set [text] in
+    Alcotest.(check int) "q31 original expression parses singly" 1
+      (Expr.Set.cardinal one);
+    rename#visit_expr () (Expr.Set.choose one)) positive_finite_identity_q31_strings in
+  let index = Expr.LVar (name "#index") in
+  let predecessor = bin FMinus (bin FPlus index (Expr.num 1.)) (Expr.num 1.) in
+  let equal = bin Equal predecessor index
+  and format_equal = bin Equal (Expr.UnOp (NumberToUtf16,predecessor))
+    (Expr.UnOp (NumberToUtf16,index)) in
+  let reverse = function Expr.BinOp (a,Equal,b) -> bin Equal b a | _ -> assert false in
+  let facts = List.map (fun fact ->
+    if reverse_equal && Expr.equal fact equal then reverse fact
+    else if reverse_format && Expr.equal fact format_equal then reverse fact
+    else fact) facts in
+  let gamma = Gamma.init () in
+  Gamma.update gamma (name "#index") Type.NumberType;
+  Gamma.update gamma (name "#values") Type.ListType;
+  let format_equal = if reverse_format then reverse format_equal else format_equal in
+  facts,gamma,index,format_equal
+
+let positive_finite_identity_observe label before contexts expected =
+  let rows = nonblank_counter_rows ()
+    |> List.filter (fun row -> not (List.mem row before)) in
+  Alcotest.(check int) (label ^ " fresh request/result cardinality")
+    (List.length contexts) (List.length rows);
+  Alcotest.(check bool) (label ^ " real native results exist") true (rows <> []);
+  List.iter (fun context ->
+    let query = pending_context_field "query" context |> typed_lookup_alias_text in
+    let row = match List.filter (fun row -> smt_result_field "query" row = query) rows with
+      | [row] -> row | _ -> Alcotest.fail (label ^ " native result/context not unique") in
+    let result = smt_result_field "result" row in
+    Alcotest.(check bool) (label ^ " every actual result is definite") true
+      (result = "sat" || result = "unsat");
+    List.iter (fun key -> Alcotest.(check bool) (label ^ " native " ^ key ^ " join") true
+      (match key with
+       | "raw_unknown" -> pending_context_field key context
+           = `Bool (smt_result_field key row = "true")
+       | "phase_selection" -> pending_context_field key context
+           = `Int (int_of_string (smt_result_field key row))
+       | _ -> pending_context_field key context = `String (smt_result_field key row)))
+      ["caller";"raw_unknown";"timeout_ms";"phase_selection"];
+    let text key = pending_context_field key context |> typed_lookup_alias_text in
+    let expected_dump = "GIL query:\nFS: " ^ text "original_fs"
+      ^ "\nGAMMA: " ^ text "original_gamma" ^ "\nEncoded as SMT Query:\n"
+      ^ text "encoded_assertion_dump" in
+    (* No fixture has quoted text literals. Only whitespace is ignored. *)
+    Alcotest.(check string) (label ^ " complete actual FS/Gamma/encoding join")
+      (typed_lookup_alias_compact expected_dump)
+      (typed_lookup_alias_compact
+        (nonblank_counter_read (Filename.concat "gillian_smt_queries" query)));
+    Printf.printf "POSITIVE_FINITE_IDENTITY_NATIVE[%s]=%s\n%!" label row
+  ) contexts;
+  Alcotest.(check bool) (label ^ " actual native decision supports result") true
+    (List.exists (fun row -> smt_result_field "result" row = expected) rows)
+
+let positive_finite_identity_run ?(expected_premises = 3) ?(matching = false)
+    label expected facts gamma =
+  let original = facts and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let before = nonblank_counter_rows () in
+  let result,contexts = pending_context_capture (fun () ->
+    Solver.check_satisfiability ~matching facts gamma) in
+  Alcotest.(check bool) (label ^ " public Boolean result") expected result;
+  Alcotest.(check bool) (label ^ " original assertions unchanged") true
+    (List.equal Expr.equal original facts);
+  Alcotest.(check bool) (label ^ " original Gamma unchanged") true
+    (types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+  let scope = pending_context_scope "satisfiability" contexts in
+  Alcotest.(check bool) (label ^ " actual matching mode retained") true
+    (pending_context_field "matching" scope = `Bool matching);
+  let expressions xs = `List (List.map (fun e -> `String (Fmt.str "%a" Expr.pp e)) xs) in
+  Alcotest.(check bool) (label ^ " complete original public facts retained") true
+    (pending_context_field "original_fs" scope = expressions original);
+  Alcotest.(check bool) (label ^ " original public Gamma retained") true
+    (pending_context_field "original_gamma" scope = `String (Fmt.str "%a" Gamma.pp gamma));
+  let projection = pending_context_scope
+    "positive-finite-numeric-identity-satisfiability" contexts in
+  Alcotest.(check bool) (label ^ " projection licensed from original facts") true
+    (pending_context_field "original_fs" projection = expressions original);
+  let get_list key = match pending_context_field key projection with
+    | `List xs -> xs | _ -> Alcotest.fail (label ^ " malformed " ^ key) in
+  let added = get_list "added_implied_facts"
+  and original_formatters = get_list "original_formatter_atoms"
+  and formatters = get_list "retained_query_formatter_atoms"
+  and old_premises = get_list "original_premises"
+  and premises = get_list "retained_query_premises"
+  and full = get_list "simplified_fs"
+  and projected = get_list "projected_fs" in
+  Alcotest.(check int) (label ^ " exactly one implied identity added") 1
+    (List.length added);
+  Alcotest.(check int) (label ^ " one original formatter atom licensed") 1
+    (List.length original_formatters);
+  Alcotest.(check int) (label ^ " one query formatter atom retained") 1
+    (List.length formatters);
+  List.iter (fun atom -> Alcotest.(check bool)
+    (label ^ " formatter atom was original") true
+    (List.mem atom (match expressions original with `List xs -> xs | _ -> assert false)))
+    original_formatters;
+  List.iter (fun atom -> Alcotest.(check bool)
+    (label ^ " query formatter retained unchanged") true
+    (List.mem atom full && List.mem atom projected)) formatters;
+  Alcotest.(check int) (label ^ " original licensing triple") expected_premises (List.length old_premises);
+  Alcotest.(check int) (label ^ " retained exact query triple") expected_premises (List.length premises);
+  List.iter (fun atom -> Alcotest.(check bool)
+    (label ^ " retained licensing premise") true (List.mem atom projected)) premises;
+  Alcotest.(check bool) (label ^ " strict superset by exactly one identity") true
+    (List.length projected = List.length full + 1
+      && List.for_all (fun atom -> List.mem atom projected) full
+      && List.for_all (fun atom -> not (List.mem atom full) && List.mem atom projected) added);
+  (* Require a real decision for the entire projected query, not merely an
+     optional sufficient subset. Every other observed result stays definite. *)
+  let projected_text = String.concat "," (List.map typed_lookup_alias_text projected) in
+  let full_contexts = List.filter (fun context ->
+      let query = pending_context_field "query" context |> typed_lookup_alias_text in
+      let actual_fs = pending_context_field "original_fs" context |> typed_lookup_alias_text in
+      typed_lookup_alias_compact actual_fs = typed_lookup_alias_compact projected_text
+      && List.exists (fun row -> smt_result_field "query" row = query
+        && smt_result_field "result" row = if expected then "sat" else "unsat")
+        (nonblank_counter_rows () |> List.filter (fun row -> not (List.mem row before)))) contexts in
+  Alcotest.(check bool) (label ^ " complete projected native decision") true
+    (full_contexts <> []);
+  let roundtrips context =
+    let assertions = match pending_context_field "encoded_assertions" context with
+      | `List xs -> List.map typed_lookup_alias_text xs
+      | _ -> Alcotest.fail (label ^ " malformed encoded assertions") in
+    let attached = List.filter (fun atom ->
+      typed_lookup_alias_contains atom "(assert(or(fp.eq(utf162num"
+      && typed_lookup_alias_contains atom "num2utf16"
+      && typed_lookup_alias_contains atom "(and(fp.isNaN(utf162num") assertions in
+    List.length (List.sort_uniq String.compare attached) >= 2 in
+  Alcotest.(check bool) (label ^ " formatter roundtrip encoding retained") true
+    (List.for_all roundtrips full_contexts);
+  positive_finite_identity_observe label before contexts (if expected then "sat" else "unsat")
+
+let positive_finite_identity_native_sat () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,reverse_equal,reverse_format) ->
+    let facts,gamma,_,_ = positive_finite_identity_fixture label reverse_equal reverse_format in
+    positive_finite_identity_run label true facts gamma
+  ) ["q31_exact",false,false;"reverse_equal",true,false;
+     "reverse_format",false,true;"reverse_both",true,true])
+
+let positive_finite_identity_direct_implication () =
+  List.iter (fun reverse ->
+    let label = if reverse then "direct_reverse" else "direct_forward" in
+    let facts,gamma,index,_ = positive_finite_identity_fixture label reverse reverse in
+    let predecessor = bin FMinus (bin FPlus index (Expr.num 1.)) (Expr.num 1.) in
+    let identity = if reverse then bin ValueEqual index predecessor
+      else bin ValueEqual predecessor index in
+    let facts = not_ identity :: facts in
+    let original = Expr.Set.of_list facts
+    and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    let before = nonblank_counter_rows () in
+    let model,contexts = pending_context_capture (fun () ->
+      Smt.with_native_smt_context
+        (fun () -> `Assoc [
+          ("operation",`String "positive-finite-identity-direct-implication-control");
+          ("original_fs",`List (List.map
+            (fun e -> `String (Fmt.str "%a" Expr.pp e)) facts));
+          ("original_gamma",`String (Fmt.str "%a" Gamma.pp gamma))])
+        (fun () -> Smt.exec_sat original (Gamma.as_hashtbl gamma))) in
+    Alcotest.(check bool) (label ^ " complete guarded negation native UNSAT") true
+      (Option.is_none model);
+    Alcotest.(check bool) (label ^ " original FS unchanged") true
+      (Expr.Set.equal original (Expr.Set.of_list facts));
+    Alcotest.(check bool) (label ^ " original Gamma unchanged") true
+      (types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+    Alcotest.(check int) (label ^ " one direct native request") 1 (List.length contexts);
+    let actual_fs = pending_context_field "original_fs" (List.hd contexts)
+      |> typed_lookup_alias_text in
+    typed_alias_core_check_gamma label types (List.hd contexts);
+    Alcotest.(check string) (label ^ " entire original guarded obligation submitted")
+      (typed_lookup_alias_compact (typed_alias_core_expected_fs original))
+      (typed_lookup_alias_compact actual_fs);
+    Alcotest.(check bool) (label ^ " direct proof never invokes projection") false
+      (List.exists (fun scope -> pending_context_field "operation" scope
+        = `String "positive-finite-numeric-identity-satisfiability")
+        (List.concat_map pending_context_scopes contexts));
+    positive_finite_identity_observe label before contexts "unsat"
+  ) [false;true]
+
+let positive_finite_identity_declines () =
+  let a = Expr.LVar "#format_decline_a" and b = Expr.LVar "#format_decline_b" in
+  let equal = bin Equal a b
+  and positive = bin FLessThan (Expr.num 0.) a
+  and bound = bin FLessThanEqual a (Expr.num 4294967295.) in
+  let format a b = bin Equal (Expr.UnOp (NumberToUtf16,a))
+    (Expr.UnOp (NumberToUtf16,b)) in
+  let conversion = format a b in
+  let facts = [equal;positive;bound;conversion] in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#format_decline_a" Type.NumberType;
+  Gamma.update gamma "#format_decline_b" Type.NumberType;
+  let decline label original old_gamma current now_gamma =
+    let old_types = nonblank_counter_types (Gamma.as_hashtbl old_gamma)
+    and now_types = nonblank_counter_types (Gamma.as_hashtbl now_gamma) in
+    Alcotest.(check bool) (label ^ " pure helper declines") true
+      (Option.is_none (Solver.positive_finite_numeric_identity_satisfiability
+        original old_gamma (Expr.Set.of_list current) now_gamma));
+    Alcotest.(check bool) (label ^ " original Gamma not changed") true
+      (old_types = nonblank_counter_types (Gamma.as_hashtbl old_gamma));
+    Alcotest.(check bool) (label ^ " query Gamma not changed") true
+      (now_types = nonblank_counter_types (Gamma.as_hashtbl now_gamma)) in
+  let without atom = List.filter (fun fact -> not (Expr.equal atom fact)) facts in
+  List.iter (fun (label,atom) ->
+    decline ("original-missing-" ^ label) (without atom) gamma facts gamma;
+    decline ("query-missing-" ^ label) facts gamma (without atom) gamma
+  ) ["equality",equal;"positivity",positive;"finite-bound",bound;
+     "conversion",conversion];
+  let replace old replacement = List.map
+    (fun fact -> if Expr.equal fact old then replacement else fact) facts in
+  List.iter (fun (label,replacement) ->
+    let changed = replace equal replacement in decline label changed gamma changed gamma;
+    decline (label ^ "-stale-query") facts gamma changed gamma
+  ) ["ValueEqual-is-not-numeric-witness",bin ValueEqual a b];
+  decline "different-query-upper-bound" facts gamma
+    (replace bound (bin FLessThanEqual a (Expr.num 100.))) gamma;
+  List.iter (fun (label,value) ->
+    let changed = replace bound (bin FLessThanEqual a (Expr.num value)) in
+    decline label changed gamma changed gamma
+  ) ["infinite-upper",infinity;"NaN-upper",nan];
+  let nonstrict = replace positive (bin FLessThanEqual (Expr.num 0.) a) in
+  decline "non-strict-zero-bound" nonstrict gamma nonstrict gamma;
+  List.iter (fun value ->
+    let x = Expr.num value and y = Expr.num (-.value) in
+    let zero = [bin Equal x y;bin FLessThan (Expr.num 0.) x;
+      bin FLessThanEqual x (Expr.num 4294967295.);format x y] in
+    decline (if Int64.bits_of_float value = Int64.min_int then "negative-zero" else "positive-zero")
+      zero gamma zero gamma
+  ) [0.;-0.];
+  let mixed = replace conversion (bin Equal (Expr.UnOp (NumberToUtf16,a))
+    (Expr.UnOp (ToStringOp,b))) in
+  decline "mixed-format-operators" mixed gamma mixed gamma;
+  let value_equal = replace conversion
+    (bin ValueEqual (Expr.UnOp (NumberToUtf16,a)) (Expr.UnOp (NumberToUtf16,b))) in
+  decline "ValueEqual-formatter-atom" value_equal gamma value_equal gamma;
+  let product = bin FTimes a (Expr.num 1.) in
+  let mixed_arithmetic = [bin Equal product b;
+    bin FLessThan (Expr.num 0.) product;
+    bin FLessThanEqual product (Expr.num 4294967295.);format product b] in
+  decline "unsupported-arithmetic-operator" mixed_arithmetic gamma mixed_arithmetic gamma;
+  let missing = Gamma.copy gamma in Gamma.remove missing "#format_decline_b";
+  decline "original-untyped" facts missing facts gamma;
+  decline "query-untyped" facts gamma facts missing;
+  let wrong = Gamma.copy gamma in Gamma.remove wrong "#format_decline_b";
+  Gamma.update wrong "#format_decline_b" Type.Utf16Type;
+  decline "original-wrong-type" facts wrong facts gamma;
+  decline "query-wrong-type" facts gamma facts wrong;
+  decline "already-present-identity" facts gamma
+    (facts @ [bin ValueEqual a b]) gamma;
+  decline "already-present-reverse-identity" facts gamma
+    (facts @ [bin ValueEqual b a]) gamma;
+  let saved_total = !Config.Verification.total in
+  Fun.protect ~finally:(fun () -> Config.Verification.total := saved_total)
+    (fun () -> Config.Verification.total := false;
+      decline "ordinary-mode" facts gamma facts gamma);
+  let saved_under = !Config.under_approximation in
+  Fun.protect ~finally:(fun () -> Config.under_approximation := saved_under)
+    (fun () -> Config.under_approximation := true;
+      decline "under-approximation" facts gamma facts gamma)
+
+let positive_finite_identity_native_negative_and_declines () =
+  with_nonblank_counter_trace (fun () ->
+    positive_finite_identity_direct_implication ();
+    let facts,gamma,index,_ = positive_finite_identity_fixture "retained_conflict" false false in
+    (* Under the retained UInt32 integer bounds, index+2 and index+3 are
+       exactly adjacent binary64 integers, so their difference is negative.
+       The terms differ syntactically and the numeric subset grammar excludes
+       FMinus. Still require the actual full enriched query's native UNSAT;
+       a simplifier or sufficient-subset shortcut cannot qualify this case. *)
+    positive_finite_identity_run "retained-conflict" false
+      (facts @ [bin FLessThan (Expr.num 0.)
+        (bin FMinus (bin FPlus index (Expr.num 2.))
+          (bin FPlus index (Expr.num 3.)))]) gamma;
+    let facts,gamma,_,_ = positive_finite_identity_fixture "retained_parser" false false in
+    let text = Expr.LVar "#parser_bound_text" in
+    let parser_zero = Expr.ForAll (["#parser_bound_text",Some Type.Utf16Type],
+      bin Equal (Expr.UnOp (Utf16ToNumber,text)) (Expr.num 0.)) in
+    (* Keeping formatter terms keeps their encoder-attached roundtrip facts.
+       Parser-everywhere-zero conflicts with the positive formatted index.
+       The removed-formatter V1 footprint cannot satisfy the strict-superset
+       and unchanged-formatter assertions in the shared Boolean harness. *)
+    positive_finite_identity_run "retained-parser-counterexample" false
+      (facts @ [parser_zero]) gamma;
+    positive_finite_identity_declines ())
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case
+          "positive finite numeric identity original q31 orientations native SAT" `Quick
+          (with_total positive_finite_identity_native_sat);
+        Alcotest.test_case
+          "positive finite numeric identity implication retained contradictions and strict declines" `Quick
+          (with_total positive_finite_identity_native_negative_and_declines)])
+
+(* Isolate the pure guard matrix so completed native SAT/UNSAT controls need
+   not be repeated. This group must emit zero native SMT requests. *)
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case
+          "positive finite numeric identity pure guard declines without SMT queries" `Quick
+          (with_total positive_finite_identity_declines)])
+
+
+(* Appended group 163: the actual q1084 top-level SMT FS/Gamma, including
+   unused Gamma bindings. The earlier provenance operation frame is different
+   and is not substituted here. Native observations, not this fixture, decide. *)
+let nonlast_counter_q1084_strings =
+  [
+    "(! ((#index + 1.) == #n))";
+    "(is_int #index)";
+    "(is_int #n)";
+    "(is_int (#index + 1.))";
+    "(0i i<= (l-len #nextSuffix))";
+    "(0i i<= (l-len #prefix))";
+    "(0. <= #index)";
+    "(0. <= #n)";
+    "(0. <= (#index + 1.))";
+    "(#current == l-nth(l+ (#prefix, {{ #current, #nextCurrent }}, #nextSuffix), (as_int #index)))";
+    "(#index < #n)";
+    "(#index <= 4294967295.)";
+    "(#n <= 4294967295.)";
+    "((l-len #prefix) == (as_int #index))";
+    "((num_to_utf16 ((#index + 1.) - 1.)) == (num_to_utf16 #index))";
+    "((u16-len #current) i<= 9007199254740991i)";
+    "((u16-len #nextCurrent) i<= 9007199254740991i)";
+    "((as_int #n) == (2i i+ ((l-len #nextSuffix) i+ (l-len #prefix))))";
+    "((as_int #n) i<= 4294967295i)";
+    "((as_int (#index + 1.)) == (1i i+ (l-len #prefix)))";
+    "((as_int (#index + 1.)) == (1i i+ (as_int #index)))";
+    "((as_int ((#index + 1.) - 1.)) == (as_int #index))";
+    "((#index + 1.) < #n)";
+    "((#index + 1.) <= 4294967295.)";
+    "(((l-len #nextSuffix) i+ (l-len #prefix)) i<= 4294967293i)";
+    "(((l-len #nextSuffix) i+ (l-len #prefix)) i<= 4611686018427387901i)";
+    "(((#index + 1.) - 1.) == #index)";
+  ]
+
+let nonlast_counter_q1084_fixture label =
+  let name x = if label = "q1084_exact" then x else x ^ "_" ^ label in
+  let rename = object
+    inherit [_] Visitors.endo
+    method! visit_LVar () _ x = Expr.LVar (name x)
+  end in
+  let facts = List.map (fun text ->
+    let one = parse_gil_set [text] in
+    Alcotest.(check int) "q1084 original expression parses singly" 1
+      (Expr.Set.cardinal one);
+    let expression = Expr.Set.choose one in
+    let printed = Fmt.str "%a" Expr.pp expression in
+    Alcotest.(check string) "q1084 printer-text roundtrip"
+      (typed_lookup_alias_compact text) (typed_lookup_alias_compact printed);
+    Alcotest.(check bool) "q1084 expression roundtrip" true
+      (Expr.Set.equal one (parse_gil_set [printed]));
+    rename#visit_expr () expression) nonlast_counter_q1084_strings in
+  let fs = Expr.Set.of_list facts in
+  Alcotest.(check int) "all 27 submitted q1084 expressions retained" 27
+    (Expr.Set.cardinal fs);
+  let gamma = Hashtbl.create 13 in
+  List.iter (fun (variable,typ) -> Hashtbl.add gamma (name variable) typ)
+  [
+    "#setProto",Type.ObjectType;
+    "#index",Type.NumberType;
+    "#current",Type.Utf16Type;
+    "#mapProto",Type.ObjectType;
+    "#nextCurrent",Type.Utf16Type;
+    "#nextSuffix",Type.ListType;
+    "#prefix",Type.ListType;
+    "#c",Type.ObjectType;
+    "#nextKeys",Type.SetType;
+    "#outputKeys",Type.SetType;
+    "#b",Type.ObjectType;
+    "#n",Type.NumberType;
+    "#prefixKeys",Type.SetType;
+  ];
+  Alcotest.(check int) "all 13 submitted q1084 Gamma rows retained" 13
+    (Hashtbl.length gamma);
+  fs,gamma,name "#index",name "#n"
+
+let nonlast_counter_native_controls () = with_nonblank_counter_trace (fun () ->
+  let hint fs lower upper = List.fold_left (fun fs (name,value) ->
+    Expr.Set.add (bin ValueEqual (Expr.LVar name) (Expr.num value)) fs)
+    fs [lower,0.;upper,2.] in
+  let run label strengthen expected_unsat expected_results wanted =
+    let base,gamma,lower,upper = nonlast_counter_q1084_fixture label in
+    let fs = strengthen base lower upper in
+    Alcotest.(check bool) (label ^ " every actual q1084 fact retained") true
+      (Expr.Set.subset base fs);
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let before = nonblank_counter_rows () in
+    let caller = "nonlast-counter-complete-fallback-control" in
+    let scope () = `Assoc [
+      ("operation",`String "nonlast-counter-native-control");
+      ("original_fs",`List (List.map
+        (fun e -> `String (Fmt.str "%a" Expr.pp e)) original));
+      ("original_gamma",`String (Fmt.str "%a"
+        Fmt.(Dump.hashtbl string (of_to_string Type.str)) gamma))] in
+    let result,contexts = pending_context_capture (fun () ->
+      Smt.with_native_smt_context scope
+        (fun () -> Smt.proves_unsat ~caller_kind:caller fs gamma)) in
+    Alcotest.(check bool) (label ^ " complete native UNSAT decision")
+      expected_unsat result;
+    Alcotest.(check int) (label ^ " exact fresh native query count")
+      (List.length expected_results) (List.length contexts);
+    let expected_queries = List.map (fun (kind,wanted_result) ->
+      let expected_caller,expected_fs,timeout = if kind = "hint" then
+        "optional-nonempty-counter",hint fs lower upper,"1000"
+        else caller,fs,"5000" in
+      let selected = List.filter (fun context -> pending_context_field "caller" context
+        = `String expected_caller) contexts in
+      Alcotest.(check int) (label ^ " one actual " ^ kind ^ " context")
+        1 (List.length selected);
+      let context = List.hd selected in
+      Alcotest.(check string) (label ^ " entire original FS plus only " ^ kind ^ " hints")
+        (typed_lookup_alias_compact (typed_alias_core_expected_fs expected_fs))
+        (typed_lookup_alias_compact (pending_context_field "original_fs" context
+          |> typed_lookup_alias_text));
+      typed_alias_core_check_gamma label types context;
+      List.iter (fun (key,value) -> Alcotest.(check bool)
+        (label ^ " unchanged native " ^ key) true
+        (pending_context_field key context = value))
+        ["raw_unknown",`Bool true;"timeout_ms",`String timeout;
+         "phase_selection",`Int 3];
+      let original_scope = pending_context_scope "nonlast-counter-native-control" [context] in
+      Alcotest.(check bool) (label ^ " frozen complete caller FS/Gamma scope") true
+        (original_scope = scope ());
+      let query = pending_context_field "query" context |> typed_lookup_alias_text in
+      let matching = nonblank_counter_rows () |> List.filter (fun row ->
+        not (List.mem row before) && smt_result_field "query" row = query) in
+      Alcotest.(check int) (label ^ " one actual " ^ kind ^ " result")
+        1 (List.length matching);
+      Alcotest.(check string) (label ^ " actual " ^ kind ^ " native result")
+        wanted_result (smt_result_field "result" (List.hd matching));
+      query) expected_results in
+    positive_finite_identity_observe label before contexts
+      (if expected_unsat then "unsat" else "sat");
+    let actual_queries = nonblank_counter_rows () |> List.filter (fun row ->
+      not (List.mem row before)) |> List.map (smt_result_field "query") in
+    Alcotest.(check bool) (label ^ " hint precedes complete unseeded fallback") true
+      (actual_queries = expected_queries);
+    (* Only after joined definite native answers, inspect the existing cache.
+       No hinted UNSAT may replace a result for the complete original frame. *)
+    let files = List.sort String.compare (nonblank_counter_files ()) in
+    let model = Smt.check_sat fs gamma in
+    Alcotest.(check bool) (label ^ " native-backed cached complete model status")
+      (Option.is_some wanted) (Option.is_some model);
+    Alcotest.(check bool) (label ^ " cache/model inspection emits no query") true
+      (files = List.sort String.compare (nonblank_counter_files ()));
+    (match model,wanted with
+     | Some model,Some (a,b) ->
+         Printf.printf "NONLAST_COUNTER_NATIVE_MODEL[%s]=%s\n%!" label
+           (Fmt.str "%a" Smt.pp_model model);
+         let values = Hashtbl.create 2 in
+         Smt.lift_model model gamma (Hashtbl.add values)
+           (Expr.Set.of_list [Expr.LVar lower;Expr.LVar upper]);
+         List.iter (fun (name,want) -> match Hashtbl.find_opt values name with
+           | Some (Expr.Lit (Literal.Num actual)) -> Alcotest.(check int64)
+               (label ^ " actual binary64 " ^ name)
+               (Int64.bits_of_float want) (Int64.bits_of_float actual)
+           | _ -> Alcotest.fail (label ^ " missing actual native Number model"))
+           [lower,a;upper,b]
+     | None,None -> ()
+     | _ -> Alcotest.fail (label ^ " inconsistent native complete model"));
+    nonblank_counter_retained label fs gamma original types in
+  run "q1084_exact" (fun fs _ _ -> fs) false
+    ["hint","sat"] (Some (0.,2.));
+  run "q1084_retained_contradiction" (fun fs _ upper ->
+    Expr.Set.add (bin ValueEqual (Expr.LVar upper) (Expr.num 0.)) fs) true
+    ["hint","unsat";"fallback","unsat"] None;
+  run "q1084_failed_hint_fallback" (fun fs lower upper ->
+    List.fold_left (fun fs (name,value) ->
+      Expr.Set.add (bin ValueEqual (Expr.LVar name) (Expr.num value)) fs)
+      fs [lower,1.;upper,3.]) false
+    ["hint","unsat";"fallback","sat"] (Some (1.,3.)))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case
+          "nonlast counter full q1084 native witness and retained complete fallbacks" `Quick
+          (with_total nonlast_counter_native_controls)])
+
+
+(* Appended nonzero finite identity controls: exact public q893 FS/Gamma from
+   the reviewed source audit, not a runtime query/fixture dependency. *)
+let nonzero_finite_identity_q893_strings = [
+  "true";
+  "(((#index + 1.) - 1.) == #index)";
+  "(#index <= 4294967295.)";
+  "(0. <= #index)";
+  "(is_int #index)";
+  "(#limit <= 4294967295.)";
+  "(0. <= #limit)";
+  "(is_int #limit)";
+  "(#index < #limit)";
+  "(is_int (#index + 1.))";
+  "(0i i<= (as_int #index))";
+  "(0i i<= (as_int (#index + 1.)))";
+  "((as_int #index) i<= 4294967295i)";
+  "((as_int #limit) i<= 4294967295i)";
+  "((as_int (#index + 1.)) == (1i i+ (as_int #index)))";
+  "((#index + 1.) <= 4294967295.)";
+  "((#index + 1.) <= #limit)";
+  "(0. < (#index + 1.))";
+  "((as_int ((#index + 1.) - 1.)) == (-1i i+ (as_int (#index + 1.))))";
+  "((as_int ((#index + 1.) - 1.)) == (as_int #index))";
+  "(! (#index == 0.))";
+  "((num_to_utf16 ((#index + 1.) - 1.)) == (num_to_utf16 #index))";
+]
+
+let nonzero_finite_identity_fixture label reverse =
+  let name x = if label = "q893_exact" then x else x ^ "_" ^ label in
+  let rename = object
+    inherit [_] Visitors.endo
+    method! visit_LVar () _ x = Expr.LVar (name x)
+  end in
+  let facts = List.map (fun text ->
+    let one = parse_gil_set [text] in
+    Alcotest.(check int) "q893 original expression parses singly" 1
+      (Expr.Set.cardinal one);
+    rename#visit_expr () (Expr.Set.choose one)) nonzero_finite_identity_q893_strings in
+  let index = Expr.LVar (name "#index") in
+  let predecessor = bin FMinus (bin FPlus index (Expr.num 1.)) (Expr.num 1.) in
+  let numeric = bin Equal predecessor index
+  and formatter = bin Equal (Expr.UnOp (NumberToUtf16,predecessor))
+    (Expr.UnOp (NumberToUtf16,index)) in
+  let reverse_equal = function
+    | Expr.BinOp (a,Equal,b) -> bin Equal b a | _ -> assert false in
+  let facts = List.map (fun fact ->
+    if reverse && (Expr.equal fact numeric || Expr.equal fact formatter)
+    then reverse_equal fact
+    else fact) facts in
+  let gamma = Gamma.init () in
+  List.iter (fun x -> Gamma.update gamma (name x) Type.NumberType)
+    ["#index";"#limit"];
+  facts,gamma,index,predecessor
+
+let nonzero_finite_identity_native_sat () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,reverse) ->
+    let facts,gamma,_,_ = nonzero_finite_identity_fixture label reverse in
+    positive_finite_identity_run ~expected_premises:4 ~matching:true label true facts gamma
+  ) ["q893_exact",false;"q893_reverse",true])
+
+let nonzero_finite_identity_native_negatives () = with_nonblank_counter_trace (fun () ->
+  let label = "q893_direct_implication" in
+  let facts,gamma,index,predecessor = nonzero_finite_identity_fixture label false in
+  let fs = Expr.Set.of_list (not_ (bin ValueEqual predecessor index) :: facts) in
+  let types = nonblank_counter_types (Gamma.as_hashtbl gamma)
+  and before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () ->
+    Smt.exec_sat fs (Gamma.as_hashtbl gamma)) in
+  Alcotest.(check bool) "entire nonzero implication native UNSAT" true
+    (Option.is_none model);
+  Alcotest.(check int) "one direct full implication request" 1 (List.length contexts);
+  let context = List.hd contexts in
+  Alcotest.(check string) "entire implication FS submitted unchanged"
+    (typed_lookup_alias_compact (typed_alias_core_expected_fs fs))
+    (typed_lookup_alias_compact
+      (pending_context_field "original_fs" context |> typed_lookup_alias_text));
+  typed_alias_core_check_gamma label types context;
+  Alcotest.(check bool) "direct implication Gamma unchanged" true
+    (types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+  Alcotest.(check bool) "direct implication bypasses identity helper" false
+    (List.exists (fun scope -> pending_context_field "operation" scope
+      = `String "positive-finite-numeric-identity-satisfiability")
+      (List.concat_map pending_context_scopes contexts));
+  positive_finite_identity_observe label before contexts "unsat";
+  let facts,gamma,index,_ = nonzero_finite_identity_fixture "q893_conflict" false in
+  positive_finite_identity_run ~expected_premises:4 ~matching:true "nonzero-retained-conflict" false
+    (facts @ [bin FLessThan (Expr.num 0.)
+      (bin FMinus (bin FPlus index (Expr.num 2.))
+        (bin FPlus index (Expr.num 3.)))]) gamma;
+  let facts,gamma,_,_ = nonzero_finite_identity_fixture "q893_parser" false in
+  let text = Expr.LVar "#nonzero_parser_text" in
+  positive_finite_identity_run ~expected_premises:4 ~matching:true "nonzero-retained-parser" false
+    (facts @ [Expr.ForAll (["#nonzero_parser_text",Some Type.Utf16Type],
+      bin Equal (Expr.UnOp (Utf16ToNumber,text)) (Expr.num 0.))]) gamma)
+
+let nonzero_finite_identity_declines () =
+  let before = List.sort String.compare (nonblank_counter_files ())
+  and directory = pending_context_directory () in
+  let before_contexts = Array.to_list (Sys.readdir directory) |> List.sort String.compare in
+  let a = Expr.LVar "#nonzero_guard_a" and b = Expr.LVar "#nonzero_guard_b" in
+  let equal = bin Equal a b
+  and lower = bin FLessThanEqual (Expr.num 0.) a
+  and nonzero = not_ (bin Equal a (Expr.num 0.))
+  and upper = bin FLessThanEqual a (Expr.num 4294967295.) in
+  let format a b = bin Equal (Expr.UnOp (NumberToUtf16,a))
+    (Expr.UnOp (NumberToUtf16,b)) in
+  let formatter = format a b in
+  let facts = [equal;lower;nonzero;upper;formatter] in
+  let gamma = Gamma.init () in
+  List.iter (fun x -> Gamma.update gamma x Type.NumberType)
+    ["#nonzero_guard_a";"#nonzero_guard_b"];
+  let check expected label old old_gamma current now_gamma =
+    let old_types = nonblank_counter_types (Gamma.as_hashtbl old_gamma)
+    and now_types = nonblank_counter_types (Gamma.as_hashtbl now_gamma) in
+    Alcotest.(check bool) (label ^ " pure certificate eligibility") expected
+      (Option.is_some (Solver.positive_finite_numeric_identity_satisfiability
+        old old_gamma (Expr.Set.of_list current) now_gamma));
+    Alcotest.(check bool) (label ^ " original/current Gamma unchanged") true
+      (old_types = nonblank_counter_types (Gamma.as_hashtbl old_gamma)
+        && now_types = nonblank_counter_types (Gamma.as_hashtbl now_gamma)) in
+  let replace atom replacement = List.map
+    (fun fact -> if Expr.equal atom fact then replacement else fact) facts in
+  check true "nonzero-positive" facts gamma facts gamma;
+  List.iter (fun zero ->
+    List.iter (fun reverse ->
+      let changed = replace nonzero (not_ (if reverse then bin Equal zero a
+        else bin Equal a zero)) in
+      check true "numeric-zero-symmetry" changed gamma changed gamma;
+      let changed = replace nonzero (not_ (if reverse then bin ValueEqual zero a
+        else bin ValueEqual a zero)) in
+      check false "ValueEqual-zero-is-not-numeric-nonzero" changed gamma changed gamma
+    ) [false;true]) [Expr.num 0.;Expr.num (-0.)];
+  List.iter (fun (label,atom) ->
+    let missing = List.filter (fun fact -> not (Expr.equal atom fact)) facts in
+    check false ("original-missing-" ^ label) missing gamma facts gamma;
+    check false ("current-missing-" ^ label) facts gamma missing gamma
+  ) ["numeric-equality",equal;"nonnegative",lower;"nonzero",nonzero;
+     "finite-upper",upper;"formatter",formatter];
+  let stale = replace upper (bin FLessThanEqual a (Expr.num 100.)) in
+  check false "stale-original-upper" stale gamma facts gamma;
+  check false "stale-current-upper" facts gamma stale gamma;
+  List.iter (fun value ->
+    let changed = replace upper (bin FLessThanEqual a (Expr.num value)) in
+    check false "nonfinite-upper" changed gamma changed gamma
+  ) [nan;infinity;neg_infinity];
+  List.iter (fun value ->
+    let x = Expr.num value and y = Expr.num (-.value) in
+    let literal = [bin Equal x y;bin FLessThanEqual (Expr.num 0.) x;
+      not_ (bin Equal x (Expr.num 0.));
+      bin FLessThanEqual x (Expr.num 4294967295.);format x y] in
+    check false "zero-or-nonfinite-literal" literal gamma literal gamma
+  ) [0.;-0.;nan;infinity;neg_infinity];
+  let missing = Gamma.copy gamma in Gamma.remove missing "#nonzero_guard_b";
+  check false "original-untyped" facts missing facts gamma;
+  check false "current-untyped" facts gamma facts missing;
+  let wrong = Gamma.copy gamma in Gamma.remove wrong "#nonzero_guard_b";
+  Gamma.update wrong "#nonzero_guard_b" Type.Utf16Type;
+  check false "original-wrong-type" facts wrong facts gamma;
+  check false "current-wrong-type" facts gamma facts wrong;
+  let saved_total = !Config.Verification.total in
+  Fun.protect ~finally:(fun () -> Config.Verification.total := saved_total)
+    (fun () -> Config.Verification.total := false;
+      check false "ordinary-mode" facts gamma facts gamma);
+  let saved_under = !Config.under_approximation in
+  Fun.protect ~finally:(fun () -> Config.under_approximation := saved_under)
+    (fun () -> Config.under_approximation := true;
+      check false "under-approximation" facts gamma facts gamma);
+  Alcotest.(check bool) "pure nonzero guards emit no SMT dumps" true
+    (before = List.sort String.compare (nonblank_counter_files ()));
+  Alcotest.(check bool) "pure nonzero guards emit no contexts" true
+    (before_contexts = (Array.to_list (Sys.readdir directory) |> List.sort String.compare))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case
+          "nonzero finite identity full q893 orientations native SAT" `Quick
+          (with_total nonzero_finite_identity_native_sat);
+        Alcotest.test_case
+          "nonzero finite identity entire native implication and retained contradictions" `Quick
+          (with_total nonzero_finite_identity_native_negatives);
+        Alcotest.test_case
+          "nonzero finite identity original retained certificate pure guard matrix" `Quick
+          (with_total nonzero_finite_identity_declines)])
+
+(* The A12 frontier is a finite-upper obligation for (index + 1.) - 1.,
+   not an arithmetic identity. These small controls retain its exact successor
+   certificate; they do not reproduce the entire original BODY query. *)
+let finite_predecessor_bound_fixture label =
+  let name = "#finite_predecessor_" ^ label in
+  let index = Expr.LVar name in
+  let gamma = index_difference_context [name] in
+  let successor = bin FPlus index (Expr.num 1.) in
+  let wanted = bin FLessThanEqual (bin FMinus successor (Expr.num 1.))
+    (Expr.num Float.max_float) in
+  let premises = [Expr.UnOp (IsInt,successor);
+    bin FLessThanEqual (Expr.num 0.) successor;
+    bin FLessThanEqual successor (Expr.num 4294967295.)] in
+  index,gamma,wanted,premises
+
+let finite_predecessor_bound_native () = with_nonblank_counter_trace (fun () ->
+  let label = "finite-predecessor-original-core" in
+  let index,gamma,wanted,premises = finite_predecessor_bound_fixture label in
+  let failed = not_ wanted in
+  let facts = Expr.Set.of_list (Expr.UnOp (IsInt,index) :: premises) in
+  let full = Expr.Set.add failed facts
+  and core = Expr.Set.of_list (failed :: premises) in
+  Alcotest.(check bool) "predecessor exact four-atom proper original subset" true
+    (Expr.Set.cardinal core = 4 && Expr.Set.subset core full
+      && not (Expr.Set.equal core full));
+  Alcotest.(check bool) "predecessor selector returns only that original core" true
+    (match Solver.finite_difference_core full (Gamma.as_hashtbl gamma) failed with
+     | Some selected -> Expr.Set.equal selected core | None -> false);
+  let before = strict_successor_public label true facts wanted gamma in
+  let row = nonblank_counter_observe label before
+    "optional-entailment-finite-difference-core" "unsat" core
+    (Gamma.as_hashtbl gamma) in
+  Alcotest.(check bool) "predecessor unchanged optional policy" true
+    (smt_result_field "timeout_ms" row = "5000"
+      && smt_result_field "raw_unknown" row = "true");
+  Alcotest.(check int) "predecessor real native core without fallback/cache credit" 1
+    (List.length (symbolic_prefix_new_rows before)))
+
+let finite_predecessor_bound_countermodels () = with_nonblank_counter_trace (fun () ->
+  (* Removing ALL three licensing premises admits these countermodels. No
+     individual premise is claimed mathematically necessary, nor is this weak
+     query's SAT status a verdict for the complete original BODY formula. *)
+  List.iter (fun (label,value) ->
+    let index,gamma,wanted,_ = finite_predecessor_bound_fixture label in
+    let failed = not_ wanted in
+    let full = Expr.Set.of_list [failed;bin ValueEqual index (Expr.num value)] in
+    Alcotest.(check bool) (label ^ " absent certificate declines selector") true
+      (Option.is_none (Solver.finite_difference_core full
+        (Gamma.as_hashtbl gamma) failed));
+    let before = nonblank_counter_rows () in
+    let model = match Smt.exec_sat full (Gamma.as_hashtbl gamma) with
+      | Some model -> model | None -> Alcotest.fail (label ^ " missing native countermodel") in
+    ignore (nonblank_counter_observe label before "required-complete" "sat" full
+      (Gamma.as_hashtbl gamma));
+    let lifted = Hashtbl.create 1 in
+    Smt.lift_model model (Gamma.as_hashtbl gamma) (Hashtbl.add lifted)
+      (Expr.Set.singleton index);
+    let actual = match index with
+      | Expr.LVar name -> (match Hashtbl.find_opt lifted name with
+          | Some (Expr.Lit (Num n) as actual) ->
+              Alcotest.(check bool) (label ^ " actual native nonfinite binding") true
+                (if Float.is_nan value then Float.is_nan n
+                 else Int64.bits_of_float value = Int64.bits_of_float n);
+              actual
+          | _ -> Alcotest.fail (label ^ " missing Number model binding"))
+      | _ -> assert false in
+    Alcotest.(check bool) (label ^ " native model falsifies the finite upper goal") true
+      (slice_bound_truth (Expr.subst_expr_for_expr ~to_subst:index
+        ~subst_with:actual failed)))
+    ["predecessor-NaN",Float.nan;"predecessor-positive-infinity",Float.infinity])
+
+let finite_predecessor_bound_declines () =
+  let before = List.sort String.compare (nonblank_counter_files ())
+  and directory = pending_context_directory () in
+  let contexts = Array.to_list (Sys.readdir directory) |> List.sort String.compare in
+  let index,gamma,wanted,premises = finite_predecessor_bound_fixture "guard" in
+  let failed = not_ wanted in
+  let core = Expr.Set.of_list (failed :: premises) in
+  let full = Expr.Set.add (Expr.UnOp (IsInt,index)) core in
+  let check expected label fs gamma goal =
+    let original = Expr.Set.elements fs
+    and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    Alcotest.(check bool) (label ^ " pure exact-certificate eligibility") expected
+      (Option.is_some (Solver.finite_difference_core fs (Gamma.as_hashtbl gamma) goal));
+    Alcotest.(check bool) (label ^ " exact FS/Gamma retained") true
+      (List.equal Expr.equal original (Expr.Set.elements fs)
+        && types = nonblank_counter_types (Gamma.as_hashtbl gamma)) in
+  check true "positive" full gamma failed;
+  List.iteri (fun i premise ->
+    check false ("missing-premise-" ^ string_of_int i)
+      (Expr.Set.remove premise full) gamma failed) premises;
+  check false "goal-not-original" (Expr.Set.remove failed full) gamma failed;
+  check false "not-a-proper-subset" core gamma failed;
+  let name = match index with Expr.LVar name -> name | _ -> assert false in
+  let missing = Gamma.copy gamma in Gamma.remove missing name;
+  check false "untyped-base" full missing failed;
+  let wrong = Gamma.copy gamma in Gamma.remove wrong name;
+  Gamma.update wrong name Type.Utf16Type;
+  check false "wrong-base-type" full wrong failed;
+  let goal plus minus upper = not_ (bin FLessThanEqual
+    (bin FMinus (bin FPlus index (Expr.num plus)) (Expr.num minus))
+    (Expr.num upper)) in
+  List.iter (fun (label,changed) ->
+    check false label (Expr.Set.add changed (Expr.Set.remove failed full)) gamma changed)
+    ["different-successor",goal 2. 1. Float.max_float;
+     "different-subtrahend",goal 1. 2. Float.max_float;
+     "zero-subtrahend",goal 1. 0. Float.max_float;
+     "different-upper",goal 1. 1. 4294967295.;
+     "infinite-upper",goal 1. 1. Float.infinity;
+     "NaN-upper",goal 1. 1. Float.nan];
+  let successor = bin FPlus index (Expr.num 1.) in
+  let upper = bin FLessThanEqual successor (Expr.num 4294967295.) in
+  check false "different-original-upper"
+    (Expr.Set.add (bin FLessThanEqual successor (Expr.num 4294967294.))
+      (Expr.Set.remove upper full)) gamma failed;
+  let saved_total = !Config.Verification.total in
+  Fun.protect ~finally:(fun () -> Config.Verification.total := saved_total)
+    (fun () -> Config.Verification.total := false;
+      check false "non-total" full gamma failed);
+  let saved_under = !Config.under_approximation in
+  Fun.protect ~finally:(fun () -> Config.under_approximation := saved_under)
+    (fun () -> Config.under_approximation := true;
+      check false "under-approximation" full gamma failed);
+  Alcotest.(check bool) "pure predecessor guards emit no SMT dumps" true
+    (before = List.sort String.compare (nonblank_counter_files ()));
+  Alcotest.(check bool) "pure predecessor guards emit no contexts" true
+    (contexts = (Array.to_list (Sys.readdir directory) |> List.sort String.compare))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "finite predecessor original core native UNSAT" `Quick
+          (with_total finite_predecessor_bound_native);
+        Alcotest.test_case "finite predecessor absent-certificate native countermodels" `Quick
+          (with_total finite_predecessor_bound_countermodels);
+        Alcotest.test_case "finite predecessor exact original certificate pure declines" `Quick
+          (with_total finite_predecessor_bound_declines)])
+
+(* Appended groups170-171: A13's fifteen submitted atoms and eight Gamma rows,
+   alpha-renamed per case. No runtime query dump or weakened projection is used.
+   The operation-scope frame had different facts; it is not this fixture. *)
+let zero_inclusive_list_strings = [
+  "(is_int #index)"; "(is_int (#index + 1.))";
+  "(0i i<= (l-len #values))"; "(0i i<= (as_int #index))";
+  "(0. < (#index + 1.))"; "(0. <= #index)";
+  "(#current == l-nth(#values, (as_int #index)))";
+  "(#current == l-nth(#values, (as_int ((#index + 1.) - 1.))))";
+  "(#index <= 4294967295.)"; "((l-len #values) i<= 4294967295i)";
+  "((num_to_utf16 ((#index + 1.) - 1.)) == (num_to_utf16 #index))";
+  "((as_int ((#index + 1.) - 1.)) == (as_int #index))";
+  "((1i i+ (as_int #index)) i<= (l-len #values))";
+  "((#index + 1.) <= 4294967295.)";
+  "(((#index + 1.) - 1.) == #index)";
+]
+
+let zero_inclusive_list_fixture label =
+  let name x = x ^ "_zero_list_" ^ label in
+  let rename = object
+    inherit [_] Visitors.endo
+    method! visit_LVar () _ x = Expr.LVar (name x)
+  end in
+  let fs = Expr.Set.fold (fun e fs -> Expr.Set.add (rename#visit_expr () e) fs)
+    (parse_gil_set zero_inclusive_list_strings) Expr.Set.empty in
+  Alcotest.(check int) "all fifteen A13 submitted atoms" 15 (Expr.Set.cardinal fs);
+  let gamma = Hashtbl.create 8 in
+  List.iter (fun (x,typ) -> Hashtbl.add gamma (name x) typ)
+    ["#index",Type.NumberType; "#s",Type.ObjectType; "#a",Type.ObjectType;
+     "#current",Type.Utf16Type; "#handoffMd",Type.ObjectType;
+     "#values",Type.ListType; "#handoffEr",Type.ObjectType; "#m",Type.ObjectType];
+  Alcotest.(check int) "all eight A13 Gamma rows" 8 (Hashtbl.length gamma);
+  fs,gamma,Expr.LVar (name "#index"),Expr.LVar (name "#current")
+
+let zero_inclusive_list_context label contexts caller expected gamma =
+  let selected = List.filter (fun context -> pending_context_field "caller" context
+    = `String caller) contexts in
+  Alcotest.(check int) (label ^ " one actual " ^ caller) 1 (List.length selected);
+  let context = List.hd selected in
+  Alcotest.(check string) (label ^ " entire submitted FS plus only declared seeds")
+    (typed_lookup_alias_compact (typed_alias_core_expected_fs expected))
+    (typed_lookup_alias_compact
+       (pending_context_field "original_fs" context |> typed_lookup_alias_text));
+  typed_alias_core_check_gamma label (nonblank_counter_types gamma) context;
+  List.iter (fun (key,value) -> Alcotest.(check bool)
+    (label ^ " native policy " ^ key) true (pending_context_field key context = value))
+    ["raw_unknown",`Bool (caller = "optional-seeded-model");
+     "timeout_ms",`String (if caller = "optional-seeded-model" then "1000" else "30000");
+     "phase_selection",`Int 3];
+  pending_context_field "query" context |> typed_lookup_alias_text
+
+let zero_inclusive_list_run label strengthen final_result wanted_index replay =
+  let base,gamma,index,current = zero_inclusive_list_fixture label in
+  let fs = strengthen base index in
+  Alcotest.(check bool) (label ^ " every original atom retained") true
+    (Expr.Set.subset base fs);
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let caller = if final_result = "sat" then "required-complete"
+    else "zero-inclusive-list-complete-conflict" in
+  let model,contexts = pending_context_capture (fun () ->
+    let model = Smt.check_sat fs gamma in
+    if final_result = "unsat" then (
+      (* A sufficient original-subset precheck may decide first. Also require
+         a distinct actual UNSAT of the full original frame, never call that
+         precheck a complete-query result. *)
+      Alcotest.(check bool) (label ^ " original query rejected") true
+        (Option.is_none model);
+      Alcotest.(check bool) (label ^ " full original required UNSAT") true
+        (Option.is_none (Smt.exec_sat ~caller_kind:caller fs gamma)));
+    model) in
+  Alcotest.(check bool) (label ^ " complete original model decision")
+    (final_result = "sat") (Option.is_some model);
+  Alcotest.(check bool) (label ^ " retired zero-inclusive seed is not dispatched") true
+    (not (List.exists (fun context -> pending_context_field "caller" context
+      = `String "optional-seeded-model") contexts));
+  ignore (zero_inclusive_list_context label contexts caller fs gamma);
+  ignore (nonblank_counter_observe label before caller final_result fs gamma);
+  positive_finite_identity_observe label before contexts final_result;
+  Alcotest.(check bool) (label ^ " original FS unchanged") true
+    (List.equal Expr.equal original (Expr.Set.elements fs));
+  Alcotest.(check bool) (label ^ " original Gamma unchanged") true
+    (types = nonblank_counter_types gamma);
+  let files = List.sort String.compare (nonblank_counter_files ()) in
+  let cached = Smt.check_sat fs gamma in
+  Alcotest.(check bool) (label ^ " full-key cache retains native-backed result")
+    (Option.is_some model) (Option.is_some cached);
+  Alcotest.(check bool) (label ^ " cache inspection emits no query") true
+    (files = List.sort String.compare (nonblank_counter_files ()));
+  match cached with
+  | None -> ()
+  | Some model ->
+      let lifted = Hashtbl.create 2 in
+      Smt.lift_model model gamma (Hashtbl.add lifted) (Expr.Set.of_list [index;current]);
+      let get = function
+        | Expr.LVar name -> (match Hashtbl.find_opt lifted name with
+            | Some (Expr.Lit value) -> value
+            | _ -> Alcotest.fail (label ^ " missing actual lifted binding"))
+        | _ -> assert false in
+      (match get index,wanted_index with
+       | Literal.Num actual,Some wanted -> Alcotest.(check int64)
+           (label ^ " exact native index bits")
+           (Int64.bits_of_float wanted) (Int64.bits_of_float actual)
+       | Literal.Num actual,None -> Alcotest.(check bool)
+           (label ^ " unconstrained native index satisfies original UInt32 successor bounds")
+           true (Float.is_finite actual && actual >= 0. && floor actual = actual
+             && actual <= 4294967294.)
+       | _ -> Alcotest.fail (label ^ " native index has wrong type"));
+      (match get current with Literal.Utf16String _ -> ()
+       | _ -> Alcotest.fail (label ^ " native current has wrong type"));
+      if replay then (
+        (* Public lifting does not recover List/Object. Recheck all original FS
+           with the actual two recoverable values, leaving List existential.
+           This is partial lifted-binding/native consistency, not concrete full
+           List/Object model replay; unchanged native model_validate is trusted. *)
+        let pinned = List.fold_left (fun fs value ->
+          Expr.Set.add (bin ValueEqual value (Expr.Lit (get value))) fs) fs [index;current] in
+        let before = nonblank_counter_rows () in
+        let replayed,contexts = pending_context_capture (fun () ->
+          Smt.exec_sat ~caller_kind:"zero-inclusive-list-partial-binding-replay" pinned gamma) in
+        Alcotest.(check bool) (label ^ " native complete-original-FS binding consistency")
+          true (Option.is_some replayed);
+        ignore (zero_inclusive_list_context label contexts
+          "zero-inclusive-list-partial-binding-replay" pinned gamma);
+        ignore (nonblank_counter_observe label before
+          "zero-inclusive-list-partial-binding-replay" "sat" pinned gamma);
+        positive_finite_identity_observe label before contexts "sat")
+
+let zero_inclusive_list_native_sat () = with_nonblank_counter_trace (fun () ->
+  zero_inclusive_list_run "exact15" (fun fs _ -> fs) "sat" None true;
+  zero_inclusive_list_run "positive_zero" (fun fs index ->
+    Expr.Set.add (bin ValueEqual index (Expr.num 0.)) fs)
+    "sat" (Some 0.) false;
+  zero_inclusive_list_run "negative_zero" (fun fs index ->
+    let previous = bin FMinus (bin FPlus index (Expr.num 1.)) (Expr.num 1.) in
+    fs |> Expr.Set.add (bin ValueEqual index (Expr.num (-0.)))
+       |> Expr.Set.add (not_ (bin ValueEqual previous index)))
+    "sat" (Some (-0.)) false)
+
+let zero_inclusive_list_native_fallback () = with_nonblank_counter_trace (fun () ->
+  zero_inclusive_list_run "conflicting_seed" (fun fs index ->
+    Expr.Set.add (bin ValueEqual index (Expr.num 1.)) fs)
+    "sat" (Some 1.) true;
+  zero_inclusive_list_run "retained_formatter_conflict" (fun fs index ->
+    let previous = bin FMinus (bin FPlus index (Expr.num 1.)) (Expr.num 1.) in
+    Expr.Set.add (not_ (bin Equal (Expr.UnOp (NumberToUtf16,previous))
+      (Expr.UnOp (NumberToUtf16,index)))) fs)
+    "unsat" None false)
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "zero-inclusive list full A13 fallback and signed zeros" `Quick
+          (with_total zero_inclusive_list_native_sat);
+        Alcotest.test_case "zero-inclusive list declined seed full fallback and retained conflict" `Quick
+          (with_total zero_inclusive_list_native_fallback)])
+
+
+(* A14's ten original left atoms and two Number Gamma rows, alpha-renamed.
+   These tests neither weaken the original query nor claim a native result
+   until the real existing caller emits one. Groups172-174 need contexts. *)
+let integral_successor_limit_fixture label =
+  let name x = x ^ "_integral_successor_limit_" ^ label in
+  let rename = object
+    inherit [_] Visitors.endo
+    method! visit_LVar () _ x = Expr.LVar (name x)
+  end in
+  let facts = parse_gil_set
+    ["(#index <= 4294967295.)"; "(0. <= #index)"; "(is_int #index)";
+     "(#limit <= 4294967295.)"; "(0. <= #limit)"; "(is_int #limit)";
+     "(#index < #limit)"; "(0i i<= (as_int #index))";
+     "((as_int #index) i<= 4294967295i)";
+     "((as_int #limit) i<= 4294967295i)"] in
+  let facts = Expr.Set.fold (fun e fs ->
+    Expr.Set.add (rename#visit_expr () e) fs) facts Expr.Set.empty in
+  let index = Expr.LVar (name "#index") and limit = Expr.LVar (name "#limit") in
+  let gamma = index_difference_context [name "#index";name "#limit"] in
+  let goal = bin FLessThanEqual (bin FPlus index (Expr.num 1.)) limit in
+  let core = Expr.Set.of_list
+    [not_ goal;Expr.UnOp (IsInt,index);Expr.UnOp (IsInt,limit);
+     bin FLessThanEqual (Expr.num 0.) index;
+     bin FLessThanEqual (Expr.num 0.) limit;
+     bin FLessThanEqual index (Expr.num 4294967295.);
+     bin FLessThanEqual limit (Expr.num 4294967295.);
+     bin FLessThan index limit] in
+  Alcotest.(check int) "A14 exact ten original left atoms" 10 (Expr.Set.cardinal facts);
+  Alcotest.(check int) "A14 exact two original Number types" 2
+    (Hashtbl.length (Gamma.as_hashtbl gamma));
+  index,limit,gamma,facts,goal,core
+
+let integral_successor_limit_native () = with_nonblank_counter_trace (fun () ->
+  let label = "integral-successor-limit-original" in
+  let index,limit,gamma,facts,goal,core = integral_successor_limit_fixture "native" in
+  let full = Expr.Set.add (not_ goal) facts in
+  Alcotest.(check bool) "exact8 is a proper subset of original11" true
+    (Expr.Set.cardinal full = 11 && Expr.Set.cardinal core = 8
+      && Expr.Set.subset core full && not (Expr.Set.equal core full));
+  let pfs = Engine.PFS.of_list (Expr.Set.elements facts) in
+  let original = Engine.PFS.to_list pfs
+  and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let before = nonblank_counter_rows () in
+  let result,contexts = pending_context_capture (fun () ->
+    Solver.check_entailment Utils.Containers.SS.empty pfs [goal] gamma) in
+  Alcotest.(check bool) "public original entailment is proved" true result;
+  Alcotest.(check int) "two real endpoints: failed pinned guess then unpinned core" 2
+    (List.length contexts);
+  let context_for caller expected =
+    let selected = List.filter (fun context ->
+      pending_context_field "caller" context = `String caller) contexts in
+    Alcotest.(check int) (caller ^ " unique actual context") 1 (List.length selected);
+    let context = List.hd selected in
+    Alcotest.(check string) (caller ^ " exact submitted original FS plus declared pins")
+      (typed_lookup_alias_compact (typed_alias_core_expected_fs expected))
+      (typed_lookup_alias_compact
+        (pending_context_field "original_fs" context |> typed_lookup_alias_text));
+    typed_alias_core_check_gamma caller types context;
+    context in
+  let pinned = core |> Expr.Set.add (bin ValueEqual index (Expr.num 0.))
+    |> Expr.Set.add (bin ValueEqual limit (Expr.num 1.)) in
+  Alcotest.(check int) "prelude retains original8 plus only two concrete guesses" 10
+    (Expr.Set.cardinal pinned);
+  let prelude_context = context_for "optional-nonempty-counter" pinned in
+  let context = context_for "optional-entailment-successor-order-core" core in
+  List.iter (fun endpoint ->
+  let parent = pending_context_scope "entailment" [endpoint] in
+  let expression e = `String (Fmt.str "%a" Expr.pp e) in
+  Alcotest.(check bool) "outer public scope retains all ten original left atoms" true
+    (pending_context_field "original_left_fs" parent
+      = `List (List.map expression original));
+  Alcotest.(check bool) "outer public scope retains exact original goal" true
+    (pending_context_field "original_right_fs" parent = `List [expression goal]);
+  Alcotest.(check bool) "outer public scope retains no-existential ordinary route" true
+    (pending_context_field "original_existentials" parent = `List []
+      && pending_context_field "matching" parent = `Bool false);
+  Alcotest.(check bool) "outer public scope retains exact Type_env Gamma" true
+    (pending_context_field "original_gamma" parent
+      = `String (Fmt.str "%a" Gamma.pp gamma))) contexts;
+  (* UNSAT of a guessed stronger formula is NOT an original UNSAT license.
+     The unchanged proves_unsat path must still obtain unpinned core UNSAT. *)
+  let prelude = nonblank_counter_observe label before
+    "optional-nonempty-counter" "unsat" pinned (Gamma.as_hashtbl gamma) in
+  Alcotest.(check bool) "failed guess has its own1s optional policy/result join" true
+    (smt_result_field "raw_unknown" prelude = "true"
+      && smt_result_field "timeout_ms" prelude = "1000"
+      && pending_context_field "query" prelude_context
+         = `String (smt_result_field "query" prelude));
+  let row = nonblank_counter_observe label before
+    "optional-entailment-successor-order-core" "unsat" core
+    (Gamma.as_hashtbl gamma) in
+  Alcotest.(check bool) "unchanged optional policy and exact result/context join" true
+    (smt_result_field "raw_unknown" row = "true"
+      && smt_result_field "timeout_ms" row = "5000"
+      && pending_context_field "query" context
+         = `String (smt_result_field "query" row));
+  Alcotest.(check bool) "prelude and sole licensing unpinned core are distinct endpoints" true
+    (smt_result_field "query" prelude <> smt_result_field "query" row);
+  positive_finite_identity_observe label before contexts "unsat";
+  Alcotest.(check bool) "caller PFS/Gamma remain unchanged" true
+    (List.equal Expr.equal original (Engine.PFS.to_list pfs)
+      && types = nonblank_counter_types (Gamma.as_hashtbl gamma)))
+
+let integral_successor_limit_countermodels cases = with_nonblank_counter_trace (fun () ->
+  (* Each is an explicitly WEAKENED original11 plus concrete pins, never a
+     SAT-subset verdict for the original formula. Every other cast fact stays. *)
+  List.iter (fun (label,without_integrality,index_value,limit_value) ->
+    let index,limit,gamma,facts,goal,_ = integral_successor_limit_fixture label in
+    let missing = if without_integrality then Expr.UnOp (IsInt,index)
+      else bin FLessThan index limit in
+    let weakened = Expr.Set.remove missing (Expr.Set.add (not_ goal) facts) in
+    let fs = weakened |> Expr.Set.add (bin ValueEqual index (Expr.num index_value))
+      |> Expr.Set.add (bin ValueEqual limit (Expr.num limit_value)) in
+    Alcotest.(check int) (label ^ " all ten weakened original atoms retained") 10
+      (Expr.Set.cardinal weakened);
+    Alcotest.(check int) (label ^ " full weakened query plus two concrete pins") 12
+      (Expr.Set.cardinal fs);
+    let original = Expr.Set.elements fs
+    and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    let caller = "control-integral-successor-limit-" ^ label in
+    let before = nonblank_counter_rows () in
+    let model,contexts = pending_context_capture (fun () ->
+      Smt.exec_sat ~caller_kind:caller fs (Gamma.as_hashtbl gamma)) in
+    let model = match model with Some model -> model
+      | None -> Alcotest.fail (label ^ " missing actual native SAT model") in
+    Alcotest.(check int) (label ^ " one complete native query") 1 (List.length contexts);
+    let context = List.hd contexts in
+    Alcotest.(check string) (label ^ " actual entire weakened FS submitted")
+      (typed_lookup_alias_compact (typed_alias_core_expected_fs fs))
+      (typed_lookup_alias_compact
+        (pending_context_field "original_fs" context |> typed_lookup_alias_text));
+    typed_alias_core_check_gamma label types context;
+    ignore (nonblank_counter_observe label before caller "sat" fs (Gamma.as_hashtbl gamma));
+    positive_finite_identity_observe label before contexts "sat";
+    let lifted = Hashtbl.create 2 in
+    Smt.lift_model model (Gamma.as_hashtbl gamma) (Hashtbl.add lifted)
+      (Expr.Set.of_list [index;limit]);
+    let binding variable wanted = match variable with
+      | Expr.LVar name -> (match Hashtbl.find_opt lifted name with
+          | Some (Expr.Lit (Num n) as actual) ->
+              Alcotest.(check int64) (label ^ " actual Number model " ^ name)
+                (Int64.bits_of_float wanted) (Int64.bits_of_float n);actual
+          | _ -> Alcotest.fail (label ^ " missing actual Number binding"))
+      | _ -> assert false in
+    let actual_index = binding index index_value
+    and actual_limit = binding limit limit_value in
+    let concrete e = Expr.subst_expr_for_expr ~to_subst:index
+        ~subst_with:actual_index e
+      |> Expr.subst_expr_for_expr ~to_subst:limit ~subst_with:actual_limit in
+    Alcotest.(check bool) (label ^ " actual native model validates EVERY retained atom and pin")
+      true (Expr.Set.for_all (fun e -> slice_bound_truth (concrete e)) fs);
+    Alcotest.(check bool) (label ^ " original FS/Gamma unchanged") true
+      (List.equal Expr.equal original (Expr.Set.elements fs)
+        && types = nonblank_counter_types (Gamma.as_hashtbl gamma)))
+    cases)
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "integral successor limit original11 public native core UNSAT" `Quick
+          (with_total integral_successor_limit_native);
+        Alcotest.test_case "integral successor limit missing integrality full-query native SAT model" `Quick
+          (with_total (fun () -> integral_successor_limit_countermodels
+            ["missing-index-IsInt",true,0.5,1.]));
+        Alcotest.test_case "integral successor limit missing strict order full-query native SAT model" `Quick
+          (with_total (fun () -> integral_successor_limit_countermodels
+            ["missing-strict-order",false,0.,0.]))])
+
+(* The A15 cancellation obligation: every selected integer-chain atom is
+   already in the complete original query. Native results remain authoritative. *)
+let integer_cast_chain_fixture label =
+  let name x = x ^ "_integer_cast_chain_" ^ label in
+  let rename = object
+    inherit [_] Visitors.endo
+    method! visit_LVar () _ x = Expr.LVar (name x)
+  end in
+  let facts = parse_gil_set
+    ["(((#index + 1.) - 1.) == #index)";
+     "(#index <= 4294967295.)"; "(0. <= #index)"; "(is_int #index)";
+     "(#limit <= 4294967295.)"; "(0. <= #limit)"; "(is_int #limit)";
+     "(#index < #limit)"; "(is_int (#index + 1.))";
+     "(0i i<= (as_int #index))"; "(0i i<= (as_int (#index + 1.)))";
+     "((as_int #index) i<= 4294967295i)";
+     "((as_int #limit) i<= 4294967295i)";
+     "((as_int (#index + 1.)) == (1i i+ (as_int #index)))";
+     "((#index + 1.) <= 4294967295.)"; "((#index + 1.) <= #limit)";
+     "(0. < (#index + 1.))";
+     "((as_int ((#index + 1.) - 1.)) == (-1i i+ (as_int (#index + 1.))))"] in
+  let facts = Expr.Set.fold (fun e fs ->
+    Expr.Set.add (rename#visit_expr () e) fs) facts Expr.Set.empty in
+  let index = Expr.LVar (name "#index") and limit = Expr.LVar (name "#limit") in
+  let gamma = index_difference_context [name "#index";name "#limit"] in
+  let a = Expr.UnOp (NumToInt,index)
+  and b = Expr.UnOp (NumToInt,bin FPlus index (Expr.num 1.))
+  and c = Expr.UnOp (NumToInt,bin FMinus (bin FPlus index (Expr.num 1.)) (Expr.num 1.)) in
+  let goal = bin Equal c a in
+  let core = Expr.Set.of_list
+    [not_ goal;bin Equal b (bin IPlus (Expr.int 1) a);
+     bin Equal c (bin IPlus (Expr.int (-1)) b)] in
+  Alcotest.(check int) "A15 exact eighteen original left atoms" 18
+    (Expr.Set.cardinal facts);
+  Alcotest.(check int) "A15 exact two original Number types" 2
+    (Hashtbl.length (Gamma.as_hashtbl gamma));
+  index,limit,gamma,facts,goal,core,a,c
+
+let integer_cast_chain_outer label original goal gamma contexts =
+  let expression e = `String (Fmt.str "%a" Expr.pp e) in
+  let types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  List.iter (fun context ->
+    let parent = pending_context_scope "entailment" [context] in
+    Alcotest.(check bool) (label ^ " entire original public PRE retained") true
+      (pending_context_field "original_left_fs" parent
+         = `List (List.map expression original));
+    Alcotest.(check bool) (label ^ " exact public goal retained") true
+      (pending_context_field "original_right_fs" parent = `List [expression goal]);
+    Alcotest.(check bool) (label ^ " original ordinary no-existential route retained") true
+      (pending_context_field "original_existentials" parent = `List []
+        && pending_context_field "matching" parent = `Bool false);
+    Alcotest.(check bool) (label ^ " exact original Type_env Gamma retained") true
+      (pending_context_field "original_gamma" parent
+        = `String (Fmt.str "%a" Gamma.pp gamma));
+    typed_alias_core_check_gamma label types context) contexts
+
+let integer_cast_chain_native () = with_nonblank_counter_trace (fun () ->
+  let label = "integer-cast-chain-original" in
+  let _,_,gamma,facts,goal,core,_,_ = integer_cast_chain_fixture "native" in
+  let full = Expr.Set.add (not_ goal) facts in
+  Alcotest.(check bool) "exact3 is a proper subset of original19" true
+    (Expr.Set.cardinal full = 19 && Expr.Set.cardinal core = 3
+      && Expr.Set.subset core full && not (Expr.Set.equal core full));
+  let pfs = Engine.PFS.of_list (Expr.Set.elements facts) in
+  let original = Engine.PFS.to_list pfs
+  and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let before = nonblank_counter_rows () in
+  let result,contexts = pending_context_capture (fun () ->
+    Solver.check_entailment Utils.Containers.SS.empty pfs [goal] gamma) in
+  Alcotest.(check bool) "public original cast-chain entailment" true result;
+  integer_cast_chain_outer label original goal gamma contexts;
+  let caller = "optional-entailment-integer-order-core" in
+  let selected = List.filter (fun context ->
+    pending_context_field "caller" context = `String caller) contexts in
+  Alcotest.(check int) "one actual unpinned licensing integer-chain endpoint" 1
+    (List.length selected);
+  let context = List.hd selected in
+  Alcotest.(check string) "licensing query is exactly three ORIGINAL atoms"
+    (typed_lookup_alias_compact (typed_alias_core_expected_fs core))
+    (typed_lookup_alias_compact
+      (pending_context_field "original_fs" context |> typed_lookup_alias_text));
+  let row = nonblank_counter_observe label before caller "unsat" core
+    (Gamma.as_hashtbl gamma) in
+  Alcotest.(check bool) "unchanged optional native5s licensing policy and identity" true
+    (smt_result_field "raw_unknown" row = "true"
+      && smt_result_field "timeout_ms" row = "5000"
+      && pending_context_field "query" context = `String (smt_result_field "query" row));
+  (* Do not guess the number, caller, or verdict of helper probes. Every actual
+     endpoint, including a failed witness guess, must be joined and definite. *)
+  positive_finite_identity_observe label before contexts "unsat";
+  Alcotest.(check bool) "caller PFS/Gamma remain unchanged" true
+    (List.equal Expr.equal original (Engine.PFS.to_list pfs)
+      && types = nonblank_counter_types (Gamma.as_hashtbl gamma)))
+
+let integer_cast_chain_wrong_goal label zero = with_nonblank_counter_trace (fun () ->
+  let index,limit,gamma,facts,_,_,a,c = integer_cast_chain_fixture label in
+  let wrong_goal = bin Equal c (bin IPlus a (Expr.int 1)) in
+  let fs = Expr.Set.add (not_ wrong_goal) facts
+    |> Expr.Set.add (bin ValueEqual index (Expr.num zero))
+    |> Expr.Set.add (bin ValueEqual limit (Expr.num 1.)) in
+  Alcotest.(check int) (label ^ " full19 retains all18 original atoms plus wrong-goal negation")
+    19 (Expr.Set.cardinal (Expr.Set.add (not_ wrong_goal) facts));
+  Alcotest.(check int) (label ^ " full21 adds only sign-specific index/limit pins")
+    21 (Expr.Set.cardinal fs);
+  let pfs = Engine.PFS.of_list (Expr.Set.elements facts) in
+  let original = Engine.PFS.to_list pfs and submitted = Expr.Set.elements fs
+  and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let caller = "control-integer-cast-chain-" ^ label in
+  let before = nonblank_counter_rows () in
+  let (model,public_rows),contexts = pending_context_capture (fun () ->
+    (* One coherent unit first checks the real public consumer, then obtains a
+       distinct required full-query model. Neither call is a producer replay. *)
+    let public = Solver.check_entailment Utils.Containers.SS.empty pfs [wrong_goal] gamma in
+    Alcotest.(check bool) (label ^ " public wrong-goal entailment is false") false public;
+    let public_rows = nonblank_counter_rows ()
+      |> List.filter (fun row -> not (List.mem row before)) in
+    let model = match Smt.exec_sat ~caller_kind:caller fs (Gamma.as_hashtbl gamma) with
+      | Some model -> model
+      | None -> Alcotest.fail (label ^ " missing required full-query SAT model") in
+    model,public_rows) in
+  let public_queries = List.map (smt_result_field "query") public_rows in
+  let public_contexts,model_contexts = List.partition (fun context ->
+    List.mem (pending_context_field "query" context |> typed_lookup_alias_text)
+      public_queries) contexts in
+  Alcotest.(check int) (label ^ " every actual public endpoint separately accounted")
+    (List.length public_rows) (List.length public_contexts);
+  integer_cast_chain_outer label original wrong_goal gamma public_contexts;
+  Alcotest.(check int) (label ^ " one distinct required full-query model endpoint")
+    1 (List.length model_contexts);
+  let context = List.hd model_contexts in
+  Alcotest.(check bool) (label ^ " actual required caller and separate query identity") true
+    (pending_context_field "caller" context = `String caller
+      && not (List.mem
+        (pending_context_field "query" context |> typed_lookup_alias_text) public_queries));
+  Alcotest.(check string) (label ^ " required native query retains entire21-atom FS")
+    (typed_lookup_alias_compact (typed_alias_core_expected_fs fs))
+    (typed_lookup_alias_compact
+      (pending_context_field "original_fs" context |> typed_lookup_alias_text));
+  typed_alias_core_check_gamma label types context;
+  let row = nonblank_counter_observe label before caller "sat" fs (Gamma.as_hashtbl gamma) in
+  Alcotest.(check bool) (label ^ " actual complete required30s policy and context join") true
+    (smt_result_field "raw_unknown" row = "false"
+      && smt_result_field "timeout_ms" row = "30000"
+      && pending_context_field "query" context = `String (smt_result_field "query" row));
+  positive_finite_identity_observe label before contexts "sat";
+  let encoded_index = match index with
+    | Expr.LVar name -> String.concat "$$" (String.split_on_char '#' name)
+    | _ -> assert false in
+  let zero_bits = Printf.sprintf "#x%016Lx" (Int64.bits_of_float zero) in
+  let assertions = match pending_context_field "encoded_assertions" context with
+    | `List xs -> List.map typed_lookup_alias_text xs
+    | _ -> Alcotest.fail (label ^ " malformed native assertions") in
+  let signed_pin = List.filter (fun assertion ->
+    let compact = typed_lookup_alias_compact assertion in
+    String.starts_with ~prefix:"(assert(=" compact
+      && typed_lookup_alias_contains compact encoded_index
+      && typed_lookup_alias_contains compact zero_bits
+      && not (typed_lookup_alias_contains compact "fp.")) assertions in
+  Alcotest.(check int) (label ^ " actual native ValueEqual pin fixes signed-zero bits")
+    1 (List.length signed_pin);
+  let lifted = Hashtbl.create 2 in
+  Smt.lift_model model (Gamma.as_hashtbl gamma) (Hashtbl.add lifted)
+    (Expr.Set.of_list [index;limit]);
+  let binding variable wanted = match variable with
+    | Expr.LVar name -> (match Hashtbl.find_opt lifted name with
+        | Some (Expr.Lit (Num n) as actual) ->
+            Alcotest.(check int64) (label ^ " actual lifted Number bits " ^ name)
+              (Int64.bits_of_float wanted) (Int64.bits_of_float n);actual
+        | _ -> Alcotest.fail (label ^ " missing actual Number binding"))
+    | _ -> assert false in
+  let actual_index = binding index zero and actual_limit = binding limit 1. in
+  let concrete e = Expr.subst_expr_for_expr ~to_subst:index ~subst_with:actual_index e
+    |> Expr.subst_expr_for_expr ~to_subst:limit ~subst_with:actual_limit in
+  Alcotest.(check bool) (label ^ " actual model replays EVERY original atom and pin")
+    true (Expr.Set.for_all (fun e -> slice_bound_truth (concrete e)) fs);
+  Alcotest.(check bool) (label ^ " caller PFS/submitted FS/Gamma remain unchanged") true
+    (List.equal Expr.equal original (Engine.PFS.to_list pfs)
+      && List.equal Expr.equal submitted (Expr.Set.elements fs)
+      && types = nonblank_counter_types (Gamma.as_hashtbl gamma)))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "integer cast chain original19 public native core UNSAT" `Quick
+          (with_total integer_cast_chain_native);
+        Alcotest.test_case "integer cast chain public wrong goal and full21 positive-zero SAT model" `Quick
+          (with_total (fun () -> integer_cast_chain_wrong_goal "positive_zero" 0.));
+        Alcotest.test_case "integer cast chain public wrong goal and full21 negative-zero SAT model" `Quick
+          (with_total (fun () -> integer_cast_chain_wrong_goal "negative_zero" (-0.)))])
+
+(* V31 retires only the zero-inclusive seed eligibility. These are the saved
+   A18 public21 facts, native15 non-type facts and all six original Gamma rows.
+   A13's separate eight-row fixture above remains intact. No runtime result is
+   claimed by these source-declared controls; UNKNOWN is always a test failure. *)
+let zero_decline_public_strings = [
+  "(((#index + 1.) - 1.) == #index)";
+  "(#current == l-nth(#values, (as_int #index)))";
+  "(#current == l-nth(#values, (as_int ((#index + 1.) - 1.))))";
+  "(#index <= 4294967295.)"; "(0. <= #index)"; "(is_int #index)";
+  "((#index + 1.) <= 4294967295.)"; "(is_int (#index + 1.))";
+  "(0. < (#index + 1.))"; "(0i i<= (as_int #index))";
+  "((1i i+ (as_int #index)) i<= (l-len #values))";
+  "((l-len #values) i<= 4294967295i)";
+  "((as_int ((#index + 1.) - 1.)) == (as_int #index))";
+  "((num_to_utf16 ((#index + 1.) - 1.)) == (num_to_utf16 #index))";
+  "(0i i<= (l-len #values))";
+  "((typeOf #current) == Utf16)"; "((typeOf #index) == Num)";
+  "((typeOf #s) == Obj)"; "((typeOf #m) == Obj)";
+  "((typeOf #a) == Obj)"; "((typeOf #values) == List)";
+]
+
+let zero_decline_fixture label =
+  let name x = if label = "original" then x else x ^ "_zero_decline_" ^ label in
+  let rename = object
+    inherit [_] Visitors.endo
+    method! visit_LVar () _ x = Expr.LVar (name x)
+  end in
+  let one text =
+    let parsed = parse_gil_set [text] in
+    Alcotest.(check int) "each original public expression parses singly" 1
+      (Expr.Set.cardinal parsed);
+    rename#visit_expr () (Expr.Set.choose parsed) in
+  let facts = List.map one zero_decline_public_strings in
+  let native = List.fold_left (fun fs text -> Expr.Set.add (one text) fs)
+    Expr.Set.empty zero_inclusive_list_strings in
+  let gamma = Gamma.init () in
+  List.iter (fun (x,typ) -> Gamma.update gamma (name x) typ)
+    ["#index",Type.NumberType; "#s",Type.ObjectType; "#a",Type.ObjectType;
+     "#current",Type.Utf16Type; "#values",Type.ListType; "#m",Type.ObjectType];
+  Alcotest.(check int) "complete original public21" 21 (List.length facts);
+  Alcotest.(check int) "complete original native15" 15 (Expr.Set.cardinal native);
+  Alcotest.(check int) "complete original Gamma6" 6
+    (Hashtbl.length (Gamma.as_hashtbl gamma));
+  facts,native,gamma,Expr.LVar (name "#index"),Expr.LVar (name "#current")
+
+let zero_decline_compact text =
+  let buffer = Buffer.create (String.length text) in
+  let quoted = ref false and escaped = ref false in
+  String.iter (fun c ->
+    if !quoted then (
+      Buffer.add_char buffer c;
+      if !escaped then escaped := false
+      else if c = '\\' then escaped := true
+      else if c = '"' then quoted := false)
+    else if c = '"' then (quoted := true; Buffer.add_char buffer c)
+    else if not (List.mem c [' ';'\t';'\r';'\n']) then Buffer.add_char buffer c) text;
+  Alcotest.(check bool) "well-formed quoted native text" false !quoted;
+  Buffer.contents buffer
+
+let zero_decline_complete label before contexts result expected gamma =
+  positive_finite_identity_observe label before contexts result;
+  Alcotest.(check bool) (label ^ " no retired optional-seeded-model dispatch") true
+    (not (List.exists (fun c -> pending_context_field "caller" c
+      = `String "optional-seeded-model") contexts));
+  List.iter (fun context ->
+    let text key = pending_context_field key context |> typed_lookup_alias_text in
+    let query = text "query" in
+    let actual_dump = "GIL query:\nFS: " ^ text "original_fs"
+      ^ "\nGAMMA: " ^ text "original_gamma" ^ "\nEncoded as SMT Query:\n"
+      ^ text "encoded_assertion_dump" in
+    Alcotest.(check string) (label ^ " actual dump joins its own exact sidecar")
+      (zero_decline_compact actual_dump)
+      (zero_decline_compact
+        (nonblank_counter_read (Filename.concat "gillian_smt_queries" query)))) contexts;
+  let selected = List.filter (fun c -> pending_context_field "caller" c
+    = `String "required-complete") contexts in
+  Alcotest.(check int) (label ^ " one actual full fallback") 1 (List.length selected);
+  let context = List.hd selected in
+  Alcotest.(check string) (label ^ " every original native atom and no hints")
+    (zero_decline_compact (typed_alias_core_expected_fs expected))
+    (zero_decline_compact
+      (pending_context_field "original_fs" context |> typed_lookup_alias_text));
+  typed_alias_core_check_gamma label (nonblank_counter_types gamma) context;
+  List.iter (fun (key,want) -> Alcotest.(check bool) (label ^ " full policy " ^ key)
+    true (pending_context_field key context = want))
+    ["raw_unknown",`Bool false; "timeout_ms",`String "30000"; "phase_selection",`Int 3];
+  let query = pending_context_field "query" context |> typed_lookup_alias_text in
+  let rows = nonblank_counter_rows () |> List.filter (fun row ->
+    not (List.mem row before) && smt_result_field "query" row = query) in
+  Alcotest.(check int) (label ^ " exact same-query full native return") 1 (List.length rows);
+  Alcotest.(check string) (label ^ " actual full result") result
+    (smt_result_field "result" (List.hd rows));
+  let command = pending_context_field "primary_check_command"
+    (pending_context_field "provenance" context) in
+  Alcotest.(check bool) (label ^ " unchanged plain full-query primary") true
+    (command = `String "(check-sat)")
+
+let zero_decline_public () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun label ->
+    let facts,native,gamma,_,_ = zero_decline_fixture label in
+    let original = facts and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    let before = nonblank_counter_rows () in
+    let result,contexts = pending_context_capture (fun () ->
+      Solver.check_satisfiability ~matching:false facts gamma) in
+    Alcotest.(check bool) (label ^ " full original public satisfiable") true result;
+    let scope = pending_context_scope "satisfiability" contexts in
+    Alcotest.(check bool) (label ^ " exact public operation facts/Gamma/mode") true
+      (pending_context_field "original_fs" scope = `List (List.map
+        (fun e -> `String (Fmt.str "%a" Expr.pp e)) original)
+       && pending_context_field "original_gamma" scope = `String (Fmt.str "%a" Gamma.pp gamma)
+       && pending_context_field "matching" scope = `Bool false);
+    zero_decline_complete label before contexts "sat" native (Gamma.as_hashtbl gamma);
+    Alcotest.(check bool) (label ^ " public inputs unchanged") true
+      (List.equal Expr.equal original facts
+       && types = nonblank_counter_types (Gamma.as_hashtbl gamma))) ["original";"alpha"])
+
+let zero_decline_frame_cache () = with_nonblank_counter_trace (fun () ->
+  let _,base,gamma,index,current = zero_decline_fixture "frame" in
+  let gamma = Gamma.as_hashtbl gamma in
+  let space = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical " ")) in
+  let fs = base |> Expr.Set.add (bin ValueEqual index (Expr.num 1.))
+    |> Expr.Set.add (bin ValueEqual current space) in
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let run label gamma =
+    let before = nonblank_counter_rows () in
+    let model,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+    zero_decline_complete label before contexts "sat" fs gamma;
+    match model with Some model -> model | None -> Alcotest.fail "full hinted-conflict model absent" in
+  let model = run "zero-and-empty-hints-declined" gamma in
+  let lifted = Hashtbl.create 2 in
+  Smt.lift_model model gamma (Hashtbl.add lifted) (Expr.Set.of_list [index;current]);
+  let get = function Expr.LVar name -> Hashtbl.find_opt lifted name | _ -> assert false in
+  Alcotest.(check bool) "actual model retains nonzero index" true
+    (match get index with Some (Expr.Lit (Literal.Num n)) ->
+      Int64.bits_of_float n = Int64.bits_of_float 1. | _ -> false);
+  Alcotest.(check bool) "actual model retains nonempty whitespace UTF16" true
+    (match get current with Some value -> Expr.equal value space | _ -> false);
+  let files = List.sort String.compare (nonblank_counter_files ()) in
+  Alcotest.(check bool) "actual full SAT model cached" true (Option.is_some (Smt.check_sat fs gamma));
+  Alcotest.(check bool) "same full key emits no new query" true
+    (files = List.sort String.compare (nonblank_counter_files ()));
+  let changed_gamma = Hashtbl.copy gamma in
+  Hashtbl.add changed_gamma "#unused_zero_decline_frame" Type.BooleanType;
+  ignore (run "changed-unused-Gamma-must-miss-cache" changed_gamma);
+  let contradictory = Expr.Set.add (not_ (bin Equal current space)) fs in
+  let before = nonblank_counter_rows () in
+  let rejected,contexts = pending_context_capture (fun () ->
+    let rejected = Option.is_none (Smt.check_sat contradictory gamma) in
+    (* Separately require real UNSAT of this full changed frame even if a
+       sufficient original-subset precheck already rejected it. *)
+    Alcotest.(check bool) "changed full FS cannot reuse cached SAT" true rejected;
+    Alcotest.(check bool) "full changed frame actual required UNSAT" true
+      (Option.is_none (Smt.exec_sat ~caller_kind:"zero-decline-full-frame-conflict"
+        contradictory gamma));
+    rejected) in
+  Alcotest.(check bool) "original conflicting frame remains rejected" true rejected;
+  positive_finite_identity_observe "full-frame-conflict" before contexts "unsat";
+  ignore (zero_inclusive_list_context "full-frame-conflict" contexts
+    "zero-decline-full-frame-conflict" contradictory gamma);
+  ignore (nonblank_counter_observe "full-frame-conflict" before
+    "zero-decline-full-frame-conflict" "unsat" contradictory gamma);
+  Alcotest.(check bool) "caller full FS and original Gamma unchanged" true
+    (List.equal Expr.equal original (Expr.Set.elements fs)
+     && types = nonblank_counter_types gamma))
+
+let zero_decline_wrong_goals () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,empty_goal) ->
+    let facts,native,gamma,index,current = zero_decline_fixture label in
+    let goal = if empty_goal then bin Equal current
+      (Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical "")))
+      else bin Equal index (Expr.num 0.) in
+    let pfs = Engine.PFS.of_list facts in
+    let original = Engine.PFS.to_list pfs and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    let before = nonblank_counter_rows () in
+    let result,contexts = pending_context_capture (fun () ->
+      Solver.check_entailment Utils.Containers.SS.empty pfs [goal] gamma) in
+    Alcotest.(check bool) (label ^ " original public wrong goal false") false result;
+    integer_cast_chain_outer label original goal gamma contexts;
+    zero_decline_complete label before contexts "sat" (Expr.Set.add (not_ goal) native)
+      (Gamma.as_hashtbl gamma);
+    Alcotest.(check bool) (label ^ " public frame unchanged") true
+      (List.equal Expr.equal original (Engine.PFS.to_list pfs)
+       && types = nonblank_counter_types (Gamma.as_hashtbl gamma)))
+    ["wrong-zero",false;"wrong-empty",true])
+
+let zero_decline_other_seed_family () = with_nonblank_counter_trace (fun () ->
+  let gamma = Hashtbl.create 4 in
+  let a = Expr.LVar "#other_seed_a_v31" and b = Expr.LVar "#other_seed_b_v31"
+  and s = Expr.LVar "#other_seed_s_v31" and t = Expr.LVar "#other_seed_t_v31" in
+  List.iter (fun (x,typ) -> Hashtbl.add gamma x typ)
+    ["#other_seed_a_v31",Type.NumberType;"#other_seed_b_v31",Type.NumberType;
+     "#other_seed_s_v31",Type.Utf16Type;"#other_seed_t_v31",Type.Utf16Type];
+  let fs = Expr.Set.of_list [bin FLessThanEqual (Expr.num 0.) a;
+    bin FLessThanEqual (Expr.num 0.) b; bin Equal s t] in
+  let empty = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical "")) in
+  let seeded = List.fold_left (fun fs (x,value) -> Expr.Set.add (bin Equal x value) fs)
+    fs [a,Expr.num 0.;b,Expr.num 0.;s,empty;t,empty] in
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+  Alcotest.(check bool) "other two-Number/two-UTF16 seed family still native SAT" true
+    (Option.is_some model);
+  ignore (zero_inclusive_list_context "other-seed-family" contexts "optional-seeded-model" seeded gamma);
+  ignore (nonblank_counter_observe "other-seed-family" before "optional-seeded-model" "sat" seeded gamma);
+  positive_finite_identity_observe "other-seed-family" before contexts "sat";
+  Alcotest.(check bool) "other seed family original FS/Gamma unchanged" true
+    (List.equal Expr.equal original (Expr.Set.elements fs) && types = nonblank_counter_types gamma))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "zero-seed decline full original public and alpha fallback" `Quick
+          (with_total zero_decline_public);
+        Alcotest.test_case "zero-seed decline nonzero nonempty model and full cache frame" `Quick
+          (with_total zero_decline_frame_cache);
+        Alcotest.test_case "zero-seed decline original public wrong zero and empty goals" `Quick
+          (with_total zero_decline_wrong_goals);
+        Alcotest.test_case "zero-seed decline preserves other generic seed family" `Quick
+          (with_total zero_decline_other_seed_family)])
+
+(* V36: only exact original finite-bound pairs may use the new sufficient
+   query. These source-declared controls have no native qualification yet. *)
+let finite_number_bound_wanted upper value =
+  if upper then bin FLessThanEqual value (Expr.num Float.max_float)
+  else bin FLessThanEqual (Expr.num (-. Float.max_float)) value
+
+let finite_number_bound_saved_left = [
+  "(#current == l-nth(l+ (#prefix, {{ #current }}), (as_int #index)))";
+  "((#index + 1.) == #n)";
+  "(#keys == -u- (-{ (num_to_utf16 #index) }-, #prefixKeys))";
+  "(#a == #loc_378)"; "(#values == l+ (#prefix, {{ #current }}))";
+  "(#suffix == {{  }})"; "(#s == #loc_376)"; "(#m == #loc_374)";
+  "(#suffixKeys == -{  }-)";
+  "((l-len #prefix) == (as_int #index))";
+  "(((as_int #n) i+ (-1i i* (as_int (#index + 1.)))) == 0i)";
+  "((as_int #n) == (1i i+ (l-len #prefix)))";
+  "(#n <= 4294967295.)"; "(0. <= #n)"; "(is_int #n)";
+  "(#index <= 4294967295.)"; "(0. <= #index)"; "(is_int #index)";
+  "(#index < #n)"; "((u16-len #current) i<= 9007199254740991i)";
+  "((as_int #n) i<= 4294967295i)";
+  "((l-len #prefix) i<= 4294967294i)";
+  "(is_int (#index + 1.))"; "(0. <= (#index + 1.))";
+  "((as_int (#index + 1.)) == (1i i+ (as_int #index)))";
+  "((as_int (#index + 1.)) i<= 4294967295i)";
+  "((#index + 1.) <= 4294967295.)"; "((#index + 1.) <= #n)";
+  "(((-1i i* (as_int #index)) i+ (as_int #n)) == 1i)";
+  "(0i i<= ((as_int #n) i+ (-1i i* (as_int (#index + 1.)))))";
+  "(((as_int #n) i+ (-1i i* (as_int (#index + 1.)))) == (-1i i+ ((-1i i* (as_int #index)) i+ (as_int #n))))";
+  "(((as_int #n) i+ (-1i i* (as_int (#index + 1.)))) i< ((-1i i* (as_int #index)) i+ (as_int #n)))";
+  "(0i i<= (l-len #values))"; "(0i i<= (l-len #prefix))";
+  "(0i i<= (l-len #suffix))";
+  "((num_to_utf16 ((#index + 1.) - 1.)) == (num_to_utf16 #index))";
+  "(((#index + 1.) - 1.) == #index)";
+]
+
+let finite_number_bound_saved_fixture label =
+  let name x = if label = "saved" then x else x ^ "_finite_bound_" ^ label in
+  let locations = ["#loc_378";"#loc_376";"#loc_374"] in
+  let rename = object
+    inherit [_] Visitors.endo
+    method! visit_LVar () _ x =
+      if List.mem x locations then Expr.ALoc x else Expr.LVar (name x)
+  end in
+  let facts = List.map (fun text ->
+    let parsed = parse_gil_set [text] in
+    Alcotest.(check int) "saved finite-bound atom parses singly" 1
+      (Expr.Set.cardinal parsed);
+    rename#visit_expr () (Expr.Set.choose parsed)) finite_number_bound_saved_left in
+  let gamma = Gamma.init () in
+  List.iter (fun (x,t) -> Gamma.update gamma (name x) t)
+    ["#a",Type.ObjectType;"#b",Type.ObjectType;"#c",Type.ObjectType;
+     "#current",Type.Utf16Type;"#index",Type.NumberType;"#keys",Type.SetType;
+     "#m",Type.ObjectType;"#mapProto",Type.ObjectType;"#n",Type.NumberType;
+     "#outputKeys",Type.SetType;"#prefix",Type.ListType;"#prefixKeys",Type.SetType;
+     "#s",Type.ObjectType;"#setProto",Type.ObjectType;"#suffix",Type.ListType;
+     "#suffixKeys",Type.SetType;"#values",Type.ListType];
+  Alcotest.(check int) "all saved original public37 facts" 37 (List.length facts);
+  Alcotest.(check int) "all saved original public Gamma17" 17
+    (Hashtbl.length (Gamma.as_hashtbl gamma));
+  List.iter (fun location -> Alcotest.(check bool)
+    "saved locations restored as actual ALoc, not an untyped numeric LVar" true
+    (List.exists (fun e -> Utils.Containers.SS.mem location (Expr.alocs e)) facts
+     && not (List.exists (fun e -> Utils.Containers.SS.mem location (Expr.lvars e)) facts))) locations;
+  facts,gamma,Expr.LVar (name "#index")
+
+let finite_number_bound_complete label before contexts expected =
+  positive_finite_identity_observe label before contexts expected;
+  let command = "(check-sat)" in
+  List.iter (fun context ->
+    let text key = pending_context_field key context |> typed_lookup_alias_text in
+    let query = text "query" in
+    let dump = "GIL query:\nFS: " ^ text "original_fs" ^ "\nGAMMA: "
+      ^ text "original_gamma" ^ "\nEncoded as SMT Query:\n" ^ text "encoded_assertion_dump" in
+    Alcotest.(check string) (label ^ " complete quote-preserving sidecar/dump join")
+      (zero_decline_compact dump)
+      (zero_decline_compact (nonblank_counter_read (Filename.concat "gillian_smt_queries" query)));
+    let assertions = match pending_context_field "encoded_assertions" context with
+      | `List xs -> List.map typed_lookup_alias_text xs
+      | _ -> Alcotest.fail (label ^ " missing actual encoded assertions") in
+    Alcotest.(check string) (label ^ " every actual encoded assertion retained")
+      (zero_decline_compact (String.concat "" assertions))
+      (zero_decline_compact (text "encoded_assertion_dump"));
+    Alcotest.(check bool) (label ^ " unchanged actual plain primary command") true
+      (pending_context_field "primary_check_command" (pending_context_field "provenance" context)
+       = `String command);
+    let dispatch = "SMT_PRIMARY_CHECK_DISPATCH query=" ^ query ^ " command=" ^ command in
+    let matches = nonblank_counter_read "file.log" |> String.split_on_char '\n'
+      |> List.filter (fun row -> row = dispatch) in
+    Alcotest.(check int) (label ^ " one actual dispatch for its returned query") 1
+      (List.length matches)) contexts
+
+let finite_number_bound_public label upper =
+  let facts,gamma,index = finite_number_bound_saved_fixture label in
+  if label <> "saved" then (
+    Gamma.update gamma "#integer_order_projection_0" Type.IntType;
+    Gamma.update gamma "$$integer_order_projection_0" Type.BooleanType);
+  let goal = finite_number_bound_wanted upper index in
+  let pfs = Engine.PFS.of_list facts in
+  let original = Engine.PFS.to_list pfs
+  and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let before = nonblank_counter_rows () in
+  let result,contexts = pending_context_capture (fun () ->
+    Solver.check_entailment Utils.Containers.SS.empty pfs [goal] gamma) in
+  Alcotest.(check bool) (label ^ " actual original finite-bound entailment") true result;
+  let caller = "optional-entailment-finite-number-bound-core" in
+  let selected = List.filter (fun c -> pending_context_field "caller" c = `String caller) contexts in
+  Alcotest.(check int) (label ^ " new native sufficient endpoint is load-bearing") 1
+    (List.length selected);
+  let context = List.hd selected in
+  let scope = pending_context_scope "finite-number-bound-core" [context] in
+  let expressions fs = `List (List.map Expr.to_yojson (Expr.Set.elements fs)) in
+  let core = Expr.Set.of_list [not_ goal;Expr.UnOp (IsInt,index)] in
+  Alcotest.(check bool) (label ^ " two EXACT original atoms, no aliases or added assumptions") true
+    (pending_context_field "original_core" scope = expressions core);
+  let retained = match pending_context_field "original_fs" scope with
+    | `List xs -> xs | _ -> Alcotest.fail "missing full pre-subset formulae" in
+  Alcotest.(check bool) (label ^ " exact proper original subset") true
+    (List.length retained > 2 && List.for_all (fun e -> List.mem e retained)
+      (match expressions core with `List xs -> xs | _ -> assert false));
+  Alcotest.(check string) (label ^ " actual native FS is exactly that two-atom core")
+    (zero_decline_compact (typed_alias_core_expected_fs core))
+    (zero_decline_compact (pending_context_field "original_fs" context |> typed_lookup_alias_text));
+  let encoded = match pending_context_field "encoded_assertions" context with
+    | `List xs -> String.concat "" (List.map typed_lookup_alias_text xs) |> zero_decline_compact
+    | _ -> Alcotest.fail "missing actual finite-bound encoding" in
+  Alcotest.(check bool) (label ^ " exact native MAX_FINITE bits, negated bound and integral support") true
+    (typed_lookup_alias_contains encoded (if upper then "#x7fefffffffffffff" else "#xffefffffffffffff")
+     && typed_lookup_alias_contains encoded "(not(fp.leq"
+     && typed_lookup_alias_contains encoded "fp.roundToIntegral"
+     && typed_lookup_alias_contains encoded "fp.isInfinite");
+  let current_types = match pending_context_field "query_gamma_bindings" scope with
+    | `List xs -> List.map (function
+        | `List [`String name; `String typ] ->
+            (match List.find_opt (fun (old,t) -> old = name && Type.str t = typ) types with
+             | Some binding -> binding
+             | None -> Alcotest.fail (label ^ " current Gamma has an unexpected binding"))
+        | _ -> Alcotest.fail "malformed complete current Gamma binding") xs
+    | _ -> Alcotest.fail "missing complete current Gamma" in
+  typed_alias_core_check_gamma label current_types context;
+  let current_gamma = Gamma.init () in
+  List.iter (fun (name,typ) -> Gamma.update current_gamma name typ) current_types;
+  Alcotest.(check bool) (label ^ " COMPLETE current Gamma passed unchanged") true
+    (pending_context_field "query_gamma" scope = `String (Fmt.str "%a" Gamma.pp current_gamma));
+  List.iter (fun c ->
+    let outer = pending_context_scope "entailment" [c] in
+    let expression e = `String (Fmt.str "%a" Expr.pp e) in
+    Alcotest.(check bool) (label ^ " complete original caller FS/Gamma/goal retained") true
+      (pending_context_field "original_left_fs" outer = `List (List.map expression original)
+       && pending_context_field "original_right_fs" outer = `List [expression goal]
+       && pending_context_field "original_gamma" outer = `String (Fmt.str "%a" Gamma.pp gamma)
+       && pending_context_field "original_existentials" outer = `List []
+       && pending_context_field "matching" outer = `Bool false)) contexts;
+  let rows = nonblank_counter_rows () |> List.filter (fun row ->
+    not (List.mem row before) && smt_result_field "query" row
+      = (pending_context_field "query" context |> typed_lookup_alias_text)) in
+  Alcotest.(check int) (label ^ " exact chosen native return") 1 (List.length rows);
+  let row = List.hd rows in
+  Alcotest.(check bool) (label ^ " unchanged optional policy; real UNSAT only") true
+    (smt_result_field "caller" row = caller && smt_result_field "result" row = "unsat"
+     && smt_result_field "raw_unknown" row = "true" && smt_result_field "timeout_ms" row = "5000");
+  Alcotest.(check bool) (label ^ " no required fallback may replace licensing evidence") true
+    (not (List.exists (fun c -> pending_context_field "caller" c = `String "required-complete") contexts));
+  finite_number_bound_complete label before contexts "unsat";
+  Alcotest.(check bool) (label ^ " original caller PFS/Gamma unchanged") true
+    (List.equal Expr.equal original (Engine.PFS.to_list pfs)
+     && types = nonblank_counter_types (Gamma.as_hashtbl gamma))
+
+(* The internal selector is deliberately not exported. These public controls
+   observe the proper-subset/mode/existential gates; malformed type and
+   impossible pre/post-simplification combinations remain static source checks. *)
+let finite_number_bound_public_guards () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,matching,exists) ->
+    let name = "#finite_bound_public_guard_" ^ label in
+    let x = Expr.LVar name in
+    let facts = [Expr.UnOp (IsInt,x)] in
+    let wanted = finite_number_bound_wanted false x in
+    let gamma = Gamma.init () in Gamma.update gamma name Type.NumberType;
+    let pfs = Engine.PFS.of_list facts in
+    let original = Engine.PFS.to_list pfs and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+    let before = nonblank_counter_rows () in
+    let result,contexts = pending_context_capture (fun () ->
+      Solver.check_entailment ~matching exists pfs [wanted] gamma) in
+    Alcotest.(check bool) (label ^ " ordinary public proof retained") true result;
+    Alcotest.(check bool) (label ^ " no new sufficient attempt replaces fallback") true
+      (not (List.exists (fun c -> pending_context_field "caller" c
+         = `String "optional-entailment-finite-number-bound-core") contexts));
+    List.iter (fun c ->
+      let outer = pending_context_scope "entailment" [c] in
+      Alcotest.(check bool) (label ^ " exact public mode/existentials retained") true
+        (pending_context_field "matching" outer = `Bool matching
+         && pending_context_field "original_existentials" outer =
+           `List (List.map (fun name -> `String name) (Utils.Containers.SS.elements exists)))) contexts;
+    finite_number_bound_complete label before contexts "unsat";
+    Alcotest.(check bool) (label ^ " all public inputs unchanged") true
+      (List.equal Expr.equal original (Engine.PFS.to_list pfs)
+       && types = nonblank_counter_types (Gamma.as_hashtbl gamma)))
+    ["proper_subset",false,Utils.Containers.SS.empty;
+     "matching",true,Utils.Containers.SS.empty;
+     "existential",false,Utils.Containers.SS.singleton "#finite_bound_unused_existential"];
+  let x = Expr.LVar "#finite_bound_cache" in
+  let gamma = Hashtbl.create 2 in Hashtbl.add gamma "#finite_bound_cache" Type.NumberType;
+  let core = Expr.Set.of_list [not_ (finite_number_bound_wanted false x);Expr.UnOp (IsInt,x)] in
+  let run label gamma =
+    let before = nonblank_counter_rows () in
+    let result,contexts = pending_context_capture (fun () -> Smt.proves_unsat ~caller_kind:label core gamma) in
+    Alcotest.(check bool) "actual cache-anchor native UNSAT" true result;
+    ignore (nonblank_counter_observe label before label "unsat" core gamma);
+    List.iter (typed_alias_core_check_gamma label (nonblank_counter_types gamma)) contexts;
+    finite_number_bound_complete label before contexts "unsat" in
+  run "control-finite-bound-cache-anchor" gamma;
+  let files = List.sort String.compare (nonblank_counter_files ()) in
+  Alcotest.(check bool) "same complete key reuses actual UNSAT" true (Smt.proves_unsat core gamma);
+  Alcotest.(check bool) "cached core emits no query" true
+    (files = List.sort String.compare (nonblank_counter_files ()));
+  let changed = Hashtbl.copy gamma in Hashtbl.add changed "#unused_finite_bound_cache" Type.BooleanType;
+  run "control-finite-bound-complete-Gamma-miss" changed)
+
+let finite_number_bound_model label upper holds value supported unrelated other_bound =
+  let name = "#finite_bound_model_" ^ label and other_name = "#finite_bound_other_" ^ label in
+  let x = Expr.LVar name and other = Expr.LVar other_name in
+  let wanted = if other_bound then bin FLessThanEqual (Expr.num (-100.)) x
+    else finite_number_bound_wanted upper x in
+  let pin = if Float.is_nan value then Expr.UnOp (M_isNaN,x)
+    else bin ValueEqual x (Expr.num value) in
+  let facts = [pin] @ (if supported then [Expr.UnOp (IsInt,x)] else [])
+    @ (if unrelated then [Expr.UnOp (IsInt,other);bin ValueEqual other (Expr.num 1.)] else []) in
+  let gamma = Gamma.init () in Gamma.update gamma name Type.NumberType;
+  if unrelated then Gamma.update gamma other_name Type.NumberType;
+  Gamma.update gamma "#unused_finite_bound_model" Type.BooleanType;
+  let gt = Gamma.as_hashtbl gamma in
+  let submitted = Expr.Set.of_list ((if holds then wanted else not_ wanted)::facts) in
+  let original = Expr.Set.elements submitted and types = nonblank_counter_types gt in
+  let pfs = Engine.PFS.of_list facts in
+  let public_before = Engine.PFS.to_list pfs in
+  let before = nonblank_counter_rows () and caller = "control-finite-bound-model-" ^ label in
+  let (model,public_queries),contexts = pending_context_capture (fun () ->
+    let public = Solver.check_entailment Utils.Containers.SS.empty pfs [wanted] gamma in
+    Alcotest.(check bool) (label ^ " actual public finite comparison") holds public;
+    let public_queries = nonblank_counter_rows () |> List.filter (fun row -> not (List.mem row before))
+      |> List.map (smt_result_field "query") in
+    let model = match Smt.exec_sat ~caller_kind:caller submitted gt with
+      | Some model -> model | None -> Alcotest.fail (label ^ " missing real required SAT model") in
+    model,public_queries) in
+  let public_contexts = List.filter (fun c -> List.mem
+    (pending_context_field "query" c |> typed_lookup_alias_text) public_queries) contexts in
+  Alcotest.(check int) (label ^ " every actual public endpoint accounted")
+    (List.length public_queries) (List.length public_contexts);
+  List.iter (fun context ->
+    let outer = pending_context_scope "entailment" [context] in
+    let expression e = `String (Fmt.str "%a" Expr.pp e) in
+    Alcotest.(check bool) (label ^ " exact public facts/Gamma/goal retained") true
+      (pending_context_field "original_left_fs" outer = `List (List.map expression public_before)
+       && pending_context_field "original_right_fs" outer = `List [expression wanted]
+       && pending_context_field "original_gamma" outer = `String (Fmt.str "%a" Gamma.pp gamma)
+       && pending_context_field "original_existentials" outer = `List []
+       && pending_context_field "matching" outer = `Bool false)) public_contexts;
+  if not supported || other_bound then
+    Alcotest.(check bool) (label ^ " unsupported/other-bound public route declines new core") true
+      (not (List.exists (fun c -> pending_context_field "caller" c
+        = `String "optional-entailment-finite-number-bound-core") public_contexts));
+  let selected = List.filter (fun c -> pending_context_field "caller" c = `String caller) contexts in
+  Alcotest.(check int) (label ^ " distinct full required SAT endpoint") 1 (List.length selected);
+  let context = List.hd selected in
+  Alcotest.(check bool) (label ^ " model endpoint distinct from all public requests") true
+    (not (List.mem (pending_context_field "query" context |> typed_lookup_alias_text) public_queries));
+  let row = nonblank_counter_observe label before caller "sat" submitted gt in
+  Alcotest.(check bool) (label ^ " actual required30s full-query policy") true
+    (smt_result_field "raw_unknown" row = "false" && smt_result_field "timeout_ms" row = "30000");
+  typed_alias_core_check_gamma label types context;
+  finite_number_bound_complete label before contexts "sat";
+  let assertions = match pending_context_field "encoded_assertions" context with
+    | `List xs -> List.map (fun x -> zero_decline_compact (typed_lookup_alias_text x)) xs
+    | _ -> Alcotest.fail "missing native model assertions" in
+  let encoded_name = String.concat "$$" (String.split_on_char '#' name) in
+  Alcotest.(check bool) (label ^ " actual target constraint is encoded") true
+    (List.exists (fun text -> typed_lookup_alias_contains text encoded_name
+      && (if Float.is_nan value then String.starts_with ~prefix:"(assert(fp.isNaN" text
+          else String.starts_with ~prefix:"(assert(=" text
+            && typed_lookup_alias_contains text (Printf.sprintf "#x%016Lx" (Int64.bits_of_float value))
+            && not (typed_lookup_alias_contains text "fp."))) assertions);
+  let targets = x::(if unrelated then [other] else []) in
+  let lifted = Hashtbl.create 2 in
+  Smt.lift_model model gt (Hashtbl.add lifted) (Expr.Set.of_list targets);
+  let binding variable expected = match variable with
+    | Expr.LVar n -> (match Hashtbl.find_opt lifted n with
+        | Some (Expr.Lit (Num actual) as literal) ->
+            if Float.is_nan expected then Alcotest.(check bool) (label ^ " real NaN model class") true (Float.is_nan actual)
+            else Alcotest.(check int64) (label ^ " real signed Number model bits")
+              (Int64.bits_of_float expected) (Int64.bits_of_float actual);
+            literal
+        | _ -> Alcotest.fail (label ^ " absent native Number model binding"))
+    | _ -> assert false in
+  let actual_x = binding x value in
+  let actual_other = if unrelated then Some (binding other 1.) else None in
+  let concrete e =
+    let e = Expr.subst_expr_for_expr ~to_subst:x ~subst_with:actual_x e in
+    match actual_other with None -> e | Some actual ->
+      Expr.subst_expr_for_expr ~to_subst:other ~subst_with:actual e in
+  Alcotest.(check bool) (label ^ " EVERY full original atom and countergoal replays with real model") true
+    (Expr.Set.for_all (fun e -> slice_bound_truth (concrete e)) submitted);
+  Alcotest.(check bool) (label ^ " all caller/public/model inputs untouched") true
+    (List.equal Expr.equal original (Expr.Set.elements submitted)
+     && List.equal Expr.equal public_before (Engine.PFS.to_list pfs)
+     && types = nonblank_counter_types gt)
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | None -> []
+   | Some _ ->
+       [Alcotest.test_case "finite Number bound saved37 lower original core native UNSAT" `Quick
+          (with_total (fun () -> with_nonblank_counter_trace (fun () -> finite_number_bound_public "saved" false)));
+        Alcotest.test_case "finite Number bound saved37 upper original core native UNSAT" `Quick
+          (with_total (fun () -> with_nonblank_counter_trace (fun () -> finite_number_bound_public "saved" true)));
+        Alcotest.test_case "finite Number bound renamed and colliding original names" `Quick
+          (with_total (fun () -> with_nonblank_counter_trace (fun () ->
+            finite_number_bound_public "collision_lower" false;
+            finite_number_bound_public "collision_upper" true)));
+        Alcotest.test_case "finite Number bound public subset mode existential guards and complete Gamma cache" `Quick
+          (with_total finite_number_bound_public_guards);
+        Alcotest.test_case "finite Number bound both signed zeros and finite native SAT models" `Quick
+          (with_total (fun () -> with_nonblank_counter_trace (fun () ->
+            List.iter (fun (label,value) -> finite_number_bound_model label false true value true false false)
+              ["positive_zero",0.;"negative_zero",(-0.);"finite_one",1.;"finite_max",Float.max_float])));
+        Alcotest.test_case "finite Number bound unsupported NaN lower and upper native SAT models" `Quick
+          (with_total (fun () -> with_nonblank_counter_trace (fun () ->
+            finite_number_bound_model "nan_lower" false false Float.nan false false false;
+            finite_number_bound_model "nan_upper" true false Float.nan false false false)));
+        Alcotest.test_case "finite Number bound unsupported infinities and exact orientation native models" `Quick
+          (with_total (fun () -> with_nonblank_counter_trace (fun () ->
+            finite_number_bound_model "negative_inf_lower" false false (-. Float.infinity) false false false;
+            finite_number_bound_model "positive_inf_upper" true false Float.infinity false false false;
+            finite_number_bound_model "positive_inf_lower" false true Float.infinity false false false;
+            finite_number_bound_model "negative_inf_upper" true true (-. Float.infinity) false false false)));
+        Alcotest.test_case "finite Number bound unrelated support and other-bound native SAT controls" `Quick
+          (with_total (fun () -> with_nonblank_counter_trace (fun () ->
+            finite_number_bound_model "unrelated_nan" false false Float.nan false true false;
+            finite_number_bound_model "other_bound" false false (-101.) true false true)))])
+
+(* Separate opt-in UNKNOWN-policy fixture. Definite answers, protocol errors,
+   identity ambiguity/recovery or a failed1ms SAT reset all fail this control.
+   No result for the fixed Boolean candidate is assumed or used as a proof. *)
+let actual_unknown_policy_read limit path =
+  let channel = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in channel) (fun () ->
+    let buffer = Buffer.create 256 and chunk = Bytes.create 4096 in
+    let rec read () =
+      let count = input channel chunk 0 (min 4096 (limit + 1 - Buffer.length buffer)) in
+      if count > 0 then (
+        Buffer.add_subbytes buffer chunk 0 count;
+        if Buffer.length buffer > limit then Alcotest.fail ("bounded read: " ^ path);
+        read ()) in
+    read (); Buffer.contents buffer)
+
+let actual_unknown_policy_snapshot stage =
+  (* Observe only this unit's bounded owned tree and pipe metadata. A shell
+     intermediary is recorded, never mistaken for the actual Z3 process. *)
+  let owner = Unix.getpid () and remaining = ref 65536 in
+  let account text =
+    remaining := !remaining - String.length text;
+    if !remaining < 0 then Alcotest.fail "owned process snapshot exceeds64KiB";
+    text in
+  let read path = account (actual_unknown_policy_read 8192 path) in
+  let link path = account (Unix.readlink path) in
+  let path pid suffix = Printf.sprintf "/proc/%d/%s" pid suffix in
+  let fields text = String.split_on_char ' ' (String.trim text)
+    |> List.filter (fun text -> text <> "") in
+  let status pid =
+    let text = read (path pid "stat") in
+    let close = String.rindex text ')' in
+    let parts = fields (String.sub text (close + 1) (String.length text-close-1)) in
+    let state = List.nth parts 0 in
+    Alcotest.(check bool) "owned process is still live" true
+      (state <> "Z" && state <> "X");
+    int_of_string (List.nth parts 1), List.nth parts 19 in
+  let children pid = read (path pid (Printf.sprintf "task/%d/children" pid))
+    |> fields |> List.map int_of_string |> List.sort Int.compare in
+  let namespace pid kind =
+    let s = Unix.stat (path pid ("ns/" ^ kind)) in
+    `List [`Int s.Unix.st_dev; `Int s.Unix.st_ino] in
+  let executable pid =
+    let target = link (path pid "exe") and s = Unix.stat (path pid "exe") in
+    Alcotest.(check bool) "owned executable is regular" true (s.Unix.st_kind=Unix.S_REG);
+    target, `List [`Int s.Unix.st_dev; `Int s.Unix.st_ino; `Int s.Unix.st_perm;
+      `Int s.Unix.st_size; `Float s.Unix.st_mtime; `Float s.Unix.st_ctime] in
+  let stdio pid = List.map (fun fd -> string_of_int fd,
+    link (path pid ("fd/" ^ string_of_int fd))) [0;1;2] in
+  let owner_status = status owner in
+  let owner_ns = namespace owner "pid" and mount_ns = namespace owner "mnt" in
+  let seen = ref [] in
+  let rec tree depth pid =
+    if depth > 4 || List.length !seen >= 8 || List.mem pid !seen then
+      Alcotest.fail "ambiguous or excessive owned process tree";
+    seen := pid :: !seen;
+    let parent,birth = status pid and before = children pid in
+    let exe,stat = executable pid in
+    let raw_argv = read (path pid "cmdline") |> String.split_on_char '\000' in
+    let argv = match List.rev raw_argv with
+      | "" :: rest -> List.rev rest | _ -> raw_argv in
+    Alcotest.(check bool) "owned argv has no empty argument" true
+      (argv <> [] && List.for_all ((<>) "") argv);
+    let pid_ns = namespace pid "pid" and mnt_ns = namespace pid "mnt" in
+    Alcotest.(check bool) "owned namespaces match unit" true
+      (pid_ns=owner_ns && mnt_ns=mount_ns);
+    let fds = stdio pid in
+    let descendants = List.concat_map (tree (depth+1)) before in
+    Alcotest.(check bool) "owned process birth and children remain exact" true
+      (status pid=(parent,birth) && children pid=before && executable pid=(exe,stat));
+    (pid,parent,birth,exe,argv,fds,before,`Assoc [
+      "pid",`Int pid; "parent",`Int parent; "birth",`String birth;
+      "executable",`String exe; "executableStat",stat;
+      "argv",`List (List.map (fun s -> `String s) argv);
+      "pidNamespace",pid_ns; "mountNamespace",mnt_ns;
+      "stdio",`Assoc (List.map (fun (fd,target) -> fd,`String target) fds)]) :: descendants in
+  let root_children = children owner in
+  let rows = List.concat_map (tree 1) root_children in
+  let solvers = List.filter (fun (_,_,_,exe,_,_,_,_) -> Filename.basename exe="z3") rows in
+  let solver = match solvers with [solver] -> solver
+    | _ -> Alcotest.fail "expected exactly one owned actual Z3 executable" in
+  let solver_pid,_,_,_,argv,fds,solver_children,_ = solver in
+  Alcotest.(check bool) "actual Z3 stdin protocol and no child process" true
+    (Filename.basename (List.hd argv)="z3"
+     && List.sort String.compare (List.tl argv)=["-in";"-smt2"]
+     && solver_children=[]);
+  let rec ancestry pid =
+    if pid=owner then [] else
+    match List.find_opt (fun (p,_,_,_,_,_,_,_) -> p=pid) rows with
+    | Some (_,parent,_,_,_,_,_,_) -> pid :: ancestry parent
+    | None -> Alcotest.fail "owned Z3 ancestry is not rooted in unit" in
+  Alcotest.(check bool) "only the owned Z3 chain is present" true
+    (List.sort Int.compare (ancestry solver_pid)=List.sort Int.compare !seen);
+  let directory = Unix.opendir (path owner "fd") in
+  let owner_fds = Fun.protect ~finally:(fun () -> Unix.closedir directory) (fun () ->
+    let rec collect count acc =
+      match Unix.readdir directory with
+      | "." | ".." -> collect count acc
+      | name ->
+          if count=128 then Alcotest.fail "owner fd snapshot exceeds128 entries";
+          collect (count+1) ((name,link (path owner ("fd/" ^ name)))::acc)
+      | exception End_of_file -> acc in
+    collect 0 []) in
+  let pipes = List.map (fun fd ->
+    let target = List.assoc fd fds in
+    Alcotest.(check bool) "Z3 command/response endpoint is a pipe" true
+      (String.starts_with ~prefix:"pipe:[" target);
+    match List.filter (fun (_,value) -> value=target) owner_fds with
+    | [owner_fd,_] -> `Assoc ["solverFD",`String fd;"ownerFD",`String owner_fd;
+        "pipe",`String target]
+    | _ -> Alcotest.fail "Z3 pipe ownership is missing or ambiguous") ["0";"1"] in
+  Alcotest.(check bool) "command and response pipes are distinct" true
+    (List.assoc "0" fds <> List.assoc "1" fds);
+  Alcotest.(check bool) "owner birth and initial tree remain exact" true
+    (status owner=owner_status && children owner=root_children);
+  let snapshot = `Assoc ["ownerPID",`Int owner;"ownerBirth",`String (snd owner_status);
+    "pidNamespace",owner_ns;"mountNamespace",mount_ns;
+    "solverPID",`Int solver_pid;"ownedChain",`List (List.map (fun (_,_,_,_,_,_,_,j) -> j) rows);
+    "ownedPipes",`List pipes] in
+  Printf.printf "ACTUAL_UNKNOWN_POLICY_PROCESS[%s]=%s\n%!" stage (Yojson.Safe.to_string snapshot);
+  snapshot
+
+let actual_unknown_policy_endpoint label before contexts caller result raw fs gamma =
+  let text key context = pending_context_field key context |> typed_lookup_alias_text in
+  let rows = nonblank_counter_rows () |> List.filter (fun row -> not (List.mem row before)) in
+  Alcotest.(check int) (label ^ " complete actual result/context coverage")
+    (List.length rows) (List.length contexts);
+  Alcotest.(check int) (label ^ " one direct API endpoint, no helper substituted") 1 (List.length contexts);
+  let context = List.hd contexts in
+  Alcotest.(check bool) (label ^ " native context schema") true
+    (pending_context_field "format" context=`String "gillian-native-smt-context-v1");
+  (match pending_context_field "declarations" context with
+   | `List declarations -> List.iter (fun declaration ->
+       ignore (typed_lookup_alias_text declaration)) declarations
+   | _ -> Alcotest.fail "native declaration commands absent");
+  let query = text "query" context in
+  let matching = List.filter (fun row -> smt_result_field "query" row=query) rows in
+  Alcotest.(check int) (label ^ " exclusive actual result joins own context") 1 (List.length matching);
+  let row = List.hd matching in
+  List.iter (fun (key,wanted) -> Alcotest.(check string) (label ^ " actual " ^ key)
+    wanted (smt_result_field key row))
+    ["caller",caller;"result",result;"raw_unknown",string_of_bool raw;
+     "timeout_ms","1";"phase_selection","3"];
+  List.iter (fun (key,wanted) -> Alcotest.(check bool) (label ^ " same-sidecar " ^ key)
+    true (pending_context_field key context=wanted))
+    ["caller",`String caller;"raw_unknown",`Bool raw;"timeout_ms",`String "1";
+     "phase_selection",`Int 3;"initial_options",`Assoc ["model",`String "true";
+       "model_validate",`String "true";"proof",`String "false";
+       "unsat_core",`String "false";"auto_config",`String "true";"timeout",`String "1"]];
+  Alcotest.(check string) (label ^ " complete typed original FS, no hints")
+    (zero_decline_compact (typed_alias_core_expected_fs fs))
+    (zero_decline_compact (text "original_fs" context));
+  typed_alias_core_check_gamma label (nonblank_counter_types gamma) context;
+  let provenance = pending_context_field "provenance" context in
+  Alcotest.(check bool) (label ^ " direct original API context") true
+    (pending_context_field "entry" provenance=`String "direct-smt"
+     && pending_context_scopes context=[]);
+  let primary = "(check-sat)" in
+  Alcotest.(check string) (label ^ " unchanged plain PRIMARY") primary
+    (text "primary_check_command" provenance);
+  let expected = "GIL query:\nFS: " ^ text "original_fs" context ^ "\nGAMMA: "
+    ^ text "original_gamma" context ^ "\nEncoded as SMT Query:\n"
+    ^ text "encoded_assertion_dump" context in
+  Alcotest.(check string) (label ^ " whole literal-preserving own dump join")
+    (zero_decline_compact expected) (zero_decline_compact
+      (actual_unknown_policy_read (16*1024*1024) (Filename.concat "gillian_smt_queries" query)));
+  let assertions = match pending_context_field "encoded_assertions" context with
+    | `List xs -> List.map typed_lookup_alias_text xs
+    | _ -> Alcotest.fail "encoded assertions absent" in
+  Alcotest.(check string) (label ^ " all encoded assertions retained in dump")
+    (zero_decline_compact (String.concat "" assertions))
+    (zero_decline_compact (text "encoded_assertion_dump" context));
+  let log = actual_unknown_policy_read (16*1024*1024) "file.log" in
+  let lines = String.split_on_char '\n' log |> List.mapi (fun i line -> i,line) in
+  let one label prefix = match List.filter (fun (_,line) -> String.starts_with ~prefix line) lines with
+    | [row] -> row | _ -> Alcotest.fail ("missing/duplicate " ^ label) in
+  let dispatch_text = "SMT_PRIMARY_CHECK_DISPATCH query=" ^ query ^ " command=" ^ primary in
+  let dispatch_line,dispatch = one "actual PRIMARY dispatch"
+    ("SMT_PRIMARY_CHECK_DISPATCH query=" ^ query ^ " ") in
+  Alcotest.(check string) "exact actual PRIMARY command" dispatch_text dispatch;
+  let result_line,_ = one "actual result" ("SMT_QUERY_RESULT query=" ^ query ^ " ") in
+  Alcotest.(check bool) "PRIMARY precedes its own native result" true (dispatch_line<result_line);
+  if result="unknown" then (
+    let reason_line,reason = one "available same-query reason"
+      ("SMT_PRIMARY_UNKNOWN_REASON query=" ^ query ^ " ") in
+    let prefix = "SMT_PRIMARY_UNKNOWN_REASON query=" ^ query ^ " status=available response=" in
+    Alcotest.(check bool) "same-query reason available before any later reset" true
+      (result_line<reason_line && String.starts_with ~prefix reason);
+    let encoded = String.sub reason (String.length prefix) (String.length reason-String.length prefix) in
+    (match Sexplib.Sexp.of_string encoded with
+     | Sexplib.Sexp.Atom response ->
+         (match Sexplib.Sexp.of_string response with
+          | Sexplib.Sexp.List [Sexplib.Sexp.Atom ":reason-unknown";Sexplib.Sexp.Atom reason] ->
+              Alcotest.(check bool) "actual reason is nonempty, never a chosen verdict" true
+                (String.trim reason<>"")
+          | _ -> Alcotest.fail "malformed actual reason response")
+     | _ -> Alcotest.fail "reason is not one escaped native response"));
+  Printf.printf "ACTUAL_UNKNOWN_POLICY_ENDPOINT[%s]=%s\n%!" label row;
+  query
+
+(* One complete retained production frame, never a hardness resize or hint.
+   F38 observed required30000ms UNKNOWN for this source shape. That supplies
+   no optional1ms verdict, reason or same-session completion guarantee. *)
+let production_frame_unknown_policy_fixture () =
+  let original = [
+  "(is_int #index)"; "(is_int (#index + 1.))";
+  "(0i i<= (l-len #values))"; "(0i i<= (as_int #index))";
+  "(0. < (#index + 1.))"; "(0. <= #index)";
+  "(#index <= 4294967295.)"; "(#lvar_1274 v== #current)";
+  "(#lvar_1275 v== #index)"; "(#lvar_1278 v== #values)";
+  "((l-len #values) i<= 4294967295i)";
+  "((num_to_utf16 ((#index + 1.) - 1.)) == (num_to_utf16 #index))";
+  "((as_int ((#index + 1.) - 1.)) == (as_int #index))";
+  "((1i i+ (as_int #index)) i<= (l-len #values))";
+  "((#index + 1.) <= 4294967295.)";
+  "(((#index + 1.) - 1.) == #index)";
+] in
+  let fs = parse_gil_set original in
+  let gamma = Hashtbl.create 6 in
+  List.iter (fun (name,typ) -> Hashtbl.add gamma name typ)
+    ["#index",Type.NumberType;"#a",Type.ObjectType;"#s",Type.ObjectType;
+     "#current",Type.Utf16Type;"#values",Type.ListType;"#m",Type.ObjectType];
+  let free = Expr.Set.fold (fun e names -> Utils.Containers.SS.union names (Expr.lvars e))
+    fs Utils.Containers.SS.empty in
+  Alcotest.(check int) "complete retained production source list" 16 (List.length original);
+  Alcotest.(check int) "complete retained production FS" 16 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "complete original typed Gamma including unused Obj rows" 6 (Hashtbl.length gamma);
+  Alcotest.(check bool) "exact actual free variables, including untyped aliases" true
+    (Utils.Containers.SS.equal free (Utils.Containers.SS.of_list
+      ["#index";"#current";"#values";"#lvar_1274";"#lvar_1275";"#lvar_1278"]));
+  Alcotest.(check bool) "original aliases remain untyped, not invented Gamma rows" true
+    (List.for_all (fun name -> not (Hashtbl.mem gamma name))
+      ["#lvar_1274";"#lvar_1275";"#lvar_1278"]);
+  Alcotest.(check bool) "no positive index witness or extra source fact" false
+    (Expr.Set.mem (bin ValueEqual (Expr.LVar "#index") (Expr.num 1.)) fs);
+  fs,gamma,Hashtbl.create 1
+
+let actual_unknown_policy () = with_nonblank_counter_trace (fun () ->
+  Alcotest.(check bool) "fresh1ms resource profile" true (Sys.getenv_opt "SMT_TIMEOUT"=Some "1");
+  Alcotest.(check bool) "total mode is enabled" true !Config.Verification.total;
+  let saved_under = !Config.under_approximation in
+  Config.under_approximation := false;
+  Fun.protect ~finally:(fun () -> Config.under_approximation := saved_under) (fun () ->
+    let fs,gamma,known_gamma = production_frame_unknown_policy_fixture () in
+    let original = Expr.Set.elements fs
+    and original_gamma = nonblank_counter_types gamma in
+    Alcotest.(check bool) "known-SAT starts with its separate empty Gamma" true
+      (Hashtbl.length known_gamma=0);
+    let module L = Logging in
+    L.verbose (fun m -> m "ACTUAL_UNKNOWN_POLICY_VERBOSE_SENTINEL");
+    let baseline = actual_unknown_policy_snapshot "before-optional" in
+    let same stage =
+      Alcotest.(check bool) (stage ^ " exact actual same owned solver/chain/pipes")
+        true (actual_unknown_policy_snapshot stage=baseline);
+      Alcotest.(check bool) (stage ^ " whole original production FS/Gamma retained") true
+        (List.equal Expr.equal original (Expr.Set.elements fs)
+         && original_gamma=nonblank_counter_types gamma && Hashtbl.length gamma=6
+         && Hashtbl.length known_gamma=0) in
+    let before = nonblank_counter_rows () in
+    let optional,contexts = pending_context_capture (fun () ->
+      try Smt.proves_unsat ~caller_kind:"control-actual-unknown-optional" fs gamma with
+      | (Gillian.Utils.Gillian_result.Exc.Gillian_internal_error
+          { msg; additional_data } as error) ->
+          let backtrace = Printexc.get_raw_backtrace () in
+          (* Diagnostic failure must not replace or accept the original failure. *)
+          (try
+             let diagnostic = Yojson.Safe.to_string (`Assoc [
+               ("msg", `String msg);
+               ("additional_data", (match additional_data with
+                 | Some data -> data | None -> `Null)) ]) in
+             let shown = if String.length diagnostic <= 1024 * 1024 then diagnostic
+               else Yojson.Safe.to_string (`Assoc [
+                 ("omitted", `Bool true);
+                 ("bytes", `Int (String.length diagnostic)) ]) in
+             Printf.printf "ACTUAL_UNKNOWN_POLICY_INTERNAL_DIAGNOSTIC=%s\n%!" shown
+           with _ -> ());
+          Printexc.raise_with_backtrace error backtrace) in
+    same "after-optional";
+    let optional_query = actual_unknown_policy_endpoint "optional" before contexts
+      "control-actual-unknown-optional" "unknown" true fs gamma in
+    Alcotest.(check bool) "actual optional UNKNOWN returns false, never UNSAT" false optional;
+    let names directory = Array.to_list (Sys.readdir directory) |> List.sort String.compare in
+    let cached_log = actual_unknown_policy_read (16*1024*1024) "file.log"
+    and cached_dumps = names "gillian_smt_queries"
+    and cached_contexts = names (pending_context_directory ()) in
+    Alcotest.(check bool) "same full-key inconclusive cache remains false" false
+      (Smt.proves_unsat ~caller_kind:"control-actual-unknown-optional" fs gamma);
+    same "after-cache";
+    Alcotest.(check bool) "cache emits no result/dispatch/reason/dump/context" true
+      (cached_log=actual_unknown_policy_read (16*1024*1024) "file.log"
+       && cached_dumps=names "gillian_smt_queries"
+       && cached_contexts=names (pending_context_directory ()));
+    let before = nonblank_counter_rows () in
+    let rejected,contexts = pending_context_capture (fun () ->
+      try ignore (Smt.exec_sat ~caller_kind:"control-actual-unknown-required" fs gamma);false with
+      | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError message)
+          when message="Incomplete totality proof: SMT returned unknown" -> true) in
+    same "after-required";
+    let required_query = actual_unknown_policy_endpoint "required" before contexts
+      "control-actual-unknown-required" "unknown" false fs gamma in
+    Alcotest.(check bool) "required UNKNOWN throws only the exact totality error" true rejected;
+    Alcotest.(check bool) "required is a distinct full query, bypassing precheck cache" true
+      (required_query<>optional_query);
+    let before = nonblank_counter_rows () in
+    let known = Expr.Set.singleton (Expr.Lit (Literal.Bool true)) in
+    let model,contexts = pending_context_capture (fun () ->
+      Smt.exec_sat ~caller_kind:"control-actual-unknown-known-sat" known known_gamma) in
+    same "after-known-sat";
+    let sat_query = actual_unknown_policy_endpoint "known-sat" before contexts
+      "control-actual-unknown-known-sat" "sat" false known known_gamma in
+    Alcotest.(check bool) "known-SAT has its own normal reset/query" true
+      (sat_query<>optional_query && sat_query<>required_query);
+    (match model with Some model -> Printf.printf "ACTUAL_UNKNOWN_POLICY_NATIVE_MODEL=%s\n%!"
+       (Fmt.str "%a" Smt.pp_model model)
+     | None -> Alcotest.fail "same-process known-SAT model absent");
+    let log = actual_unknown_policy_read (16*1024*1024) "file.log" in
+    let lines = String.split_on_char '\n' log in
+    Alcotest.(check int) "actual UNKNOWN remains visible at Normal level" 2
+      (List.length (List.filter ((=) "The solver returned: unknown") lines));
+    Alcotest.(check bool) "verbose-only sentinel remains hidden" false
+      (List.mem "ACTUAL_UNKNOWN_POLICY_VERBOSE_SENTINEL" lines);
+    List.iter (fun forbidden ->
+      let found = try ignore (Str.search_forward (Str.regexp_string forbidden) log 0);true
+        with Not_found -> false in
+      Alcotest.(check bool) ("no recovery/error: " ^ forbidden) false found)
+      ["SMT heartbeat gave unexpected result";"Error when calling SMT solver";
+       "SMT failure";"Internal error!";"Fatal error: exception"];
+    let reason_queries = List.filter (String.starts_with ~prefix:"SMT_PRIMARY_UNKNOWN_REASON ") lines
+      |> List.map (smt_result_field "query") |> List.sort String.compare in
+    Alcotest.(check (list string)) "all actual reasons belong only to the two UNKNOWNs"
+      (List.sort String.compare [optional_query;required_query]) reason_queries;
+    let dispatches = List.filter (String.starts_with ~prefix:"SMT_PRIMARY_CHECK_DISPATCH ") lines in
+    Alcotest.(check int) "all actual PRIMARY dispatches have returned and are covered"
+      (List.length (nonblank_counter_rows ())) (List.length dispatches);
+    Alcotest.(check bool) "whole original FS/Gamma retained after every stage" true
+      (List.equal Expr.equal original (Expr.Set.elements fs)
+       && original_gamma=nonblank_counter_types gamma && Hashtbl.length gamma=6
+       && Hashtbl.length known_gamma=0);
+    let expected_queries = List.sort String.compare [optional_query;required_query;sat_query] in
+    Alcotest.(check (list string)) "exact three returned native endpoint identities"
+      expected_queries (List.map (smt_result_field "query") (nonblank_counter_rows ()) |> List.sort String.compare);
+    Alcotest.(check (list string)) "complete PRIMARY dump inventory closes"
+      expected_queries (names "gillian_smt_queries");
+    Alcotest.(check (list string)) "complete native context inventory closes"
+      (List.map (fun query -> query ^ ".context.json") expected_queries)
+      (names (pending_context_directory ()));
+    Printf.printf "ACTUAL_UNKNOWN_POLICY_OBSERVED_PRIMARY=%d\n%!"
+      (List.length (nonblank_counter_rows ()))))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR",Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,Some "1" ->
+       [Alcotest.test_case "actual UNKNOWN production frame16 Gamma6 optional cache required reason same-process SAT" `Quick
+          (with_total actual_unknown_policy)]
+   | _ -> [])
+
+(* V40 source-only controls: the exact retained q161 current frame and the
+   original public scope are declared here, without a runtime old-raw read.
+   Native results/models remain mandatory; no outcome is supplied by fixtures. *)
+let positive_trace_current_strings = [
+  "(is_int #index)"; "(is_int (#index + 1.))";
+  "(0i i<= (l-len #values))"; "(0i i<= (as_int #index))";
+  "(0. < (#index + 1.))"; "(0. <= #index)";
+  "(#index <= 4294967295.)"; "(#lvar_1274 v== #current)";
+  "(#lvar_1275 v== #index)"; "(#lvar_1278 v== #values)";
+  "((l-len #values) i<= 4294967295i)";
+  "((num_to_utf16 ((#index + 1.) - 1.)) == (num_to_utf16 #index))";
+  "((as_int ((#index + 1.) - 1.)) == (as_int #index))";
+  "((1i i+ (as_int #index)) i<= (l-len #values))";
+  "((#index + 1.) <= 4294967295.)";
+  "(((#index + 1.) - 1.) == #index)";
+]
+
+let positive_trace_public_strings = [
+  "(0i i<= (as_int #index))";
+  "((typeOf #index) == Num)"; "((typeOf #values) == List)";
+  "((typeOf #s) == Obj)"; "((typeOf #m) == Obj)";
+  "((typeOf #current) == Utf16)"; "((typeOf #a) == Obj)";
+  "(#lvar_1278 v== #values)"; "(#lvar_1277 v== #s)";
+  "(#lvar_1276 v== #m)"; "(#lvar_1275 v== #index)";
+  "(#lvar_1274 v== #current)"; "(#lvar_1273 v== #a)";
+  "(is_int (#index + 1.))"; "(0. <= (#index + 1.))";
+  "((#index + 1.) <= 4294967295.)";
+  "(is_int #index)"; "(0. <= #index)"; "(#index <= 4294967295.)";
+  "(((#index + 1.) - 1.) == #index)";
+  "((num_to_utf16 ((#index + 1.) - 1.)) == (num_to_utf16 #index))";
+  "(0. < (#index + 1.))";
+  "((l-len #values) i<= 4294967295i)";
+  "((as_int ((#index + 1.) - 1.)) == (as_int #index))";
+  "((1i i+ (as_int #index)) i<= (l-len #values))";
+]
+
+let positive_trace_fixture label =
+  let name x = if label = "saved" then x else
+    if label = "collision" then "#positive_trace_index_witness_" ^ String.sub x 1 (String.length x-1)
+    else x ^ "_positive_trace_" ^ label in
+  let rename = object inherit [_] Visitors.endo
+    method! visit_LVar () _ x = Expr.LVar (name x)
+  end in
+  let one text = let parsed = parse_gil_set [text] in
+    Alcotest.(check int) "one exact source AST" 1 (Expr.Set.cardinal parsed);
+    rename#visit_expr () (Expr.Set.choose parsed) in
+  let fs = Expr.Set.of_list (List.map one positive_trace_current_strings) in
+  let gamma = Hashtbl.create 6 in
+  List.iter (fun (x,t) -> Hashtbl.add gamma (name x) t)
+    ["#index",Type.NumberType;"#a",Type.ObjectType;"#s",Type.ObjectType;
+     "#current",Type.Utf16Type;"#values",Type.ListType;"#m",Type.ObjectType];
+  Alcotest.(check int) "whole current16" 16 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "whole current Gamma6" 6 (Hashtbl.length gamma);
+  fs,gamma,Expr.LVar (name "#index"),name,one
+
+let positive_trace_selected label contexts caller fs gamma =
+  let selected = List.filter (fun c -> pending_context_field "caller" c = `String caller) contexts in
+  Alcotest.(check int) (label ^ " one selected actual endpoint") 1 (List.length selected);
+  let context = List.hd selected in
+  Alcotest.(check string) (label ^ " complete selected FS, no omitted atoms")
+    (zero_decline_compact (typed_alias_core_expected_fs fs))
+    (zero_decline_compact (pending_context_field "original_fs" context |> typed_lookup_alias_text));
+  typed_alias_core_check_gamma label (nonblank_counter_types gamma) context;
+  let optional = caller = "optional-positive-trace-index" in
+  List.iter (fun (key,want) -> Alcotest.(check bool) (label ^ " policy " ^ key) true
+    (pending_context_field key context = want))
+    ["raw_unknown",`Bool optional;"timeout_ms",`String (if optional then Smt.optional_timeout 1000 else "30000");
+     "phase_selection",`Int 3];
+  context
+
+let positive_trace_complete label before contexts result =
+  positive_finite_identity_observe label before contexts result;
+  List.iter (fun context ->
+    let text key = pending_context_field key context |> typed_lookup_alias_text in
+    let expected = "GIL query:\nFS: " ^ text "original_fs" ^ "\nGAMMA: "
+      ^ text "original_gamma" ^ "\nEncoded as SMT Query:\n" ^ text "encoded_assertion_dump" in
+    Alcotest.(check string) (label ^ " literal-aware complete dump/context join")
+      (zero_decline_compact expected)
+      (zero_decline_compact (nonblank_counter_read (Filename.concat "gillian_smt_queries" (text "query"))));
+    let options = pending_context_field "initial_options" context in
+    Alcotest.(check bool) (label ^ " actual model validation unchanged") true
+      (pending_context_field "model_validate" options = `String "true");
+    let provenance = pending_context_field "provenance" context in
+    Alcotest.(check bool) (label ^ " unchanged plain PRIMARY") true
+      (pending_context_field "primary_check_command" provenance =
+        `String (Smt.primary_check_command_text Smt.primary_check_command))) contexts
+
+(* Test-only bounded decoding of ACTUAL finite native constants. No default
+   list, guessed scalar, or source-assigned model is permitted. Unsupported
+   model grammar rejects this replay. Production lifting is unchanged. *)
+let positive_trace_replay label model gamma fs index expected_index =
+  Printf.printf "POSITIVE_TRACE_NATIVE_MODEL[%s]=%s\n%!" label (Fmt.str "%a" Smt.pp_model model);
+  let definitions = match Sexplib.Sexp.of_string (Fmt.str "%a" Smt.pp_model model) with
+    | Sexplib.Sexp.List xs -> xs | _ -> Alcotest.fail "malformed actual native model" in
+  let definition id = match List.filter_map (function
+    | Sexplib.Sexp.List [Atom "define-fun";Atom name;List [];sort;value]
+      when id=name -> Some (sort,value) | _ -> None) definitions with
+    | [row] -> row | _ -> Alcotest.fail (label ^ " missing/ambiguous actual constant " ^ id) in
+  let nodes = ref 0 in
+  let step depth = incr nodes;
+    if depth>32 || !nodes>4096 then Alcotest.fail "actual model replay bound" in
+  let integer = function
+    | Sexplib.Sexp.Atom n -> Z.of_string n
+    | Sexplib.Sexp.List [Atom "-";Atom n] -> Z.neg (Z.of_string n)
+    | _ -> Alcotest.fail "unsupported actual integer" in
+  let number value =
+    let bits = function
+      | Sexplib.Sexp.Atom s when String.starts_with ~prefix:"#b" s ->
+          Z.of_string ("0b" ^ String.sub s 2 (String.length s-2))
+      | Sexplib.Sexp.Atom s when String.starts_with ~prefix:"#x" s ->
+          Z.of_string ("0x" ^ String.sub s 2 (String.length s-2))
+      | _ -> Alcotest.fail "unsupported actual FP bits" in
+    match value with
+    | Sexplib.Sexp.List [Atom "fp";sign;exponent;fraction] ->
+        let raw = Z.logor (Z.shift_left (bits sign) 63)
+          (Z.logor (Z.shift_left (bits exponent) 52) (bits fraction)) in
+        let raw = if Z.testbit raw 63 then Z.sub raw (Z.shift_left Z.one 64) else raw in
+        Int64.float_of_bits (Z.to_int64 raw)
+    | Sexplib.Sexp.List [Atom "_";Atom "+zero";Atom "11";Atom "53"] -> 0.
+    | Sexplib.Sexp.List [Atom "_";Atom "-zero";Atom "11";Atom "53"] -> -.0.
+    | _ -> Alcotest.fail "unsupported actual Number model" in
+  let utf16 value = match Smt.Utf16.recover value with
+    | Some text -> Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical text))
+    | None -> Alcotest.fail "unsupported actual UTF16 model" in
+  let rec literal depth value =
+    step depth;
+    match value with
+    | Sexplib.Sexp.Atom "Undefined" -> Expr.Lit Literal.Undefined
+    | Sexplib.Sexp.Atom "Null" -> Expr.Lit Literal.Null
+    | Sexplib.Sexp.Atom "Empty" -> Expr.Lit Literal.Empty
+    | Sexplib.Sexp.List [Atom "Bool";Atom "true"] -> Expr.Lit (Literal.Bool true)
+    | Sexplib.Sexp.List [Atom "Bool";Atom "false"] -> Expr.Lit (Literal.Bool false)
+    | Sexplib.Sexp.List [Atom "Num";value] -> Expr.num (number value)
+    | Sexplib.Sexp.List [Atom "Int";value] -> Expr.Lit (Literal.Int (integer value))
+    | Sexplib.Sexp.List [Atom "Utf16String";value] -> utf16 value
+    | Sexplib.Sexp.List [Atom "List";value] -> Expr.EList (sequence (depth+1) value)
+    | Sexplib.Sexp.List [Atom "Elem";value] -> literal (depth+1) value
+    | Sexplib.Sexp.Atom id -> literal (depth+1) (snd (definition id))
+    | _ -> Alcotest.fail "unsupported actual GIL literal model"
+  and sequence depth value =
+    step depth;
+    match value with
+    | Sexplib.Sexp.List [Atom "as";Atom "seq.empty";List [Atom "Seq";Atom "GIL_Literal"]] -> []
+    | Sexplib.Sexp.List [Atom "seq.unit";value] -> [literal (depth+1) value]
+    | Sexplib.Sexp.List (Atom "seq.++" :: (_::_::_ as parts)) ->
+        List.concat (List.map (sequence (depth+1)) parts)
+    | Sexplib.Sexp.Atom id -> sequence (depth+1) (snd (definition id))
+    | _ -> Alcotest.fail "unsupported actual List model" in
+  let vars = Expr.Set.fold (fun e names -> Utils.Containers.SS.union (Expr.lvars e) names)
+    fs Utils.Containers.SS.empty in
+  let values = Hashtbl.create 8 in
+  Utils.Containers.SS.iter (fun name ->
+    let id = String.concat "$$" (String.split_on_char '#' name) in
+    let sort,value = definition id in
+    let actual = match Hashtbl.find_opt gamma name with
+      | Some Type.NumberType ->
+          Alcotest.(check bool) "actual Number sort" true
+            (sort=Sexplib.Sexp.of_string "(_ FloatingPoint 11 53)"); Expr.num (number value)
+      | Some Type.Utf16Type ->
+          Alcotest.(check bool) "actual UTF16 sort" true
+            (sort=Sexplib.Sexp.of_string "(Seq (_ BitVec 16))"); utf16 value
+      | Some Type.ListType ->
+          Alcotest.(check bool) "actual List sort" true
+            (sort=Sexplib.Sexp.of_string "(Seq GIL_Literal)"); Expr.EList (sequence 0 value)
+      | None ->
+          Alcotest.(check bool) "actual untyped alias sort" true
+            (sort=Sexplib.Sexp.Atom "Extended_GIL_Literal"); literal 0 value
+      | _ -> Alcotest.fail "unsupported actual replay type" in
+    Hashtbl.add values name actual) vars;
+  let concrete atom = Expr.map_opt (function
+    | Expr.LVar name -> Some (Hashtbl.find values name),false
+    | e -> Some e,true) None atom |> Option.get in
+  Expr.Set.iter (fun atom -> Alcotest.(check bool)
+    (label ^ " every actual full-frame atom " ^ Fmt.str "%a" Expr.pp atom)
+    true (slice_bound_truth (concrete atom))) fs;
+  (match index with
+   | Expr.LVar name -> (match Hashtbl.find values name with
+       | Expr.Lit (Num actual) -> Alcotest.(check int64) (label ^ " actual index bits")
+           (Int64.bits_of_float expected_index) (Int64.bits_of_float actual)
+       | _ -> Alcotest.fail "actual Number role missing")
+   | _ -> assert false)
+
+let positive_trace_run label fs gamma index expected_optional expected_final expected_index =
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let hinted = match Smt.positive_trace_index_witness_query fs gamma with
+    | Some hinted -> hinted | None -> Alcotest.fail (label ^ " source guard unexpectedly declined") in
+  Alcotest.(check bool) (label ^ " whole query plus only actual index=+1") true
+    (Expr.Set.equal hinted (Expr.Set.add (bin ValueEqual index (Expr.num 1.)) fs)
+     && Expr.Set.cardinal hinted=Expr.Set.cardinal fs+1);
+  let before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+  positive_trace_complete label before contexts expected_final;
+  ignore (positive_trace_selected label contexts "optional-positive-trace-index" hinted gamma);
+  ignore (nonblank_counter_observe label before "optional-positive-trace-index" expected_optional hinted gamma);
+  let scope = pending_context_scope "positive-trace-index-complete-witness" contexts in
+  let expressions fs = `List (List.map (fun e -> `String (Fmt.str "%a" Expr.pp e)) (Expr.Set.elements fs)) in
+  Alcotest.(check bool) (label ^ " full native source provenance") true
+    (pending_context_field "original_fs" scope=expressions fs
+     && pending_context_field "hinted_fs" scope=expressions hinted
+     && pending_context_field "added_candidate" scope=expressions (Expr.Set.diff hinted fs)
+     && pending_context_field "original_gamma" scope=`String (Fmt.str "%a" Smt.pp_typenv gamma));
+  if expected_optional="unsat" then (
+    ignore (positive_trace_selected label contexts "required-complete" fs gamma);
+    ignore (nonblank_counter_observe label before "required-complete" expected_final fs gamma))
+  else Alcotest.(check bool) (label ^ " SAT witness avoids required fallback") true
+    (not (List.exists (fun c -> pending_context_field "caller" c=`String "required-complete") contexts));
+  (match model with
+   | Some model -> positive_trace_replay label model gamma
+       (if expected_optional="sat" then hinted else fs) index expected_index
+   | None -> Alcotest.fail (label ^ " actual complete SAT model absent"));
+  Alcotest.(check bool) (label ^ " original complete FS/Gamma unchanged") true
+    (List.equal Expr.equal original (Expr.Set.elements fs) && types=nonblank_counter_types gamma)
+
+let positive_trace_original () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,index,_,_ = positive_trace_fixture "saved" in
+  positive_trace_run "saved" fs gamma index "sat" "sat" 1.)
+
+let positive_trace_renamed () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun label -> let fs,gamma,index,_,_ = positive_trace_fixture label in
+    positive_trace_run label fs gamma index "sat" "sat" 1.) ["alpha";"collision"])
+
+let positive_trace_hint_conflict () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,index,_,_ = positive_trace_fixture "hint_conflict" in
+  positive_trace_run "hint_conflict" (Expr.Set.add (bin ValueEqual index (Expr.num 2.)) fs)
+    gamma index "unsat" "sat" 2.)
+
+let positive_trace_contradiction () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,index,_,_ = positive_trace_fixture "contradiction" in
+  let fs = Expr.Set.add (not_ (bin Equal index index)) fs in
+  let hinted = match Smt.positive_trace_index_witness_query fs gamma with
+    | Some fs -> fs | None -> Alcotest.fail "contradictory full source guard missing" in
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () and caller="control-positive-trace-full-contradiction" in
+  let rejected,contexts = pending_context_capture (fun () ->
+    Alcotest.(check bool) "actual optional full contradiction cannot yield witness" true
+      (Option.is_none (Smt.positive_trace_index_model fs gamma));
+    Option.is_none (Smt.exec_sat ~caller_kind:caller fs gamma)) in
+  Alcotest.(check bool) "distinct actual full required contradiction UNSAT" true rejected;
+  positive_trace_complete "contradiction" before contexts "unsat";
+  ignore (positive_trace_selected "contradiction" contexts "optional-positive-trace-index" hinted gamma);
+  ignore (positive_trace_selected "contradiction" contexts caller fs gamma);
+  ignore (nonblank_counter_observe "contradiction" before "optional-positive-trace-index" "unsat" hinted gamma);
+  ignore (nonblank_counter_observe "contradiction" before caller "unsat" fs gamma);
+  Alcotest.(check bool) "contradictory original frame unchanged" true
+    (List.equal Expr.equal original (Expr.Set.elements fs) && types=nonblank_counter_types gamma))
+
+let positive_trace_guard_controls () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,index,name,_ = positive_trace_fixture "guards" in
+  Expr.Set.iter (fun atom ->
+    Alcotest.(check bool) ("missing actual support declines: " ^ Fmt.str "%a" Expr.pp atom) true
+      (Option.is_none (Smt.positive_trace_index_witness_query (Expr.Set.remove atom fs) gamma))) fs;
+  List.iter (fun (role,typ) -> let changed=Hashtbl.copy gamma in Hashtbl.replace changed (name role) typ;
+    Alcotest.(check bool) "wrong original type declines before encoding" true
+      (Option.is_none (Smt.positive_trace_index_witness_query fs changed)))
+    ["#index",Type.IntType;"#values",Type.NumberType;"#current",Type.ListType;
+     "#lvar_1275",Type.NumberType];
+  let saved_total = !Config.Verification.total and saved_under = !Config.under_approximation in
+  Fun.protect ~finally:(fun () -> Config.Verification.total := saved_total;
+    Config.under_approximation := saved_under) (fun () ->
+      Config.Verification.total := false;
+      Alcotest.(check bool) "non-total guard declines" true
+        (Option.is_none (Smt.positive_trace_index_witness_query fs gamma));
+      Config.Verification.total := true; Config.under_approximation := true;
+      Alcotest.(check bool) "under-approximate guard declines" true
+        (Option.is_none (Smt.positive_trace_index_witness_query fs gamma)));
+  (* These are guard-only source controls: malformed encodings are never
+     invoked or classified as successful native rejection. *)
+  let missing = Expr.Set.remove (Expr.UnOp (IsInt,index)) fs in
+  let other = Expr.LVar (name "#unrelated") in
+  let changed = Hashtbl.copy gamma in Hashtbl.add changed (name "#unrelated") Type.NumberType;
+  let unrelated = Expr.Set.add (Expr.UnOp (IsInt,other)) missing in
+  Alcotest.(check bool) "unrelated original IsInt cannot license index" true
+    (Option.is_none (Smt.positive_trace_index_witness_query unrelated changed));
+  List.iter (fun (label,full,types) ->
+    let full = Expr.Set.add (bin ValueEqual index (Expr.num 2.)) full in
+    let before=nonblank_counter_rows () in
+    let model,contexts=pending_context_capture (fun () -> Smt.check_sat full types) in
+    Alcotest.(check bool) (label ^ " no new-arm endpoint") true
+      (not (List.exists (fun c -> pending_context_field "caller" c=`String "optional-positive-trace-index") contexts));
+    positive_trace_complete label before contexts "sat";
+    ignore (positive_trace_selected label contexts "required-complete" full types);
+    match model with Some model -> positive_trace_replay label model types full index 2.
+      | None -> Alcotest.fail "well-typed guard decline full model missing")
+    ["missing-support",missing,gamma;"unrelated-support",unrelated,changed])
+
+let positive_trace_cache_frame () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,index,_,_=positive_trace_fixture "cache" in
+  positive_trace_run "cache-warm" fs gamma index "sat" "sat" 1.;
+  let log=nonblank_counter_read "file.log"
+  and dumps=List.sort String.compare (nonblank_counter_files ())
+  and contexts=Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare in
+  let cached=Smt.check_sat fs gamma in
+  Alcotest.(check bool) "same complete-key cache no native/log/dump/context change" true
+    (log=nonblank_counter_read "file.log" && dumps=List.sort String.compare (nonblank_counter_files ())
+     && contexts=(Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare));
+  (match cached with Some model -> positive_trace_replay "cache-actual-model" model gamma fs index 1.
+    | None -> Alcotest.fail "cached complete witness missing");
+  let changed=Hashtbl.copy gamma in Hashtbl.add changed "#unused_positive_trace_cache_v40" Type.BooleanType;
+  positive_trace_run "unused-Gamma-cache-miss" fs changed index "sat" "sat" 1.;
+  positive_trace_run "changed-full-FS-cache-miss" (Expr.Set.add (bin ValueEqual index (Expr.num 2.)) fs)
+    gamma index "unsat" "sat" 2.;
+  (* The original key caches its complete witness; the strengthened candidate
+     key was never populated by the optional helper. *)
+  let hinted=Expr.Set.add (bin ValueEqual index (Expr.num 1.)) fs in
+  Alcotest.(check bool) "already-present candidate declines new arm" true
+    (Option.is_none (Smt.positive_trace_index_witness_query hinted gamma));
+  let before=nonblank_counter_rows () in
+  let model,contexts=pending_context_capture (fun () -> Smt.check_sat hinted gamma) in
+  Alcotest.(check bool) "hinted key is distinct and has fresh native endpoints" true (contexts<>[]);
+  positive_trace_complete "distinct-hinted-key" before contexts "sat";
+  (match model with Some model -> positive_trace_replay "distinct-hinted-key" model gamma hinted index 1.
+    | None -> Alcotest.fail "complete hinted-key model missing"))
+
+let positive_trace_signed_zero () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,zero) -> let fs,gamma,index,_,_=positive_trace_fixture label in
+    positive_trace_run label (Expr.Set.add (bin ValueEqual index (Expr.num zero)) fs)
+      gamma index "unsat" "sat" zero) ["positive_zero",0.;"negative_zero",-.0.])
+
+let positive_trace_public () = with_nonblank_counter_trace (fun () ->
+  let fs,current_gamma,index,name,one=positive_trace_fixture "public" in
+  let facts=List.map one positive_trace_public_strings in
+  let gamma=Gamma.init () in Gamma.update gamma (name "#index") Type.NumberType;
+  Gamma.update gamma (name "#values") Type.ListType;
+  let original=facts and types=nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  Alcotest.(check int) "all original public25 atoms" 25 (List.length facts);
+  let before=nonblank_counter_rows () in
+  let result,contexts=pending_context_capture (fun () -> Solver.check_satisfiability ~matching:false facts gamma) in
+  Alcotest.(check bool) "complete original public PRE feasible" true result;
+  let scope=pending_context_scope "satisfiability" contexts in
+  Alcotest.(check bool) "exact original public FS/Gamma/mode" true
+    (pending_context_field "original_fs" scope=`List (List.map (fun e -> `String (Fmt.str "%a" Expr.pp e)) facts)
+     && pending_context_field "original_gamma" scope=`String (Fmt.str "%a" Gamma.pp gamma)
+     && pending_context_field "matching" scope=`Bool false);
+  positive_trace_complete "public" before contexts "sat";
+  let hinted=Expr.Set.add (bin ValueEqual index (Expr.num 1.)) fs in
+  ignore (positive_trace_selected "public" contexts "optional-positive-trace-index" hinted current_gamma);
+  let log=nonblank_counter_read "file.log"
+  and dumps=List.sort String.compare (nonblank_counter_files ())
+  and names=Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare in
+  let model=Smt.check_sat fs current_gamma in
+  Alcotest.(check bool) "complete current-key model reused without new endpoint" true
+    (log=nonblank_counter_read "file.log" && dumps=List.sort String.compare (nonblank_counter_files ())
+     && names=(Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare));
+  (match model with Some model -> positive_trace_replay "public-current-full-model" model current_gamma hinted index 1.
+   | None -> Alcotest.fail "public complete native model missing");
+  Alcotest.(check bool) "original public FS/Gamma unchanged" true
+    (List.equal Expr.equal original facts && types=nonblank_counter_types (Gamma.as_hashtbl gamma)))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR",Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None ->
+       [Alcotest.test_case "positive trace index exact original current frame full native SAT model" `Quick
+          (with_total positive_trace_original);
+        Alcotest.test_case "positive trace index alpha and colliding names full native models" `Quick
+          (with_total positive_trace_renamed);
+        Alcotest.test_case "positive trace index conflicting hint native UNSAT full fallback SAT" `Quick
+          (with_total positive_trace_hint_conflict);
+        Alcotest.test_case "positive trace index whole contradiction native rejection" `Quick
+          (with_total positive_trace_contradiction);
+        Alcotest.test_case "positive trace index guard types missing unrelated support" `Quick
+          (with_total positive_trace_guard_controls);
+        Alcotest.test_case "positive trace index original FS Gamma cache frame" `Quick
+          (with_total positive_trace_cache_frame);
+        Alcotest.test_case "positive trace index both signed zeros full fallback models" `Quick
+          (with_total positive_trace_signed_zero);
+        Alcotest.test_case "positive trace index exact public25 current16 native model correspondence" `Quick
+          (with_total positive_trace_public)]
+   | _ -> [])
+
+
+(* Exact A53 current frames: common11 plus three untyped aliases (14),
+   or the retained cast/next-length/two-Nth support (15), with the actual
+   negated goal retained for the third frame (16). No outer-only fact is used. *)
+let positive_trace_current_frame_fixture family label =
+  let _, gamma, index, name, one = positive_trace_fixture label in
+  let aliases = ["(#lvar_1274 v== #current)"; "(#lvar_1275 v== #index)";
+                 "(#lvar_1278 v== #values)"] in
+  let lower = "(0i i<= (as_int #index))"
+  and next = "((1i i+ (as_int #index)) i<= (l-len #values))" in
+  let common = List.filter (fun text -> text <> lower && text <> next
+      && not (List.mem text aliases)) positive_trace_current_strings in
+  Alcotest.(check int) "exact retained common11" 11 (List.length common);
+  let strings, size, types = match family with
+    | 0 -> common @ aliases, 14, 6
+    | 1 ->
+        List.iter (fun x -> Hashtbl.add gamma (name x) Type.ObjectType)
+          ["#handoffEr"; "#handoffMd"];
+        common @ [lower; next; "(#current == l-nth(#values, (as_int #index)))";
+          "(#current == l-nth(#values, (as_int ((#index + 1.) - 1.))))"], 15, 8
+    | 2 ->
+        List.iter (fun x -> Hashtbl.remove gamma (name x)) ["#a"; "#m"; "#s"];
+        common @ [lower; next; "(#current == l-nth(#values, (as_int #index)))";
+          "(#current == l-nth(#values, (as_int ((#index + 1.) - 1.))))";
+          "(! ((#index + 1.) == 0.))"], 16, 3
+    | _ -> Alcotest.fail "unknown exact current-frame fixture" in
+  let fs = Expr.Set.of_list (List.map one strings) in
+  Alcotest.(check int) "exact whole current frame" size (Expr.Set.cardinal fs);
+  Alcotest.(check int) "exact whole current Gamma" types (Hashtbl.length gamma);
+  fs, gamma, index, name, one
+
+let positive_trace_current_frame_guards_cache () = with_nonblank_counter_trace (fun () ->
+  let selected fs gamma index =
+    match Smt.positive_trace_index_witness_query fs gamma with
+    | Some hinted -> Alcotest.(check bool) "whole FS plus only positive-one candidate" true
+        (Expr.Set.equal hinted (Expr.Set.add (bin ValueEqual index (Expr.num 1.)) fs))
+    | None -> Alcotest.fail "exact current-frame guard unexpectedly declined" in
+  (* These are source-only guard calls. Malformed Gamma fixtures are never
+     encoded, executed, or counted as native rejection controls. *)
+  List.iter (fun family ->
+    let fs, gamma, index, name, one = positive_trace_current_frame_fixture family
+        ("current_guard_" ^ string_of_int family) in
+    selected fs gamma index;
+    Expr.Set.iter (fun atom ->
+      if family <> 2 || not (Expr.equal atom (one "(! ((#index + 1.) == 0.))")) then
+        Alcotest.(check bool) "missing required original support declines" true
+          (Option.is_none (Smt.positive_trace_index_witness_query (Expr.Set.remove atom fs) gamma))) fs;
+    List.iter (fun (role, typ) ->
+      let changed = Hashtbl.copy gamma in Hashtbl.replace changed (name role) typ;
+      Alcotest.(check bool) "wrong original type declines before encoding" true
+        (Option.is_none (Smt.positive_trace_index_witness_query fs changed)))
+      ["#index", Type.IntType; "#values", Type.NumberType; "#current", Type.ListType];
+    let changed = Hashtbl.copy gamma in
+    Hashtbl.add changed (name "#ambiguous_index") Type.NumberType;
+    Alcotest.(check bool) "ambiguous typed role declines" true
+      (Option.is_none (Smt.positive_trace_index_witness_query fs changed));
+    let missing = Hashtbl.copy gamma in Hashtbl.remove missing (name "#values");
+    Alcotest.(check bool) "missing genuine list type declines" true
+      (Option.is_none (Smt.positive_trace_index_witness_query fs missing));
+    let duplicate = Hashtbl.copy gamma in Hashtbl.add duplicate (name "#index") Type.NumberType;
+    Alcotest.(check bool) "duplicate Gamma role declines" true
+      (Option.is_none (Smt.positive_trace_index_witness_query fs duplicate));
+    let extra_alias = Expr.Set.add (one "(#ambiguous_alias v== #index)") fs in
+    Alcotest.(check bool) "unsupported or ambiguous role alias declines" true
+      (Option.is_none (Smt.positive_trace_index_witness_query extra_alias gamma));
+    if family = 0 then (
+      let strict = one "(0. < (#index + 1.))" in
+      let outer_only = Expr.Set.add (one "(0. <= (#index + 1.))") (Expr.Set.remove strict fs) in
+      Alcotest.(check bool) "outer-only nonnegative successor cannot replace current strict support" true
+        (Option.is_none (Smt.positive_trace_index_witness_query outer_only gamma));
+      let typed_alias = Hashtbl.copy gamma in
+      Hashtbl.add typed_alias (name "#lvar_1275") Type.NumberType;
+      Alcotest.(check bool) "typed alias is not an inferred untyped role" true
+        (Option.is_none (Smt.positive_trace_index_witness_query fs typed_alias)));
+    List.iter (fun label ->
+      let renamed, types, value, _, _ = positive_trace_current_frame_fixture family label in
+      selected renamed types value) ["current_alpha"; "collision"];
+    let already = Expr.Set.add (bin ValueEqual index (Expr.num 1.)) fs in
+    Alcotest.(check bool) "already-present candidate declines" true
+      (Option.is_none (Smt.positive_trace_index_witness_query already gamma))) [0; 1; 2];
+  let fs, gamma, index, _, _ = positive_trace_current_frame_fixture 0 "saved" in
+  let saved_total = !Config.Verification.total and saved_under = !Config.under_approximation in
+  Fun.protect ~finally:(fun () -> Config.Verification.total := saved_total;
+    Config.under_approximation := saved_under) (fun () ->
+      Config.Verification.total := false;
+      Alcotest.(check bool) "current frames require total mode" true
+        (Option.is_none (Smt.positive_trace_index_witness_query fs gamma));
+      Config.Verification.total := true; Config.under_approximation := true;
+      Alcotest.(check bool) "current frames decline under-approximation" true
+        (Option.is_none (Smt.positive_trace_index_witness_query fs gamma)));
+  positive_trace_run "current14-full-model" fs gamma index "sat" "sat" 1.;
+  let log = nonblank_counter_read "file.log"
+  and dumps = List.sort String.compare (nonblank_counter_files ())
+  and contexts = Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare in
+  let cached = Smt.check_sat fs gamma in
+  Alcotest.(check bool) "original complete-key cache has no fresh endpoint" true
+    (log = nonblank_counter_read "file.log" && dumps = List.sort String.compare (nonblank_counter_files ())
+     && contexts = (Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare));
+  (match cached with Some model -> positive_trace_replay "current14-cached-full-model" model gamma fs index 1.
+   | None -> Alcotest.fail "current14 cached actual model missing");
+  let changed = Hashtbl.copy gamma in Hashtbl.add changed "#unused_current_frame_cache" Type.ObjectType;
+  positive_trace_run "current14-unused-Gamma-cache-miss" fs changed index "sat" "sat" 1.)
+
+let positive_trace_current_frame_models () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun family ->
+    let fs, gamma, index, _, _ = positive_trace_current_frame_fixture family "saved" in
+    positive_trace_run ("current-full-model-" ^ string_of_int family) fs gamma index "sat" "sat" 1.) [1; 2];
+  let fs, gamma, index, _, _ = positive_trace_current_frame_fixture 2 "collision" in
+  positive_trace_run "current16-colliding-name-full-model" fs gamma index "sat" "sat" 1.)
+
+let positive_trace_current_frame_fallback () = with_nonblank_counter_trace (fun () ->
+  let fs, gamma, index, _, _ = positive_trace_current_frame_fixture 1 "current_conflict" in
+  positive_trace_run "current15-index2-full-fallback" (Expr.Set.add (bin ValueEqual index (Expr.num 2.)) fs)
+    gamma index "unsat" "sat" 2.;
+  List.iter (fun (label, zero) ->
+    let fs, gamma, index, _, _ = positive_trace_current_frame_fixture 0 label in
+    positive_trace_run label (Expr.Set.add (bin ValueEqual index (Expr.num zero)) fs)
+      gamma index "unsat" "sat" zero) ["current-positive-zero", 0.; "current-negative-zero", -.0.])
+
+let positive_trace_current_frame_nonfinite () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label, value) ->
+    let fs, gamma, index, _, _ = positive_trace_current_frame_fixture 0 label in
+    let fs = Expr.Set.add (bin ValueEqual index (Expr.num value)) fs in
+    let hinted = match Smt.positive_trace_index_witness_query fs gamma with
+      | Some hinted -> hinted | None -> Alcotest.fail "nonfinite contradiction must retain complete candidate" in
+    let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let caller = "control-current-frame-full-contradiction" in
+    let before = nonblank_counter_rows () in
+    let rejected, contexts = pending_context_capture (fun () ->
+      Alcotest.(check bool) "actual optional complete contradiction cannot yield model" true
+        (Option.is_none (Smt.positive_trace_index_model fs gamma));
+      Option.is_none (Smt.exec_sat ~caller_kind:caller fs gamma)) in
+    Alcotest.(check bool) "distinct required original full contradiction UNSAT" true rejected;
+    positive_trace_complete label before contexts "unsat";
+    ignore (positive_trace_selected label contexts "optional-positive-trace-index" hinted gamma);
+    ignore (positive_trace_selected label contexts caller fs gamma);
+    ignore (nonblank_counter_observe label before "optional-positive-trace-index" "unsat" hinted gamma);
+    ignore (nonblank_counter_observe label before caller "unsat" fs gamma);
+    Alcotest.(check bool) "contradictory whole FS and Gamma preserved" true
+      (List.equal Expr.equal original (Expr.Set.elements fs) && types = nonblank_counter_types gamma))
+    ["current-NaN", nan; "current-infinity", infinity])
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None ->
+       [Alcotest.test_case "positive trace smaller current frames static guards full model and cache" `Quick
+          (with_total positive_trace_current_frame_guards_cache);
+        Alcotest.test_case "positive trace smaller current15 current16 and colliding full models" `Quick
+          (with_total positive_trace_current_frame_models);
+        Alcotest.test_case "positive trace smaller current index2 and signed zeros full fallback" `Quick
+          (with_total positive_trace_current_frame_fallback);
+        Alcotest.test_case "positive trace smaller current NaN infinity whole contradictions" `Quick
+          (with_total positive_trace_current_frame_nonfinite)]
+   | _ -> [])

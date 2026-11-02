@@ -22,4 +22,7 @@ val of_yojson : Yojson.Safe.t -> (t, string) result
     source are unsupported by Flow and raise Unsupported before parsing. *)
 val source_text : string -> string
 
+(** Exact25 code units used by the existing trim semantics. *)
+val whitespace_code_units : int list
+
 val trim : string -> string

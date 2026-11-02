@@ -12,19 +12,21 @@ type st = {
 type t = { name : string; params : string list; sspecs : st list }
 
 let js2jsil_st
+    ?(verify_final_scope = false)
     (pre : JSAsrt.t)
     (post : JSAsrt.t list)
     (cc_tbl : cc_tbl_type)
     (vis_tbl : vis_tbl_type)
     (fun_tbl : pre_fun_tbl_type)
     (fid : string)
-    (params : string list) : Asrt.t * Asrt.t list =
+    (params : string list) :
+    Asrt.t * Asrt.t list * Spec.verifier_scope_binding option =
   let vis_list = get_vis_list vis_tbl fid in
 
   let scope_chain_list = vislist_2_les vis_list (List.length vis_list - 1) in
+  let final_scope_witness = Javert_utils.Js_generators.fresh_lvar () in
   let final_scope_chain_list =
-    Expr.EList
-      (scope_chain_list @ [ LVar (Javert_utils.Js_generators.fresh_lvar ()) ])
+    Expr.EList (scope_chain_list @ [ LVar final_scope_witness ])
   in
 
   let pre' : Asrt.t =
@@ -79,9 +81,18 @@ let js2jsil_st
   (*
      let a_scope_post = Asrt.LEq (Expr.PVar JS2JSIL_Helpers.var_scope_final, Expr.EList (scope_chain_list @ [ Expr.PVar JS2JSIL_Helpers.var_er ])) in
    *)
-  if fid = main_fid then (pre', post')
+  let verifier_scope =
+    if verify_final_scope && fid <> main_fid && post' <> []
+       && List.for_all (fun p -> SS.mem final_scope_witness (Asrt.lvars p)) post'
+    then Some Gillian.Gil_syntax.Spec.{
+      vsb_source = Expr.PVar var_scope_final;
+      vsb_target = final_scope_chain_list;
+    }
+    else None
+  in
+  if fid = main_fid then (pre', post', None)
   else
     ( Asrt.star
         ([ pre'; a_scope ] (* a_mds_ers @ a_scope_mds @ *) @ [ a_this ]
         @ params_not_empty @ params_not_none @ params_and_lists),
-      post' )
+      post', verifier_scope )

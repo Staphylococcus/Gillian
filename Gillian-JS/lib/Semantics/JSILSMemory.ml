@@ -156,7 +156,7 @@ module M = struct
     SHeap.init_object heap loc_name ~is_empty:ie mv;
     Ok [ (heap, [ loc ], [], []) ]
 
-  let set_cell
+  let set_exposed_cell
       ?(abstract = false)
       (heap : t)
       (pfs : PFS.t)
@@ -168,7 +168,7 @@ module M = struct
     SHeap.set_fv_pair ~abstract heap loc_name prop v;
     Ok [ (heap, [], new_pfs, []) ]
 
-  let get_cell
+  let get_exposed_cell
       (heap : t)
       (pfs : PFS.t)
       (gamma : Type_env.t)
@@ -370,13 +370,10 @@ module M = struct
         if Names.is_aloc_name loc_name then Expr.ALoc loc_name
         else Expr.Lit (Loc loc_name)
       in
-      match SHeap.get heap loc_name with
-      | None -> Error [ make_gm_error loc_name ]
-      | Some ((_, _), mtdt) ->
-          Option.fold
-            ~some:(fun mtdt -> Ok [ (heap, [ loc; mtdt ], [], []) ])
-            ~none:(Error [ make_gm_error loc_name ])
-            mtdt
+      Option.fold
+        ~some:(fun mtdt -> Ok [ (heap, [ loc; mtdt ], [], []) ])
+        ~none:(Error [ make_gm_error loc_name ])
+        (SHeap.get_met heap loc_name)
     in
 
     Option.fold ~some:f
@@ -392,14 +389,13 @@ module M = struct
     L.tmi (fun m -> m "Trying to set metadata.");
     let loc_name, _, new_pfs = fresh_loc ~loc pfs gamma in
 
-    (match SHeap.get heap loc_name with
-    | None -> SHeap.set heap loc_name SFVL.empty None (Some mtdt)
-    | Some ((fv_list, dom), None) ->
-        SHeap.set heap loc_name fv_list dom (Some mtdt)
-    | Some ((fv_list, dom), Some omet) ->
-        if omet <> Option.get (SVal.from_expr (Lit Null)) then
-          PFS.extend pfs (BinOp (mtdt, Equal, omet))
-        else SHeap.set heap loc_name fv_list dom (Some mtdt));
+    (if not (SHeap.has_loc heap loc_name) then
+       SHeap.set heap loc_name SFVL.empty None (Some mtdt)
+     else
+       match SHeap.get_met heap loc_name with
+       | Some omet when omet <> Lit Null ->
+           PFS.extend pfs (BinOp (mtdt, Equal, omet))
+       | _ -> SHeap.set_met heap loc_name (Some mtdt));
     L.tmi (fun m -> m "Done setting metadata.");
     Ok [ (heap, [], new_pfs, []) ]
 
@@ -500,59 +496,34 @@ module M = struct
     in
     result
 
-  let get_full_domain (heap : t) (pfs : PFS.t) (gamma : Type_env.t) (loc : vt) :
-      action_ret =
-    let loc_name = get_loc_name pfs gamma loc in
-    let f loc_name =
-      let loc = Expr.loc_from_loc_name loc_name in
-      match SHeap.get heap loc_name with
-      | None ->
-          (* This should never happen *)
-          raise (Failure "DEATH. get_full_domain. illegal loc_name")
-      | Some ((_, None), _) ->
-          (* This is not correct *)
-          raise (Failure "DEATH. TODO. get_full_domain. missing domain")
-      | Some ((fv_list, Some dom), _) ->
-          let props = SFVL.field_names fv_list in
-          let a_set_equality : Expr.t = BinOp (dom, Equal, ESet props) in
-          let solver_ret =
-            FOSolver.check_entailment Containers.SS.empty pfs [ a_set_equality ]
-              gamma
-          in
-          if solver_ret then
-            let _, pos_fv_list =
-              SFVL.partition (fun _ fv -> fv = Lit Nono) fv_list
-            in
-            Ok
-              [
-                ( heap,
-                  [ loc; EList (SFVL.ordered_field_names pos_fv_list) ],
-                  [],
-                  [] );
-              ]
-          else raise (Failure "DEATH. TODO. get_full_domain. incomplete domain")
-    in
+  (* A single present string key has only one observable order, independently
+     of its contents or insertion history. Keep this at the typed memory layer:
+     SFVL alone cannot establish that a symbolic expression denotes a key. *)
+  let single_string_key pfs gamma = function
+    | [ key ] ->
+        FOSolver.check_entailment Containers.SS.empty pfs
+          [
+            Expr.BinOp
+              ( BinOp (UnOp (TypeOf, key), Equal, Lit (Type StringType)),
+                Or,
+                BinOp (UnOp (TypeOf, key), Equal, Lit (Type Utf16Type)) );
+          ]
+          gamma
+    | _ -> false
 
-    let result =
-      Option.fold ~some:f ~none:(Error [ ([ loc ], [], Expr.false_) ]) loc_name
-    in
-    result
-
-  let remove_domain (heap : t) (pfs : PFS.t) (gamma : Type_env.t) (loc : vt) :
-      action_ret =
-    let f (loc_name : string) : unit =
-      Option.fold
-        ~some:(fun ((fv_list, _), mtdt) ->
-          SHeap.set heap loc_name fv_list None mtdt;
-          ())
-        ~none:() (SHeap.get heap loc_name)
-    in
-    Option.fold ~some:f ~none:() (get_loc_name pfs gamma loc);
-    Ok [ (heap, [], [], []) ]
-
-  (* OrderedFields owns the entire field/domain footprint, not a separately
-     frameable order fact. Its witness is observable enumeration order. *)
-  let ordered_fields_error loc = Error [ ([ loc ], [], Expr.false_) ]
+  let observable_field_names pfs gamma fields =
+    let keys = SFVL.field_names fields in
+    match keys with
+    | [ key ]
+      when single_string_key pfs gamma keys
+           && FOSolver.check_entailment Containers.SS.empty pfs
+                [
+                  Expr.UnOp
+                    (Not, BinOp (Option.get (SFVL.get key fields), Equal, Lit Nono));
+                ]
+                gamma ->
+        keys
+    | _ -> SFVL.ordered_field_names fields
 
   let ordered_key_names (keys : vt list) =
     let rec collect seen acc = function
@@ -580,11 +551,262 @@ module M = struct
           gamma)
       values
 
+  let ordered_list pfs gamma expression =
+    match Reduction.reduce_lexpr ~pfs ~gamma expression with
+    | EList xs -> Some xs
+    | Lit (LList xs) -> Some (List.map (fun x -> Expr.Lit x) xs)
+    | _ -> None
+
+  let ordered_list_type pfs gamma expression =
+    FOSolver.check_entailment Containers.SS.empty pfs
+      [ Expr.BinOp (UnOp (TypeOf, expression), Equal, Lit (Type ListType)) ] gamma
+
+  let ordered_length_equality keys values =
+    Expr.BinOp (UnOp (LstLen, keys), Equal, UnOp (LstLen, values))
+
+  (* An opaque OrderedFields is an assumption of whole, well-formed ownership,
+     not a constructor or a certificate obtained from raw cells. We keep an
+     overapproximation of that resource: list types and equal lengths are
+     necessary, not sufficient, validity facts. No cell action may inspect or
+     mutate this alternative. Concrete malformed witnesses still reject. *)
+  let ordered_sequence_shape pfs gamma keys values =
+    let keys_ok =
+      match ordered_list pfs gamma keys with
+      | None -> ordered_list_type pfs gamma keys
+      | Some keys -> (
+          match ordered_key_names keys with
+          | Some names -> Property_order.sort names = names
+          | None -> single_string_key pfs gamma keys)
+    in
+    let values_ok =
+      match ordered_list pfs gamma values with
+      | None -> ordered_list_type pfs gamma values
+      | Some values -> ordered_values_present pfs gamma values
+    in
+    keys_ok && values_ok
+
+  let ordered_sequence_valid pfs gamma keys values =
+    ordered_sequence_shape pfs gamma keys values
+    && FOSolver.check_entailment Containers.SS.empty pfs
+         [ ordered_length_equality keys values ] gamma
+
+  (* A complete ordered resource denotes distinct present keys paired with
+     values. A proved in-range key selection therefore identifies exactly one
+     owned value. No raw cell is exposed or consumed by this read. *)
+  let ordered_cell_index pfs gamma keys values prop =
+    let reduce = Reduction.reduce_lexpr ~pfs ~gamma in
+    let selection = function
+    | Expr.BinOp (selected_keys, LstNth, index)
+      when reduce selected_keys = reduce keys ||
+           FOSolver.check_entailment Containers.SS.empty pfs
+             [ Expr.BinOp (selected_keys, Equal, keys) ] gamma ->
+        (* A checked prefix lookup can name an equal whole-list expression whose
+           reduction differs through recursive key aliases. Prove that identity;
+           unrelated or merely equal-length lists still cannot authorize a read. *)
+        let bounds =
+          [ Expr.BinOp (UnOp (TypeOf, index), Equal, Lit (Type IntType));
+            Expr.BinOp (Expr.zero_i, ILessThanEqual, index);
+            Expr.BinOp (index, ILessThan, UnOp (LstLen, keys));
+            Expr.BinOp (index, ILessThan, UnOp (LstLen, values)) ]
+        in
+        if FOSolver.check_entailment Containers.SS.empty pfs bounds gamma then
+          Some index
+        else None
+    | _ -> None
+    in
+    if not (ordered_sequence_valid pfs gamma keys values) then None
+    else match selection (reduce prop) with
+    | Some _ as selected -> selected
+    | None ->
+        (* Named runtime accesses may denote an entry of the complete owned
+           sequence. A pure equality supplies a candidate, never ownership:
+           check the same-list selection, its bounds and the equality before
+           reading/updating the paired value. Unrelated lists cannot qualify. *)
+        let named selected name =
+          if reduce name <> reduce prop then None
+          else match selection selected with
+          | Some index when FOSolver.is_equal ~pfs ~gamma selected prop ->
+              Some index
+          | _ -> None
+        in
+        List.find_map
+          (function
+            | Expr.BinOp (left, (Equal | ValueEqual), right) ->
+                (match named left right with
+                | Some _ as index -> index
+                | None -> named right left)
+            | _ -> None)
+          (PFS.to_list pfs)
+
+  (* Nonmembership is checked against the complete owned sequence; a missing
+     positive witness or an unrelated list cannot establish absence. *)
+  let ordered_cell_absent pfs gamma keys values prop =
+    ordered_sequence_valid pfs gamma keys values
+    && FOSolver.check_entailment Containers.SS.empty pfs
+         [ Expr.BinOp
+             (BinOp (UnOp (TypeOf, prop), Equal, Lit (Type StringType)), Or,
+              BinOp (UnOp (TypeOf, prop), Equal, Lit (Type Utf16Type)));
+           Expr.UnOp (Not, BinOp (keys, LstContains, prop)) ] gamma
+
+  (* Runtime insertion into complete UTF-16 field ownership. Uniform key
+     representation plus proved identity nonmembership excludes canonical
+     aliases. Logical Cell production continues to require exposed ownership. *)
+  let ordered_insertable pfs gamma keys values prop value =
+    ordered_sequence_valid pfs gamma keys values
+    && FOSolver.check_entailment Containers.SS.empty pfs
+      [ Expr.UnOp (LstAllUtf16, keys);
+        Expr.BinOp (UnOp (TypeOf, prop), Equal, Lit (Type Utf16Type));
+        Expr.UnOp (Not, BinOp (keys, LstContains, prop));
+        Expr.UnOp (Not, BinOp (value, Equal, Lit Nono));
+        Expr.UnOp (Not, BinOp (UnOp (TypeOf, value), Equal, Lit (Type SetType))) ] gamma
+
+  (* An indexed update changes exactly one value in complete ownership; keys
+     and insertion history stay unchanged. The list-slice implementation needs
+     an explicit native length bound, as do the corresponding GIL operations. *)
+  let ordered_updatable pfs gamma keys values prop value =
+    match ordered_cell_index pfs gamma keys values prop with
+    | None -> None
+    | Some index ->
+        if FOSolver.check_entailment Containers.SS.empty pfs
+             [ Expr.BinOp (UnOp (LstLen, values), ILessThanEqual,
+                 Lit (Int (Z.of_int max_int)));
+               Expr.UnOp (Not, BinOp (value, Equal, Lit Nono));
+               Expr.UnOp (Not, BinOp (UnOp (TypeOf, value), Equal, Lit (Type SetType))) ] gamma
+        then Some index
+        else None
+
+  let ordered_replaced values index value =
+    let after = Expr.BinOp (index, IPlus, Expr.one_i) in
+    Expr.NOp (LstCat,
+      [ Expr.LstSub (values, Expr.zero_i, index);
+        Expr.EList [ value ];
+        Expr.LstSub (values, after,
+          Expr.BinOp (UnOp (LstLen, values), IMinus, after)) ])
+
+  let set_cell ?(abstract = false) heap pfs gamma loc prop value : action_ret =
+    let packed = Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) in
+    match packed with
+    | None -> set_exposed_cell ~abstract heap pfs gamma loc prop value
+    | Some (keys, values) when not abstract && ordered_insertable pfs gamma keys values prop value ->
+        let position = Expr.BinOp (keys, KeyInsertIndex, prop) in
+        let next_keys = Expr.NOp (LstInsert, [ keys; position; prop ]) in
+        let next_values = Expr.NOp (LstInsert, [ values; position; value ]) in
+        let result = SHeap.copy heap in
+        let name = Option.get (get_loc_name pfs gamma loc) in
+        SHeap.clear_ordered result name;
+        SHeap.set_ordered result name next_keys next_values;
+        (* These follow from structural insertion into a valid complete
+           sequence. They are transfer consequences, never resource-admission
+           axioms or assumptions that an unknown list is well formed. *)
+        let facts =
+          [ Expr.BinOp (Lit (Int Z.zero), ILessThanEqual, position);
+            Expr.BinOp (position, ILessThanEqual, UnOp (LstLen, keys));
+            Expr.BinOp (UnOp (LstLen, next_keys), Equal, UnOp (LstLen, next_values));
+            Expr.UnOp (LstAllUtf16, next_keys) ] in
+        Ok [ (result, [], facts, []) ]
+    | Some (keys, values) when not abstract -> (
+        match ordered_updatable pfs gamma keys values prop value with
+        | Some index ->
+            let next_values = ordered_replaced values index value in
+            let result = SHeap.copy heap in
+            let name = Option.get (get_loc_name pfs gamma loc) in
+            SHeap.clear_ordered result name;
+            SHeap.set_ordered result name keys next_values;
+            Ok [ (result, [], [ ordered_length_equality keys next_values ], []) ]
+        | None ->
+            SHeap.require_exposed heap (Option.get (get_loc_name pfs gamma loc));
+            assert false)
+    | Some _ ->
+        SHeap.require_exposed heap (Option.get (get_loc_name pfs gamma loc));
+        assert false
+
+  let get_cell heap pfs gamma loc prop : action_ret =
+    match Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) with
+    | None -> get_exposed_cell heap pfs gamma loc prop
+    | Some (keys, values) -> (
+        match ordered_cell_index pfs gamma keys values prop with
+        | Some index ->
+            let value = Expr.BinOp (values, LstNth, index) in
+            (* Presence follows from the resource and proved bounds, not from
+               arbitrary list types or an assumed successful lookup. *)
+            Ok [ (heap, [ loc; prop; value ],
+                  [ Expr.UnOp (Not, BinOp (value, Equal, Lit Nono)) ], []) ]
+        | None when ordered_cell_absent pfs gamma keys values prop ->
+            Ok [ (heap, [ loc; prop; Expr.Lit Nono ], [], []) ]
+        | None ->
+            SHeap.require_exposed heap
+              (Option.get (get_loc_name pfs gamma loc));
+            assert false)
+
+  let get_full_domain (heap : t) (pfs : PFS.t) (gamma : Type_env.t) (loc : vt) :
+      action_ret =
+    let loc_name = get_loc_name pfs gamma loc in
+    let f loc_name =
+      let loc = Expr.loc_from_loc_name loc_name in
+      match SHeap.get_ordered heap loc_name with
+      | Some (keys, values) ->
+          if ordered_sequence_valid pfs gamma keys values then
+            Ok [ (heap, [ loc; keys ], [], []) ]
+          else Error [ ([ loc ], [], Expr.false_) ]
+      | None -> (match SHeap.get heap loc_name with
+      | None ->
+          (* This should never happen *)
+          raise (Failure "DEATH. get_full_domain. illegal loc_name")
+      | Some ((_, None), _) ->
+          (* This is not correct *)
+          raise (Failure "DEATH. TODO. get_full_domain. missing domain")
+      | Some ((fv_list, Some dom), _) ->
+          let props = SFVL.field_names fv_list in
+          let a_set_equality : Expr.t = BinOp (dom, Equal, ESet props) in
+          let solver_ret =
+            FOSolver.check_entailment Containers.SS.empty pfs [ a_set_equality ]
+              gamma
+          in
+          if solver_ret then
+            let _, pos_fv_list =
+              SFVL.partition (fun _ fv -> fv = Lit Nono) fv_list
+            in
+            Ok
+              [
+                ( heap,
+                  [ loc; EList (observable_field_names pfs gamma pos_fv_list) ],
+                  [],
+                  [] );
+              ]
+          else raise (Failure "DEATH. TODO. get_full_domain. incomplete domain"))
+    in
+
+    let result =
+      Option.fold ~some:f ~none:(Error [ ([ loc ], [], Expr.false_) ]) loc_name
+    in
+    result
+
+  let remove_domain (heap : t) (pfs : PFS.t) (gamma : Type_env.t) (loc : vt) :
+      action_ret =
+    let f (loc_name : string) : unit =
+      Option.fold
+        ~some:(fun ((fv_list, _), mtdt) ->
+          SHeap.set heap loc_name fv_list None mtdt;
+          ())
+        ~none:() (SHeap.get heap loc_name)
+    in
+    Option.fold ~some:f ~none:() (get_loc_name pfs gamma loc);
+    Ok [ (heap, [], [], []) ]
+
+  (* OrderedFields owns the entire field/domain footprint, not a separately
+     frameable order fact. Its witness is observable enumeration order. *)
+  let ordered_fields_error loc = Error [ ([ loc ], [], Expr.false_) ]
+
   let ordered_fields_snapshot heap pfs gamma loc =
     match get_loc_name pfs gamma loc with
     | None -> ordered_fields_error loc
     | Some name -> (
-        match SHeap.get heap name with
+        match SHeap.get_ordered heap name with
+        | Some (keys, values) ->
+            if ordered_sequence_valid pfs gamma keys values then
+              Ok (name, SHeap.get_met heap name, keys, values)
+            else ordered_fields_error loc
+        | None -> (match SHeap.get heap name with
         | Some ((fields, Some domain), metadata) -> (
             let complete =
               Expr.BinOp (domain, Equal, ESet (SFVL.field_names fields))
@@ -598,18 +820,21 @@ module M = struct
               let _, present =
                 SFVL.partition (fun _ v -> v = Lit Nono) fields
               in
-              match ordered_key_names (SFVL.field_names present) with
-              | None -> ordered_fields_error loc
-              | Some _ ->
+              let keys = SFVL.field_names present in
+              if
+                Option.is_none (ordered_key_names keys)
+                && not (single_string_key pfs gamma keys)
+              then ordered_fields_error loc
+              else
                   (* Keep the existing unknown-order rejection authoritative. *)
-                  let keys = SFVL.ordered_field_names present in
+                  let keys = observable_field_names pfs gamma present in
                   let values =
                     List.map (fun k -> Option.get (SFVL.get k present)) keys
                   in
                   if ordered_values_present pfs gamma values then
-                    Ok (name, metadata, keys, values)
+                    Ok (name, metadata, EList keys, EList values)
                   else ordered_fields_error loc)
-        | _ -> ordered_fields_error loc)
+        | _ -> ordered_fields_error loc))
 
   let get_ordered_fields heap pfs gamma loc : action_ret =
     match ordered_fields_snapshot heap pfs gamma loc with
@@ -618,7 +843,7 @@ module M = struct
         Ok
           [
             ( heap,
-              [ Expr.loc_from_loc_name name; EList keys; EList values ],
+              [ Expr.loc_from_loc_name name; keys; values ],
               [],
               [] );
           ]
@@ -628,48 +853,108 @@ module M = struct
     | Error errors -> Error errors
     | Ok (name, metadata, _, _) ->
         let heap = SHeap.copy heap in
+        SHeap.clear_ordered heap name;
         SHeap.set heap name SFVL.empty None metadata;
         Ok [ (heap, [], [], []) ]
 
   let set_ordered_fields heap pfs gamma loc keys values : action_ret =
-    let as_list expression =
-      match Reduction.reduce_lexpr ~pfs ~gamma expression with
-      | EList xs -> Some xs
-      | Lit (LList xs) -> Some (List.map (fun x -> Expr.Lit x) xs)
-      | _ -> None
-    in
+    let as_list = ordered_list pfs gamma in
     match (as_list keys, as_list values) with
     | Some keys, Some values when List.length keys = List.length values -> (
-        match ordered_key_names keys with
-        | Some names
-          when Property_order.sort names = names
-               && ordered_values_present pfs gamma values ->
+        let valid_order =
+          match ordered_key_names keys with
+          | Some names -> Property_order.sort names = names
+          | None -> single_string_key pfs gamma keys
+        in
+        if valid_order && ordered_values_present pfs gamma values then
             let fields =
               List.fold_left2
                 (fun fs key value -> SFVL.add key value fs)
                 SFVL.empty keys values
             in
             let name, _, new_pfs = fresh_loc ~loc pfs gamma in
-            let remainder = SHeap.get heap name in
             let vacant =
-              match remainder with
-              | None -> true
-              | Some ((existing, None), _) -> SFVL.is_empty existing
-              | _ -> false
+              Option.is_none (SHeap.get_ordered heap name)
+              && match SHeap.get heap name with
+                 | None -> true
+                 | Some ((existing, None), _) -> SFVL.is_empty existing
+                 | _ -> false
             in
-            if (not vacant) || SFVL.ordered_field_names fields <> keys then
+            if
+              (not vacant)
+              || observable_field_names pfs gamma fields <> keys
+            then
               ordered_fields_error loc
             else
-              let metadata =
-                match remainder with
-                | None -> None
-                | Some (_, m) -> m
-              in
+              let metadata = SHeap.get_met heap name in
               let heap = SHeap.copy heap in
               SHeap.set heap name fields (Some (ESet keys)) metadata;
               Ok [ (heap, [], new_pfs, []) ]
-        | _ -> ordered_fields_error loc)
+        else ordered_fields_error loc)
+    | key_list, value_list
+      when (Option.is_none key_list || Option.is_none value_list)
+           && ordered_sequence_shape pfs gamma keys values ->
+        let name, _, new_pfs = fresh_loc ~loc pfs gamma in
+        if Option.is_some (SHeap.get_ordered heap name) then ordered_fields_error loc
+        else
+          let fields, domain = fst (SHeap.get_with_default heap name) in
+          if not (SFVL.is_empty fields) || Option.is_some domain then
+            ordered_fields_error loc
+          else
+            let heap = SHeap.copy heap in
+            SHeap.set_ordered heap name keys values;
+            Ok [ (heap, [], ordered_length_equality keys values :: new_pfs, []) ]
     | _ -> ordered_fields_error loc
+
+  (* SelectedFields is a view of the whole OrderedFields resource. Its outputs
+     bind the selected index and descriptor during matching; neither is guessed
+     from an unowned list. Consumption still removes the entire footprint. *)
+  let selected_fields_valid pfs gamma prop index keys values descriptor =
+    ordered_sequence_valid pfs gamma keys values
+    && FOSolver.check_entailment Containers.SS.empty pfs
+         [ Expr.BinOp (UnOp (TypeOf, prop), Equal, Lit (Type Utf16Type));
+           Expr.BinOp (UnOp (TypeOf, index), Equal, Lit (Type IntType));
+           Expr.BinOp (UnOp (TypeOf, descriptor), Equal, Lit (Type ListType)) ]
+         gamma
+    && FOSolver.check_entailment Containers.SS.empty pfs
+         [ Expr.BinOp (Expr.zero_i, ILessThanEqual, index);
+           Expr.BinOp (index, ILessThan, UnOp (LstLen, keys));
+           Expr.BinOp (index, ILessThan, UnOp (LstLen, values)) ]
+         gamma
+    (* Prove definedness before reducing the partial nth expressions. *)
+    && FOSolver.check_entailment Containers.SS.empty pfs
+         [ Expr.BinOp (prop, Equal, BinOp (keys, LstNth, index));
+           Expr.BinOp (descriptor, ValueEqual, BinOp (values, LstNth, index)) ]
+         gamma
+
+  let get_selected_fields heap pfs gamma loc prop : action_ret =
+    match ordered_fields_snapshot heap pfs gamma loc with
+    | Error errors -> Error errors
+    | Ok (name, _, keys, values) ->
+        let index = match ordered_cell_index pfs gamma keys values prop with
+          | Some _ as index -> index
+          | None -> Option.bind (ordered_list pfs gamma keys) (fun names ->
+              List.find_map (fun (index, key) ->
+                  if FOSolver.is_equal ~pfs ~gamma prop key then
+                    Some (Expr.int index)
+                  else None)
+                (List.mapi (fun index key -> index, key) names))
+        in
+        (match index with
+        | None -> ordered_fields_error loc
+        | Some index ->
+            let descriptor = Reduction.reduce_lexpr ~pfs ~gamma
+                (Expr.BinOp (values, LstNth, index)) in
+            if selected_fields_valid pfs gamma prop index keys values descriptor
+            then Ok [ (heap,
+                [ Expr.loc_from_loc_name name; prop; index; keys; values; descriptor ],
+                [], []) ]
+            else ordered_fields_error loc)
+
+  let set_selected_fields heap pfs gamma loc prop index keys values descriptor =
+    if selected_fields_valid pfs gamma prop index keys values descriptor then
+      set_ordered_fields heap pfs gamma loc keys values
+    else ordered_fields_error loc
 
   (* Program actions and logical producers share this legacy implementation.
      Total execution must not borrow the producer's ability to invent a missing
@@ -703,7 +988,15 @@ module M = struct
        to the legacy syntactic setter/deleter. Argument reduction can turn an
        equal symbolic key into a literal between GetCell and SetCell. A relaxed
        guard alone would permit inserting a second, aliased heap entry. *)
-    if action = JSILNames.setCell || action = JSILNames.delCell then
+    let packed_write = action = JSILNames.setCell && (match args with
+      | [ loc; prop; value ] -> (match Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) with
+          | Some (keys, values) ->
+              ordered_insertable pfs gamma keys values prop value
+              || Option.is_some (ordered_updatable pfs gamma keys values prop value)
+          | None -> false)
+      | _ -> false) in
+    if packed_write then args
+    else if action = JSILNames.setCell || action = JSILNames.delCell then
       match args with
       | loc :: prop :: rest -> (
           string_key prop;
@@ -745,7 +1038,11 @@ module M = struct
          | _ -> unsupported "requires fresh allocation in the current fragment."
        else if action = JSILNames.getCell then
          match args with
-         | [ _; prop ] -> string_key prop
+         | [ loc; prop ] -> (
+             match Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) with
+             | Some (keys, values)
+               when Option.is_some (ordered_cell_index pfs gamma keys values prop) -> ()
+             | _ -> string_key prop)
          | _ -> unsupported "has invalid arguments."
        else if action = JSILNames.delObj then
          match args with
@@ -784,6 +1081,19 @@ module M = struct
     else if action = JSILNames.delOrderedFields then
       match args with
       | [ loc ] -> remove_ordered_fields heap pfs gamma loc
+      | _ -> Error [ ([], [], Expr.false_) ]
+    else if action = JSILNames.getSelectedFields then
+      match args with
+      | [ loc; prop ] -> get_selected_fields heap pfs gamma loc prop
+      | _ -> Error [ ([], [], Expr.false_) ]
+    else if action = JSILNames.setSelectedFields then
+      match args with
+      | [ loc; prop; index; keys; values; descriptor ] ->
+          set_selected_fields heap pfs gamma loc prop index keys values descriptor
+      | _ -> Error [ ([], [], Expr.false_) ]
+    else if action = JSILNames.delSelectedFields then
+      match args with
+      | [ loc; _ ] -> remove_ordered_fields heap pfs gamma loc
       | _ -> Error [ ([], [], Expr.false_) ]
     else if action = JSILNames.getCell then
       match args with
@@ -842,6 +1152,7 @@ module M = struct
 
   let ga_to_setter (a_id : string) : string =
     if a_id = JSILNames.aOrderedFields then JSILNames.setOrderedFields
+    else if a_id = JSILNames.aSelectedFields then JSILNames.setSelectedFields
     else if a_id = JSILNames.aCell then produce_cell_action
     else if a_id = JSILNames.aMetadata then JSILNames.setMetadata
     else if a_id = JSILNames.aProps then JSILNames.setProps
@@ -849,6 +1160,7 @@ module M = struct
 
   let ga_to_getter (a_id : string) : string =
     if a_id = JSILNames.aOrderedFields then JSILNames.getOrderedFields
+    else if a_id = JSILNames.aSelectedFields then JSILNames.getSelectedFields
     else if a_id = JSILNames.aCell then JSILNames.getCell
     else if a_id = JSILNames.aMetadata then JSILNames.getMetadata
     else if a_id = JSILNames.aProps then JSILNames.getProps
@@ -856,6 +1168,7 @@ module M = struct
 
   let ga_to_deleter (a_id : string) : string =
     if a_id = JSILNames.aOrderedFields then JSILNames.delOrderedFields
+    else if a_id = JSILNames.aSelectedFields then JSILNames.delSelectedFields
     else if a_id = JSILNames.aCell then JSILNames.delCell
     else if a_id = JSILNames.aMetadata then JSILNames.delMetadata
     else if a_id = JSILNames.aProps then JSILNames.delProps

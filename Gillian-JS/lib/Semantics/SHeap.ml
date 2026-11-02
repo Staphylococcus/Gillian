@@ -16,6 +16,10 @@ type t = {
   smet : (string, Expr.t option) Hashtbl.t;
   cdmn : SS.t ref;
   sdmn : SS.t ref;
+  (* Alternative ownership of the complete field/domain footprint. The old
+     tables contain only an empty placeholder and separately owned metadata. *)
+  ordered : (string, Expr.t * Expr.t) Hashtbl.t;
+      [@default (Hashtbl.create 0)]
 }
 [@@deriving yojson]
 
@@ -31,7 +35,17 @@ let merge (a : 't option) (b : 't option) (f : 't -> 't -> 't) : 't option =
   | None, b -> b
   | Some a, Some b -> Some (f a b)
 
+let get_ordered heap loc = Hashtbl.find_opt heap.ordered loc
+
+let require_exposed heap loc =
+  if Hashtbl.mem heap.ordered loc then
+    raise
+      (Gillian.Utils.Gillian_result.Exc.Gillian_error
+         (OperationError
+            "Unsupported ordered fields: operation requires exposed cells."))
+
 let get_fvl (heap : t) (loc : string) : SFVL.t option =
+  require_exposed heap loc;
   let cfvl = Hashtbl.find_opt heap.cfvl loc in
   let sfvl = Hashtbl.find_opt heap.sfvl loc in
   merge cfvl sfvl SFVL.union
@@ -51,6 +65,7 @@ let get_met (heap : t) (loc : string) : Expr.t option =
         (Failure "MetaData in both the concrete and symbolic part of the heap."))
 
 let set_fvl (heap : t) (loc : string) (fvl : SFVL.t) : unit =
+  require_exposed heap loc;
   Hashtbl.remove heap.cfvl loc;
   Hashtbl.remove heap.sfvl loc;
   heap.cdmn := Var.Set.remove loc !(heap.cdmn);
@@ -79,6 +94,7 @@ let set_fvl (heap : t) (loc : string) (fvl : SFVL.t) : unit =
       heap.sdmn := Var.Set.add loc !(heap.sdmn)
 
 let set_dom (heap : t) (loc : string) (dom : Expr.t option) : unit =
+  require_exposed heap loc;
   Hashtbl.remove heap.cdom loc;
   Hashtbl.remove heap.sdom loc;
   let add, rem =
@@ -117,6 +133,7 @@ let init () : t =
     smet = Hashtbl.create big_tbl_size;
     cdmn = ref SS.empty;
     sdmn = ref SS.empty;
+    ordered = Hashtbl.create big_tbl_size;
   }
 
 (** Symbolic heap read heap(loc) *)
@@ -139,6 +156,19 @@ let set
   set_fvl heap loc fv_list;
   set_dom heap loc dom;
   set_met heap loc metadata
+
+(* Called only after the memory producer has checked vacancy. These helpers
+   never combine a sequence with a separately owned field/domain fragment. *)
+let set_ordered heap loc keys values =
+  require_exposed heap loc;
+  let fields, domain = fst (get_with_default heap loc) in
+  if not (SFVL.is_empty fields) || Option.is_some domain then
+    invalid_arg "Ordered fields overlap exposed ownership";
+  let metadata = get_met heap loc in
+  set heap loc SFVL.empty None metadata;
+  Hashtbl.replace heap.ordered loc (keys, values)
+
+let clear_ordered heap loc = Hashtbl.remove heap.ordered loc
 
 (** Symbolic heap put heap (loc, (perm, field)) is assigned to value *)
 let set_fv_pair
@@ -169,6 +199,7 @@ let has_loc (heap : t) (loc : string) : bool =
 
 (** Removes the fv-list associated with --loc-- in --heap-- *)
 let remove (heap : t) (loc : string) : unit =
+  require_exposed heap loc;
   Hashtbl.remove heap.cfvl loc;
   Hashtbl.remove heap.sfvl loc;
   Hashtbl.remove heap.cdom loc;
@@ -194,9 +225,10 @@ let copy (heap : t) : t =
     smet = Hashtbl.copy heap.smet;
     cdmn = ref !(heap.cdmn);
     sdmn = ref !(heap.sdmn);
+    ordered = Hashtbl.copy heap.ordered;
   }
 
-let merge_loc (heap : t) (new_loc : string) (old_loc : string) : unit =
+let merge_exposed_loc (heap : t) (new_loc : string) (old_loc : string) : unit =
   let domain = domain heap in
   let cfvl, sfvl, dom, met =
     match SS.mem new_loc domain with
@@ -246,6 +278,34 @@ let merge_loc (heap : t) (new_loc : string) (old_loc : string) : unit =
   set_met heap new_loc met;
   remove heap old_loc
 
+let merge_loc heap new_loc old_loc =
+  if new_loc <> old_loc then
+    match (get_ordered heap old_loc, get_ordered heap new_loc) with
+    | None, None -> merge_exposed_loc heap new_loc old_loc
+    | Some _, Some _ ->
+        raise (Gillian.Utils.Exceptions.Unsupported
+                 "Ordered fields overlap after location substitution")
+    | old_ordered, new_ordered ->
+        let exposed = if Option.is_some old_ordered then new_loc else old_loc in
+        let fields, domain = fst (get_with_default heap exposed) in
+        if not (SFVL.is_empty fields) || Option.is_some domain then
+          raise (Gillian.Utils.Exceptions.Unsupported
+                   "Ordered fields overlap after location substitution");
+        let metadata =
+          match (get_met heap old_loc, get_met heap new_loc) with
+          | Some a, Some b when a <> b ->
+              raise (Gillian.Utils.Exceptions.Unsupported
+                       "Ordered fields have unresolved metadata aliases")
+          | Some a, _ | _, Some a -> Some a
+          | None, None -> None
+        in
+        let keys, values = Option.get (merge old_ordered new_ordered (fun _ _ -> assert false)) in
+        clear_ordered heap old_loc;
+        clear_ordered heap new_loc;
+        remove heap old_loc;
+        set heap new_loc SFVL.empty None metadata;
+        set_ordered heap new_loc keys values
+
 (** Modifies --heap-- in place updating it to subst(heap) *)
 let substitution_in_place (subst : SSubst.t) (heap : t) : unit =
   (* If the substitution is empty, there is nothing to be done *)
@@ -261,6 +321,10 @@ let substitution_in_place (subst : SSubst.t) (heap : t) : unit =
       L.(verbose (fun m -> m "CMET: %d" (Hashtbl.length heap.cmet)));
       L.(verbose (fun m -> m "SMET: %d" (Hashtbl.length heap.smet)));
     *)
+
+    Hashtbl.filter_map_inplace
+      (fun _ (keys, values) -> Some (le_subst keys, le_subst values))
+      heap.ordered;
 
     (* Field-value lists *)
     Hashtbl.iter
@@ -415,7 +479,26 @@ let assertions (heap : t) : Asrt.t =
     fields_and_domain @ metadata
   in
 
-  to_list heap |> List.concat_map assertions_of_object |> List.sort Asrt.compare
+  let exposed =
+    SS.elements (domain heap)
+    |> List.filter (fun loc -> not (Hashtbl.mem heap.ordered loc))
+    |> List.map (fun loc -> (loc, Option.get (get heap loc)))
+    |> List.concat_map assertions_of_object
+  in
+  let ordered =
+    Hashtbl.fold
+      (fun loc (keys, values) acc ->
+        let loc_expr = make_loc_lexpr loc in
+        let metadata =
+          Option.fold ~none:[]
+            ~some:(fun metadata -> [ Asrt_utils.metadata ~loc:loc_expr ~metadata ])
+            (get_met heap loc)
+        in
+        Asrt.CorePred (Javert_utils.JSILNames.aOrderedFields,
+                      [ loc_expr ], [ keys; values ]) :: metadata @ acc)
+      heap.ordered []
+  in
+  List.sort Asrt.compare (exposed @ ordered)
 
 let wf_assertions_of_obj (heap : t) (loc : string) : Expr.t list =
   let cfvl =
@@ -435,6 +518,13 @@ let wf_assertions (heap : t) : Expr.t list =
   SS.fold (fun loc ac -> wf_assertions_of_obj heap loc @ ac) domain []
 
 let is_well_formed (heap : t) : unit =
+  Hashtbl.iter
+    (fun loc _ ->
+      let fields table = Option.value ~default:SFVL.empty (Hashtbl.find_opt table loc) in
+      if not (SFVL.is_empty (fields heap.cfvl))
+         || not (SFVL.is_empty (fields heap.sfvl)) || Option.is_some (get_dom heap loc)
+      then invalid_arg "Ordered fields coexist with exposed ownership")
+    heap.ordered;
   let cfvl =
     Hashtbl.fold
       (fun _ fvl ac ->
@@ -477,19 +567,21 @@ let is_well_formed (heap : t) : unit =
     in
     L.fail msg
 
-let pp ft heap =
-  let open Fmt in
-  let sorted_locs = SS.elements (domain heap) in
-  let sorted_locs_with_vals =
-    List.map (fun loc -> (loc, Option.get (get heap loc))) sorted_locs
+let pp_locations locs ft heap =
+  let pp_one ft loc =
+    match get_ordered heap loc with
+    | Some (keys, values) ->
+        Fmt.pf ft "@[%s |-> OrderedFields(%a; %a) with metadata %a@]"
+          loc Expr.pp keys Expr.pp values Fmt.(option Expr.pp) (get_met heap loc)
+    | None ->
+        let (fields, domain), metadata = get_with_default heap loc in
+        Fmt.pf ft "@[%s |-> [ @[%a@] | @[%a@] ] with metadata %a@]"
+          loc SFVL.pp fields Fmt.(option Expr.pp) domain
+          Fmt.(option ~none:(any "unknown") Expr.pp) metadata
   in
-  let pp_one ft (loc, ((fv_pairs, domain), metadata)) =
-    pf ft "@[%s |-> [ @[%a@] | @[%a@] ] with metadata %a@]" loc SFVL.pp fv_pairs
-      (option Expr.pp) domain
-      (option ~none:(any "unknown") Expr.pp)
-      metadata
-  in
-  (list ~sep:(any "@\n") pp_one) ft sorted_locs_with_vals
+  Fmt.(list ~sep:(any "@\n") pp_one) ft (SS.elements locs)
+
+let pp ft heap = pp_locations (domain heap) ft heap
 
 let get_print_info locs heap =
   let domain = domain heap in
@@ -506,21 +598,7 @@ let get_print_info locs heap =
   (SS.empty, metadata_locs)
 
 let pp_by_need locs ft heap =
-  let domain = domain heap in
-  let existent_locs = SS.inter locs domain in
-  let sorted_locs_with_vals =
-    List.map
-      (fun loc -> (loc, Option.get (get heap loc)))
-      (SS.elements existent_locs)
-  in
-  let open Fmt in
-  let pp_one ft (loc, ((fv_pairs, domain), metadata)) =
-    pf ft "@[%s |-> [ @[%a@] | @[%a@] ] with metadata %a@]" loc SFVL.pp fv_pairs
-      (option Expr.pp) domain
-      (option ~none:(any "unknown") Expr.pp)
-      metadata
-  in
-  (list ~sep:(any "@\n") pp_one) ft sorted_locs_with_vals
+  pp_locations (SS.inter locs (domain heap)) ft heap
 
 let get_inv_metadata (heap : t) : (Expr.t, Expr.t) Hashtbl.t =
   let inv_metadata = Hashtbl.create Config.medium_tbl_size in
@@ -543,7 +621,7 @@ let get_inv_metadata (heap : t) : (Expr.t, Expr.t) Hashtbl.t =
 let clean_up (heap : t) : unit =
   SS.iter
     (fun loc ->
-      match has_loc heap loc with
+      match has_loc heap loc && not (Hashtbl.mem heap.ordered loc) with
       | false -> ()
       | true -> (
           let (fvl, dom), met = get_with_default heap loc in
@@ -576,9 +654,12 @@ let lvars (heap : t) : Var.Set.t =
         Var.Set.union voe ac)
       heap.smet Var.Set.empty
   in
-  List.fold_left SS.union Var.Set.empty [ lvars_fvl; lvars_met; lvars_dom ]
+  Hashtbl.fold
+    (fun _ (keys, values) acc -> SS.union acc (SS.union (Expr.lvars keys) (Expr.lvars values)))
+    heap.ordered
+    (List.fold_left SS.union Var.Set.empty [ lvars_fvl; lvars_met; lvars_dom ])
 
-let alocs (heap : t) : Var.Set.t =
+let exposed_alocs (heap : t) : Var.Set.t =
   let union = Var.Set.union in
   Var.Set.empty
   |> Hashtbl.fold (fun _ fvl ac -> Var.Set.union (SFVL.alocs fvl) ac) heap.sfvl
@@ -590,3 +671,10 @@ let alocs (heap : t) : Var.Set.t =
        (fun _ oe ac ->
          Option.fold ~some:(fun oe -> union (Expr.alocs oe) ac) ~none:ac oe)
        heap.smet
+
+(* Include variables hidden in the whole-field alternative in freshness and
+   substitution accounting; omission would make framing unsound. *)
+let alocs heap =
+  Hashtbl.fold
+    (fun _ (keys, values) acc -> SS.union acc (SS.union (Expr.alocs keys) (Expr.alocs values)))
+    heap.ordered (exposed_alocs heap)

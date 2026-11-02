@@ -23,7 +23,7 @@ let check_case (a : Spec.st) (b : Spec.st) =
   Alcotest.(check bool)
     "pre/post/flag/label/verification preserved" true
     (a.pre = b.pre && a.posts = b.posts && a.flag = b.flag && a.label = b.label
-   && a.to_verify = b.to_verify);
+   && a.to_verify = b.to_verify && a.verifier_scope = b.verifier_scope);
   Alcotest.(check bool) "variant preserved" true (a.variant = b.variant)
 
 let roundtrip flag () =
@@ -213,11 +213,110 @@ let javascript_invariant_binders () =
         "non-invariant program binders remain forbidden" true rejected)
     [ "assert (True) [bind: x_counter]"; "apply missing() [bind: x_counter]" ]
 
+let parse_loop text =
+  let file = Filename.temp_file "jsil-loop-rank-" ".jsil" in
+  let prog =
+    Fun.protect
+      ~finally:(fun () -> Sys.remove file)
+      (fun () ->
+        let out = open_out file in
+        output_string out
+          ("proc loop(xs) { " ^ text ^ "; ret := true; return };");
+        close_out out;
+        Parsing.parse_jsil_eprog_from_file file)
+  in
+  let proc = Option.get (Jsil_syntax.EProg.get_proc prog "loop") in
+  match proc.body.(0) with
+  | _, _, Jsil_syntax.LabCmd.LLogic (Jsil_syntax.LCmd.SL cmd) -> cmd
+  | _ -> Alcotest.fail "expected a loop invariant"
+
+let integer_loop_length () =
+  let original =
+    parse_loop
+      "invariant (types(xs:List)) [bind: xs] variant(l-len-int xs)"
+  in
+  (match original with
+  | Jsil_syntax.SLCmd.InvariantListLength (_, [ "xs" ], "xs") -> ()
+  | _ -> Alcotest.fail "exact loop measure lost its distinct syntax");
+  let recovered = parse_loop (Format.asprintf "%a" Jsil_syntax.SLCmd.pp original) in
+  Alcotest.(check bool) "loop syntax and binders roundtrip" true
+    (original = recovered);
+  let rank = function
+    | SLCmd.Invariant (_, _, rank) -> rank
+    | _ -> Alcotest.fail "expected lowered invariant"
+  in
+  check_expr "exact loop length has no Number conversion"
+    (Some (Expr.UnOp (LstLen, Expr.PVar "xs")))
+    (rank (Lower.jsil2gil_slcmd recovered));
+  let numeric = parse_loop "invariant (types(xs:List)) variant(l-len xs)" in
+  check_expr "ordinary loop length still converts to Number"
+    (Some (Expr.UnOp (IntToNum, Expr.UnOp (LstLen, Expr.PVar "xs"))))
+    (rank (Lower.jsil2gil_slcmd numeric));
+  let absent = parse_loop "invariant (types(xs:List))" in
+  check_expr "unranked loop remains unranked" None
+    (rank (Lower.jsil2gil_slcmd absent));
+  List.iter
+    (fun suffix ->
+      let rejected =
+        try
+          ignore (parse_loop ("invariant (True) " ^ suffix));
+          false
+        with Failure _ -> true
+      in
+      Alcotest.(check bool) "malformed exact loop rank rejected" true rejected)
+    [
+      "variant(l-len-int)";
+      "variant(l-len-int #xs)";
+      "variant(l-len-int (xs))";
+      "variant(l-len-int xs + 1)";
+    ]
+
+let scope_roundtrip () =
+  let original = List.hd (parse
+      "[[ emp ]] [[ Activation({{$lg, #scope}};) ]] \
+       verify_scope(x__scope_f; {{$lg, #scope}}) normal").sspecs in
+  let recovered = List.hd (parse (Format.asprintf "%a" Spec.pp_sspec original)).sspecs in
+  check_case original recovered;
+  let gil = Lower.jsil2gil_sspec recovered in
+  Gillian.Gil_syntax.Spec.validate_verifier_scope gil;
+  Alcotest.(check bool) "same scope expression reaches GIL" true
+    (gil.ss_verifier_scope = original.verifier_scope);
+  let legacy = List.hd (parse "[[ emp ]] [[ emp ]] normal").sspecs in
+  Alcotest.(check bool) "legacy metadata absent" true (legacy.verifier_scope = None);
+  Alcotest.(check bool) "constructor metadata default" true
+    ((Spec.s_init legacy.pre legacy.posts legacy.flag true).verifier_scope = None)
+
+let scope_generated_once () =
+  let module J = Jslogic in
+  let vis = Hashtbl.create 2 in
+  Hashtbl.add vis "scopefn" ["scopefn"; J.JSLogicCommon.main_fid];
+  Hashtbl.add vis J.JSLogicCommon.main_fid [J.JSLogicCommon.main_fid];
+  let post = J.JSAsrt.Pred ("Activation", [J.JSExpr.Scope], []) in
+  let lower enabled fid =
+    J.JSSpec.js2jsil_st ~verify_final_scope:enabled J.JSAsrt.Emp [post]
+      (Hashtbl.create 0) vis (Hashtbl.create 0) fid [] in
+  let _, posts, binding = lower true "scopefn" in
+  let b = Option.get binding in
+  (match posts with
+   | [Jsil_syntax.Asrt.Pred (_, [scope], [])] ->
+       Alcotest.(check bool) "public/metadata share one fresh witness" true
+         (Expr.equal scope b.vsb_target)
+   | _ -> Alcotest.fail "expected one lowered scope predicate");
+  Alcotest.(check bool) "source is real final scope local" true
+    (Expr.equal b.vsb_source (Expr.PVar "x__scope_f"));
+  let _, _, off = lower false "scopefn" in
+  let _, _, main = lower true J.JSLogicCommon.main_fid in
+  Alcotest.(check bool) "only-spec/default disabled" true (off = None);
+  Alcotest.(check bool) "main unchanged" true (main = None)
+
 let () =
   Alcotest.run "JSIL procedure variants"
     [
       ( "frontend",
         [
+          Alcotest.test_case "scope metadata roundtrip/default" `Quick scope_roundtrip;
+          Alcotest.test_case "one generated public scope witness" `Quick scope_generated_once;
+          Alcotest.test_case "exact integer loop length" `Quick integer_loop_length;
           Alcotest.test_case "JavaScript invariant binders" `Quick
             javascript_invariant_binders;
           Alcotest.test_case "Boolean integer rank" `Quick boolean_integer_rank;

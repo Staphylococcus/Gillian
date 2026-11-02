@@ -12,6 +12,22 @@ type t =
   | Pure of Expr.t  (** Pure formula *)
   | Types of (Expr.t * Type.t) list  (** Typing assertion *)
 
+let rec lvars = function
+  | Emp -> Containers.SS.empty
+  | Star (a, b) -> Containers.SS.union (lvars a) (lvars b)
+  | PointsTo (a, b, c) ->
+      Containers.SS.union (Expr.lvars a)
+        (Containers.SS.union (Expr.lvars b) (Expr.lvars c))
+  | MetaData (a, b) | EmptyFields (a, b) ->
+      Containers.SS.union (Expr.lvars a) (Expr.lvars b)
+  | Pred (_, ins, outs) ->
+      List.fold_left (fun acc e -> Containers.SS.union acc (Expr.lvars e))
+        Containers.SS.empty (ins @ outs)
+  | Pure e -> Expr.lvars e
+  | Types pairs ->
+      List.fold_left (fun acc (e, _) -> Containers.SS.union acc (Expr.lvars e))
+        Containers.SS.empty pairs
+
 let compare x y =
   let cmp = Stdlib.compare in
   match (x, y) with

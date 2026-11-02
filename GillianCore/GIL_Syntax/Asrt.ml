@@ -6,7 +6,7 @@ type atom = TypeDef__.assertion_atom =
   | CorePred of string * Expr.t list * Expr.t list  (** Core assertion *)
   | Wand of { lhs : string * Expr.t list; rhs : string * Expr.t list }
       (** Magic wand of the form [P(...) -* Q(...)] *)
-[@@deriving eq]
+[@@deriving eq, ord]
 
 type t = TypeDef__.assertion [@@deriving eq]
 

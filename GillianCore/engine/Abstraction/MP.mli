@@ -119,3 +119,9 @@ val remove_spec : 'a prog -> string -> unit
 val get_lemma : 'a prog -> string -> (lemma, unit) result
 val update_coverage : 'a prog -> string -> int -> unit
 val first_time_running : 'a prog -> string -> int -> bool
+
+(** Preserve authored pure/type preconditions when exporting normalized
+    states for summary matching, which can rebind abstract locations. The
+    normalization bindings connect source witnesses to the exported heap. *)
+val retain_precondition_guards :
+  original:Asrt.t -> bindings:(Expr.t * Expr.t) list -> Asrt.t -> Asrt.t

@@ -91,3 +91,40 @@ The broader regression review is retained at
 Run offline runner tests with `python3 -I -B test_runner.py`. These test the
 receipt/classification harness, not symbolic proofs. Full `validate10` caller,
 original finite-JSON admission and final full-fold adapters remain open.
+
+## Atomic type conflicts (1 October 2026)
+
+Explicit nonrecursive total-lemma unfolding now classifies an empty Types
+production as infeasible only when an atomic value already has a different
+known type. A reverse-typing failure alone is insufficient. The existing guard
+still rejects unclassified empty outcomes; memory production and ordinary errors
+are unchanged. Program and recursive-lemma contexts keep their existing behavior.
+
+Four new fixtures use the same `answer`/`CheckChoice` selection shown above:
+
+| Fixture | Required native outcome |
+|---|---|
+| typed-positive | rc0, lemma and caller succeed |
+| typed-wrong-post | lemma postcondition failure, then unchecked-lemma rejection |
+| typed-all-infeasible | rc124, no-outcomes rejection and no success |
+| typed-unclassified | rc124, unclassified assertion-production loss and no success |
+
+The last fixture requests Bool for an integer expression, not an atomic value.
+It exercises the conservative boundary; it must not silently disappear. The
+historical frozen runner above does not select these new fixtures. Invoke the
+same verifier command with the desired fixture copied to case.gil.
+
+Independent review also covers all five existing explicit-unfold fixtures and
+the previously unsupported JSON scalar numeric-elimination theorem, whose
+bytes are unchanged. Its false numeric conclusion genuinely fails. Eleven
+native controls complete without unknowns/hard errors. The two passed controls
+before a fixture syntax correction were reused, not replayed. A build-postcheck
+count error was recovered from the successful primitive build; 381 production
+compiled files match, and the 15 omitted old files are unselected test targets.
+
+Evidence: `/tmp/codex-unfold-type-remaining-p04/independent-review.json`, SHA256
+`360f3ede1185c0e1e5a106c029fe137a49f6a3019ef1a5ddf3730c8c9cafa5da`.
+Source snapshot/build: `/tmp/codex-unfold-type-conflicts-p04/backend`;
+verifier SHA256 `9617cea045df07e0f11395cb9681ae9ad3e2c5706dbdc62e39da37d3f4bed619`.
+The primary checkout's older _build is not this candidate. Full JSON compound
+admission and the final fold adapters remain open.

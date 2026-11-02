@@ -1,0 +1,18 @@
+[
+  {"name":"empty", "body":"var out = ''; for (var k in {}) out += k; return out;", "expected":""},
+  {"name":"own-order", "body":"var out = ''; for (var k in {z:1,a:2}) out += k + ','; return out;", "expected":"z,a,"},
+  {"name":"numeric-order", "body":"var out = ''; for (var k in {b:1,2:2,1:3}) out += k + ','; return out;", "expected":"1,2,b,"},
+  {"name":"continue", "body":"var out = ''; for (var k in {z:1,a:2,m:3}) { if (k === 'z') continue; out += k + ','; } return out;", "expected":"a,m,"},
+  {"name":"break", "body":"var out = ''; for (var k in {z:1,a:2}) { out += k; break; } return out;", "expected":"z"},
+  {"name":"return", "body":"for (var k in {z:1,a:2}) return k; return '';", "expected":"z"},
+  {"name":"nested", "body":"var out = ''; for (var k in {z:1,a:2}) for (var j in {m:3,n:4}) out += k + j + ','; return out;", "expected":"zm,zn,am,an,"},
+  {"name":"labelled-continue", "body":"var out = ''; outer: for (var k in {z:1,a:2}) for (var j in {m:3,n:4}) { out += k + j + ','; continue outer; } return out;", "expected":"zm,am,"},
+  {"name":"labelled-break", "body":"var out = ''; outer: for (var k in {z:1,a:2}) for (var j in {m:3,n:4}) { out += k + j; break outer; } return out;", "expected":"zm"},
+  {"name":"prototype-shadow", "body":"function Base() { this.z = 1; this.a = 2; } Base.prototype = {z:3,p:4}; var out = ''; for (var k in new Base()) out += k + ','; return out;", "expected":"z,a,p,"},
+  {"name":"nonenumerable-shadow", "body":"function Base() {} Base.prototype = {p:1,a:2}; var o = new Base(); Object.defineProperty(o, 'p', {value:3,enumerable:false}); var out = ''; for (var k in o) out += k + ','; return out;", "expected":"a,"},
+  {"name":"delete-before-visit", "body":"var o = {z:1,a:2}; var out = ''; for (var k in o) { out += k; if (k === 'z') delete o.a; } return out;", "expected":"z"},
+  {"name":"null-undefined", "body":"var out = ''; for (var k in null) out += k; for (var j in undefined) out += j; return out;", "expected":""},
+  {"name":"ordinary-for", "body":"var n; for (n = 0; n < 3; n++) {} return n;", "expected":3},
+  {"name":"number-still-stalls", "body":"var n = 9007199254740992; n = n + 1; return n === 9007199254740992;", "expected":true},
+  {"name":"wrong-result", "body":"var out = ''; for (var k in {z:1,a:2}) out += k + ','; return out;", "expected":"a,z,", "reject":true}
+]

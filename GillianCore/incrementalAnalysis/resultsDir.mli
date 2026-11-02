@@ -14,6 +14,10 @@ val read_bulk_symbolic_results :
 val write_verif_results :
   SourceFiles.t -> Call_graph.t -> diff:string -> VerificationResults.t -> unit
 
+(** Opt-in, bounded, non-reusable closed-entry observation outside the cache. *)
+val write_closed_entry_observation :
+  closed_entry:bool -> path:string option -> VerificationResults.t -> unit
+
 val write_biabduction_results :
   SourceFiles.t -> Call_graph.t -> diff:string -> BiAbductionResults.t -> unit
 

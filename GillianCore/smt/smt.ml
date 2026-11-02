@@ -136,6 +136,20 @@ let number_to_integer value =
     (real_to_int
        (fp_un "fp.to_real" (app_ "fp.roundToIntegral" [ atom "RTZ"; value ])))
 
+(* Explicit integer counts may span the whole Array index range. Keep the
+   existing small conversion and UTF-16 indexing encoder unchanged; above that
+   interval unsigned 32-bit RTZ remains exact. Every other finite Number uses
+   the original general conversion. This selects an encoding, not input scope. *)
+let number_to_integer_count value =
+  let wide = bool_and
+      (fp_bin "fp.leq" (number_literal 65536.) value)
+      (fp_bin "fp.lt" value (number_literal 4294967296.)) in
+  ite wide
+    (app_ "bv2int"
+      [app (List [ atom "_"; atom "fp.to_ubv"; atom "32" ])
+         [ atom "RTZ"; value ]])
+    (number_to_integer value)
+
 module Variant = struct
   module type S = sig
     val name : string
@@ -320,11 +334,74 @@ let solver =
       raw_command = (fun _ -> failwith "Uninitialized solver");
     }
 
+(* Terminal cleanup owns the original record, not just its protected copy.
+   Keep this strong root after close: Simple_smt's non-idempotent GC finalizer
+   belongs to that original record. Pre-shutdown recovery is unchanged; retired
+   generations are not explicitly closed by this terminal-only interface. *)
+type terminal_shutdown_state =
+  | Terminal_open
+  | Terminal_closing
+  | Terminal_closed
+  | Terminal_failed of exn * Printexc.raw_backtrace
+
+let terminal_shutdown_state = ref Terminal_open
+let terminal_solver_owner : Simple_smt.solver option ref = ref None
+
+let ensure_solver_open () =
+  match !terminal_shutdown_state with
+  | Terminal_open -> ()
+  | Terminal_closing | Terminal_closed | Terminal_failed _ ->
+      raise (SMT_error "SMT solver is terminally shut down")
+
+let shutdown_solver () =
+  match !terminal_shutdown_state with
+  | Terminal_closed -> ()
+  | Terminal_closing ->
+      raise (SMT_error "SMT terminal shutdown is already in progress")
+  | Terminal_failed (error, backtrace) ->
+      Printexc.raise_with_backtrace error backtrace
+  | Terminal_open ->
+      terminal_shutdown_state := Terminal_closing;
+      (try
+         (match !terminal_solver_owner with
+         | None -> ()
+         | Some original -> original.stop ());
+         terminal_shutdown_state := Terminal_closed
+       with error ->
+         let backtrace = Printexc.get_raw_backtrace () in
+         terminal_shutdown_state := Terminal_failed (error, backtrace);
+         Printexc.raise_with_backtrace error backtrace)
+
+(* One ordinary plain full-request check. Keep the dependency's exact typed
+   reply grammar and protected command/heartbeat; model_eval' is also plain. *)
+let primary_check_command : sexp =
+  list [ atom "check-sat" ]
+
+(* Phase zero is an explicit caller policy, not a formula or test-name match. *)
+let phase_zero_primary_check_command : sexp =
+  Sexplib.Sexp.of_string
+    "(check-sat-using(or-else(try-for(then simplify solve-eqs smt fail-if-undecided)1000)(then simplify solve-eqs fpa2bv smt)))"
+
+let primary_check_command_for_phase phase_selection =
+  if phase_selection = 0 then phase_zero_primary_check_command
+  else primary_check_command
+
+let primary_check_command_text command = Sexplib.Sexp.to_string_mach command
+
+let primary_check (solver : Simple_smt.solver) command : Simple_smt.result =
+  match solver.command command with
+  | Sexplib.Sexp.Atom "unsat" -> Unsat
+  | Sexplib.Sexp.Atom "sat" -> Sat
+  | Sexplib.Sexp.Atom "unknown" -> Unknown
+  | answer -> raise (UnexpectedSolverResponse answer)
+
 let cmd s = ack_command !solver s
 let reset = list [ atom "reset" ]
 
 let rec init_solver () =
+  let () = ensure_solver_open () in
   let z3 = new_solver z3 in
+  let () = terminal_solver_owner := Some z3 in
   let command = protected_command z3 in
   let () = solver := { z3 with command } in
   (* Configuration *)
@@ -334,6 +411,7 @@ let rec init_solver () =
   ()
 
 and protected_command solver s =
+  let () = ensure_solver_open () in
   let open Sexplib in
   let open Gillian_result.Exc in
   let res =
@@ -365,7 +443,7 @@ type typenv = (string, Type.t) Hashtbl.t [@@deriving to_yojson]
 let fs_to_yojson fs = fs |> Expr.Set.to_list |> list_to_yojson Expr.to_yojson
 
 let sexps_to_yojson sexps =
-  `List (List.map (fun sexp -> `String (Sexplib.Sexp.to_string_hum sexp)) sexps)
+  `List (List.map (fun sexp -> `String (Sexplib.Sexp.to_string_mach sexp)) sexps)
 
 let pp_typenv = Fmt.(Dump.hashtbl string (Fmt.of_to_string Type.str))
 
@@ -1074,7 +1152,7 @@ let rec encode_lit (lit : Literal.t) : Encoding.t =
         require_definition def_gil_literal;
         let>-- args = List.map (fun lit -> simple_wrap (encode_lit lit)) lits in
         let args = List.map (fun arg -> arg.expr) args in
-        list args >- ListType
+        seq_of ~typ:t_gil_literal_list args >- ListType
     | Constant c -> (
         match Literal.static_constant c with
         | Some value -> encode_lit value
@@ -1105,6 +1183,21 @@ let encode_equality (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t =
       let expr =
         match t1 with
         | NumberType -> fp_bin "fp.eq" p1.expr p2.expr
+        | IntType | ListType ->
+            let operand_key expression =
+              let priority =
+                match (t1, expression) with
+                | IntType, Sexplib.Sexp.List (Sexplib.Sexp.Atom "ite" :: _) -> 0
+                | _ -> 1
+              in
+              (priority, expression)
+            in
+            let left, right =
+              if Stdlib.compare (operand_key p1.expr) (operand_key p2.expr) <= 0
+              then (p1.expr, p2.expr)
+              else (p2.expr, p1.expr)
+            in
+            eq left right
         | BooleanType when is_true p1.expr -> p2.expr
         | BooleanType when is_true p2.expr -> p1.expr
         | _ -> eq p1.expr p2.expr
@@ -1125,6 +1218,80 @@ let encode_equality (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t =
       let>- p1 = extend_wrap p1 in
       let>- p2 = extend_wrap p2 in
       extended_equality p1.expr p2.expr >- BooleanType
+
+(* Exact canonical Uint32 decimal parsing, array-index classification and
+   structural insertion position. The
+   recursive SMT function strips one key per call. No object-size bound, FP
+   conversion, user axiom or inferred creation-order history is used. *)
+(* Keep the quantified index local to a function definition. Inlining a
+   fixed binder around the caller's encoded list could capture a free name. *)
+let def_list_all_utf16 =
+  let xs = atom "keys" and i = atom "index" in
+  let condition = bool_implies
+    (bool_and (num_leq (int_k 0) i) (num_lt i (seq_len xs)))
+    (Lit_operations.Utf16String.recognize (seq_nth xs i)) in
+  make_definition ~depends_on:[ def_gil_literal ]
+    [ define_fun "gil_list_all_utf16" [ ("keys", t_gil_literal_list) ] t_bool
+        (forall [ ("index", t_int) ] condition) ]
+
+let def_key_insert_index =
+  let name = atom "name" in
+  let decimal_case length =
+    let units = List.init length (fun i -> app_ "bv2int" [ seq_nth name (int_k i) ]) in
+    let number = List.fold_left
+      (fun prefix unit -> num_add (num_mul prefix (int_k 10)) (num_sub unit (int_k 48)))
+      (int_k 0) units in
+    let digits = List.map (fun unit -> bool_and (num_leq (int_k 48) unit) (num_leq unit (int_k 57))) units in
+    let canonical = if length = 1 then atom "true" else bool_not (eq (List.hd units) (int_k 48)) in
+    let valid = List.fold_left bool_and (eq (seq_len name) (int_k length))
+      (canonical :: num_leq number (int_zk (Z.of_string "4294967295")) :: digits) in
+    valid, number
+  in
+  let cases = List.init 10 (fun i -> decimal_case (i + 1)) in
+  let decimal = List.fold_right (fun (valid, number) other -> ite valid number other) cases (int_k (-1)) in
+  let parsed = app_ "gil_uint32_decimal_value" [ name ] in
+  let index = ite (num_lt parsed (int_zk (Z.of_string "4294967295"))) parsed (int_k (-1)) in
+  make_definition ~depends_on:[ def_gil_literal ]
+    [ define_fun "gil_uint32_decimal_value" [ ("name", Utf16.sort) ] t_int decimal;
+      define_fun "gil_key_index" [ ("name", Utf16.sort) ] t_int index;
+      Sexplib.Sexp.of_string
+        {smt|(define-fun-rec gil_index_position ((keys (Seq GIL_Literal)) (index Int)) Int
+          (ite (= (seq.len keys) 0) 0
+            (let ((head (seq.nth keys 0)))
+              (let ((other (ite (isUtf16String head) (gil_key_index (u16Value head)) (- 1))))
+                (ite (or (< other 0) (> other index)) 0
+                  (+ 1 (gil_index_position (seq.extract keys 1 (- (seq.len keys) 1)) index)))))))|smt} ]
+
+(* Exact UTF-16 trim, defined rather than axiomatized. A nonempty whitespace
+   edge is removed before each recursive call, so seq.len decreases by one.
+   Indices and lengths are mathematical Ints; no FP rounding or size bound is
+   introduced. The guarded empty case never observes an out-of-range unit.
+   The 25 units are exactly Utils.Utf16.is_space's current concrete table. *)
+let def_utf16_trim =
+  let unit = atom "unit" in
+  let whitespace = Utils.Utf16.whitespace_code_units in
+  let is_space =
+    List.fold_left
+      (fun result code -> bool_or result (eq unit (bv_k 16 (Z.of_int code))))
+      (bool_k false) whitespace
+  in
+  make_definition
+    [ define_fun "gil_utf16_whitespace" [ ("unit", t_bits 16) ] t_bool is_space;
+      Sexplib.Sexp.of_string
+        {smt|(define-fun-rec gil_utf16_trim_left ((input (Seq (_ BitVec 16)))) (Seq (_ BitVec 16))
+          (ite (= (seq.len input) 0) input
+            (ite (gil_utf16_whitespace (seq.nth input 0))
+              (gil_utf16_trim_left (seq.extract input 1 (- (seq.len input) 1)))
+              input)))|smt};
+      Sexplib.Sexp.of_string
+        {smt|(define-fun-rec gil_utf16_trim_right ((input (Seq (_ BitVec 16)))) (Seq (_ BitVec 16))
+          (ite (= (seq.len input) 0) input
+            (ite (gil_utf16_whitespace (seq.nth input (- (seq.len input) 1)))
+              (gil_utf16_trim_right (seq.extract input 0 (- (seq.len input) 1)))
+              input)))|smt};
+      define_fun "gil_utf16_trim" [ ("input", Utf16.sort) ] Utf16.sort
+        (app_ "gil_utf16_trim_right"
+           [ app_ "gil_utf16_trim_left" [ atom "input" ] ]) ]
 
 let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
     =
@@ -1161,11 +1328,11 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
   | ILessThan ->
       let>- p1 = get_int p1 in
       let>- p2 = get_int p2 in
-      num_lt p1.expr p2.expr >- IntType
+      num_lt p1.expr p2.expr >- BooleanType
   | ILessThanEqual ->
       let>- p1 = get_int p1 in
       let>- p2 = get_int p2 in
-      num_leq p1.expr p2.expr >- IntType
+      num_leq p1.expr p2.expr >- BooleanType
   | FPlus ->
       let>- p1 = get_num p1 in
       let>- p2 = get_num p2 in
@@ -1224,8 +1391,36 @@ let encode_binop (op : BinOp.t) (p1 : Encoding.t) (p2 : Encoding.t) : Encoding.t
       set_subset Z3 p1.expr p2.expr >- BooleanType
   | LstNth ->
       let>- p1 = get_list p1 in
-      let>- p2 = get_list p2 in
+      let>- p2 = get_int p2 in
       seq_nth p1.expr p2.expr |> simply_wrapped
+  | KeyInsertIndex ->
+      require_definition def_key_insert_index;
+      let>- keys = get_list p1 in
+      let>- name = get_utf16 p2 in
+      let index = app_ "gil_key_index" [ name.expr ] in
+      let length = seq_len keys.expr in
+      let position = ite (num_lt index (int_k 0)) length
+          (app_ "gil_index_position" [ keys.expr; index ]) in
+      let last = seq_nth keys.expr (num_sub length (int_k 1)) in
+      let last_index = ite (Lit_operations.Utf16String.recognize last)
+          (app_ "gil_key_index" [ Lit_operations.Utf16String.access last ])
+          (int_k (-1)) in
+      (* Induction on the finite key suffix: if its final element stops the
+         scan, the first stop is at most length-1. This is a consequence of
+         gil_index_position, not an order/ownership assumption about the list.
+         Empty lists, ordinary inserted names, and a smaller terminal index
+         must retain their possible position == length. *)
+      let stops_at_last = bool_and (num_lt (int_k 0) length)
+          (bool_and (num_leq (int_k 0) index)
+             (bool_or (num_lt last_index (int_k 0)) (num_lt index last_index))) in
+      native ~facts:[ num_leq (int_k 0) position; num_leq position length;
+          bool_implies stops_at_last (num_lt position length) ]
+        IntType position
+  | LstContains ->
+      let>- list = get_list p1 in
+      let>- value = simple_wrap p2 in
+      (* Sequence membership is native datatype equality, exactly as v==. *)
+      app (atom "seq.contains") [ list.expr; seq_unit value.expr ] >- BooleanType
   | LstRepeat ->
       let>- x = simple_wrap p1 in
       let>- n = get_int p2 in
@@ -1322,6 +1517,10 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
         | _ -> seq_len le.expr
       in
       enc >- IntType
+  | LstAllUtf16 ->
+      require_definition def_list_all_utf16;
+      let>- xs = get_list le in
+      app_ "gil_list_all_utf16" [ xs.expr ] >- BooleanType
   | StrToBytes ->
       require_definition def_gil_literal;
       let>- bytes = get_string le in
@@ -1343,6 +1542,10 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
   | Utf16Len ->
       let>- le = get_utf16 le in
       seq_len le.expr >- IntType
+  | Utf16Trim ->
+      require_definition def_utf16_trim;
+      let>- le = get_utf16 le in
+      app_ "gil_utf16_trim" [ le.expr ] >- Utf16Type
   | ToStringOp | NumberToUtf16 ->
       let num2str, str2num, encode_string, typ =
         if op = NumberToUtf16 then (
@@ -1355,9 +1558,8 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
           (num2str, str2num, encode_string, Type.StringType))
       in
       let>- le = get_num le in
-      (* JavaScript formatting identifies the two zeros. Leaving zero in the
-         uninterpreted remainder would distinguish IEEE-equal property keys.
-         Nonzero finite formatting remains an over-approximation. *)
+      (* JavaScript formatting identifies signed zeros. Outside integral
+         Uint32 Numbers the finite symbolic formatter remains opaque. *)
       let formatted =
         ite
           (fp_un "fp.isZero" le.expr)
@@ -1381,7 +1583,28 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
           (fp_bin "fp.eq" parsed le.expr)
           (bool_and (fp_un "fp.isNaN" parsed) (fp_un "fp.isNaN" le.expr))
       in
-      native ~facts:[ roundtrip ] typ formatted
+      let facts =
+        if op = NumberToUtf16 then (
+          require_definition def_key_insert_index;
+          let in_range = bool_and
+              (fp_bin "fp.leq" (number_literal 0.) le.expr)
+              (fp_bin "fp.leq" le.expr (number_literal 4294967295.)) in
+          let integral = fp_bin "fp.eq" le.expr
+              (app_ "fp.roundToIntegral" [ atom "RTZ"; le.expr ]) in
+          let exact = bool_and in_range integral in
+          let bits = app (list [ atom "_"; atom "fp.to_ubv"; atom "32" ])
+              [ atom "RTZ"; ite exact le.expr (number_literal 0.) ] in
+          (* The decimal recognizer has exactly one spelling for each Uint32:
+             1..10 decimal digits, no leading zeros, with value <= 2^32-1.
+             Constraining that defined relation precisely models the formatter
+             on this interval without expanding the construction of its digits.
+             It does not give opaque names an assumed array-index class. *)
+          bool_implies exact
+            (eq (app_ "gil_uint32_decimal_value" [ formatted ])
+               (app_ "bv2int" [ bits ])) :: [ roundtrip ])
+        else [ roundtrip ]
+      in
+      native ~facts typ formatted
   | Utf16ToNumber ->
       require_definition def_utf162num;
       let>- le = get_utf16 le in
@@ -1434,7 +1657,63 @@ let encode_unop ~llen_lvars ~e (op : UnOp.t) le =
       | _ when !Config.Verification.total -> ()
       | _ -> exceptf "SMT encoding: NumToInt requires a finite concrete operand");
       let>- le = get_num le in
-      number_to_integer le.expr >- IntType
+      let ordinary = number_to_integer_count le.expr in
+      let integer = match e, le.expr with
+        | Expr.BinOp (_, FPlus, Lit (Num 1.)),
+          List [ Atom "fp.add"; Atom "RNE"; counter; _ ] ->
+            (* Every integral counter in [0, 2^32-1) and its successor are
+               exactly representable binary64 integers. RTZ(counter + 1)
+               therefore equals RTZ(counter) + 1. Keep an actual SMT guard:
+               fractions, negative counters, nonfinite values and larger
+               integers retain the original FP addition/conversion. Operand
+               typing and encoding facts have already been retained above. *)
+            let integral = fp_bin "fp.eq" counter
+              (app_ "fp.roundToIntegral" [ atom "RTZ"; counter ]) in
+            let range = bool_and
+              (fp_bin "fp.leq" (number_literal 0.) counter)
+              (fp_bin "fp.lt" counter (number_literal 4294967295.)) in
+            ite (bool_and integral range)
+              (num_add (number_to_integer_count counter) (int_k 1)) ordinary
+        | Expr.BinOp (_, FMinus, Expr.BinOp (_, FPlus, Lit (Num 1.))),
+          List [ Atom "fp.sub"; Atom "RNE"; left;
+            List [ Atom "fp.add"; Atom "RNE"; counter; _ ] ] ->
+            (* Integral uint32 left and counter < 2^32-1 have an exact
+               binary64 successor and signed difference. Reuse its integer
+               successor directly instead of recasting raw FP addition.
+               Signed zeros count as zero; every guard failure keeps the
+               original FP subtraction/conversion without extra facts. *)
+            let integral value = fp_bin "fp.eq" value
+              (app_ "fp.roundToIntegral" [ atom "RTZ"; value ]) in
+            let left_range = bool_and
+              (fp_bin "fp.leq" (number_literal 0.) left)
+              (fp_bin "fp.leq" left (number_literal 4294967295.)) in
+            let counter_range = bool_and
+              (fp_bin "fp.leq" (number_literal 0.) counter)
+              (fp_bin "fp.lt" counter (number_literal 4294967295.)) in
+            let guard = bool_and (bool_and (integral left) left_range)
+              (bool_and (integral counter) counter_range) in
+            ite guard
+              (num_sub (number_to_integer_count left)
+                 (num_add (number_to_integer_count counter) (int_k 1))) ordinary
+        | Expr.BinOp (_, FMinus, _),
+          List [ Atom "fp.sub"; Atom "RNE"; left; right ] ->
+            (* Both integral operands in [0, 2^32-1] and their signed
+               difference are exactly representable in binary64. RNE
+               subtraction is therefore exact, so RTZ distributes here.
+               The actual SMT guard keeps every other operand on the
+               original FP subtraction/conversion path. *)
+            let uint32_integer value =
+              let integral = fp_bin "fp.eq" value
+                (app_ "fp.roundToIntegral" [ atom "RTZ"; value ]) in
+              let range = bool_and
+                (fp_bin "fp.leq" (number_literal 0.) value)
+                (fp_bin "fp.leq" value (number_literal 4294967295.)) in
+              bool_and integral range in
+            ite (bool_and (uint32_integer left) (uint32_integer right))
+              (num_sub (number_to_integer_count left)
+                 (number_to_integer_count right)) ordinary
+        | _ -> ordinary in
+      integer >- IntType
   | IntToNum ->
       let>- le = get_int le in
       let general = to_number [ rne; int_to_real le.expr ] in
@@ -1726,6 +2005,49 @@ let rec encode_logical_expression
         (bool_not (fp_bin "fp.lt" pos.expr (number_literal 0.)))
         (fp_bin "fp.leq" len.expr pos.expr)
       >- BooleanType
+  | BinOp
+      ( (UnOp (NumToInt,
+           BinOp ((LVar _ as n), FMinus, (LVar _ as i))) as difference),
+        ILessThan, Lit (Int zero) )
+    when Z.equal zero Z.zero && !Config.Verification.total ->
+      (* Reuse the direct subtraction's actual integral uint32 guard. Both
+         operands and their difference are exact binary64 integers there,
+         so its converted count is negative iff n < i. Signed zeros count
+         as zero. Every failed guard keeps the complete integer comparison;
+         an FP sign test alone is unsound for fractional differences. *)
+      let>- converted = get_int (f difference) in
+      let ordinary = num_lt converted.expr (int_k 0) in
+      (match converted.expr with
+      | List [ Atom "ite"; guard; _; _ ] ->
+          let>- n = get_num (f n) in
+          let>- i = get_num (f i) in
+          ite guard (fp_bin "fp.lt" n.expr i.expr) ordinary >- BooleanType
+      | _ -> ordinary >- BooleanType)
+  | BinOp
+      ( (UnOp
+           ( NumToInt,
+             BinOp ((LVar _ as n), FMinus,
+               BinOp ((LVar _ as i), FPlus, Lit (Num 1.))) ) as difference),
+        ILessThan,
+        Lit (Int zero) )
+    when Z.equal zero Z.zero && !Config.Verification.total ->
+      (* Reuse the conversion's actual guard and keep its facts/domain checks.
+         Under that guard n and i are integral uint32 values, i+1 is exact,
+         and the signed difference is exact. Its integer count is negative
+         iff n < i+1. Fractions and every guard failure retain the complete
+         original integer comparison; testing the FP sign there is unsound. *)
+      let>- converted = get_int (f difference) in
+      let ordinary = num_lt converted.expr (int_k 0) in
+      (match converted.expr with
+      | List [ Atom "ite"; guard; _; _ ] ->
+          let>- n = get_num (f n) in
+          let>- i = get_num (f i) in
+          ite guard
+            (fp_bin "fp.lt" n.expr
+               (fp_arith "fp.add" i.expr (number_literal 1.)))
+            ordinary
+          >- BooleanType
+      | _ -> ordinary >- BooleanType)
   | BinOp (le1, op, le2) -> encode_binop op (f le1) (f le2)
   | NOp (SetUnion, les) ->
       let>-- les = List.map f les in
@@ -1737,6 +2059,44 @@ let rec encode_logical_expression
       let>-- sets = List.map get_set les in
       let sets = List.map (fun set -> set.expr) sets in
       set_intersection' Z3 sets >- SetType
+  | NOp (Utf16Sub, [ text; start; count ]) ->
+      let>- text = f text in
+      let>- start = f start in
+      let>- count = f count in
+      let>- text = get_utf16 text in
+      let>- start = get_int start in
+      let>- count = get_int count in
+      (* TOTAL proves the valid slice domain before matching/evaluating this
+         proof expression. No clamping fact or nonexpansion axiom is added. *)
+      seq_extract text.expr start.expr count.expr >- Utf16Type
+  | NOp (Utf16Sub, _) -> exceptf "UTF-16 slice requires exactly three arguments"
+  | NOp (LstInsert, [ xs; i; value ]) ->
+      let>- xs = f xs in
+      let>- i = f i in
+      let>- value = f value in
+      let>- xs = get_list xs in
+      let>- i = get_int i in
+      let>- value = simple_wrap value in
+      let length = seq_len xs.expr in
+      let inserted = seq_concat [ seq_extract xs.expr (int_k 0) i.expr;
+        seq_unit value.expr;
+        seq_extract xs.expr i.expr (num_sub length i.expr) ] in
+      (* With 0 <= i < length, the nonempty suffix still ends in the old final
+         element, now at index length. Keep this exact sequence consequence
+         separate from heap ownership and from the append case i == length. *)
+      let before_end = bool_and (num_leq (int_k 0) i.expr)
+          (num_lt i.expr length) in
+      let in_bounds = bool_and (num_leq (int_k 0) i.expr)
+          (num_leq i.expr length) in
+      (* The two in-range slices have lengths i and length-i. Their singleton
+         insertion therefore adds exactly one, including at either endpoint. *)
+      native ~facts:[ bool_implies in_bounds
+          (eq (seq_len inserted) (num_add length (int_k 1)));
+          bool_implies before_end
+          (eq (seq_nth inserted length)
+             (seq_nth xs.expr (num_sub length (int_k 1)))) ]
+        ListType inserted
+  | NOp (LstInsert, _) -> exceptf "List insertion requires exactly three arguments"
   | NOp (LstCat, les) ->
       let>-- les = List.map f les in
       let>-- lists = List.map get_list les in
@@ -1922,9 +2282,9 @@ let encode_assertions_needs_handler (fs : Expr.Set.t) (gamma : typenv) :
     |> List.map (encode_assertion_top_level ~gamma ~llen_lvars ~list_elem_vars)
   in
   let consts =
-    Hashtbl.fold
-      (fun (const, typ) () acc -> declare_const const typ :: acc)
-      (all_consts encoded) []
+    Hashtbl.fold (fun pair () acc -> pair :: acc) (all_consts encoded) []
+    |> List.sort Stdlib.compare
+    |> List.map (fun (const, typ) -> declare_const const typ)
   in
   let asrts =
     let extra_asrts = List.concat_map (fun e -> e.extra_asrts) encoded in
@@ -1951,6 +2311,42 @@ let encode_assertions (fs : Expr.Set.t) (gamma : typenv) : sexp list * sexp list
   let () = Formula_cache.replace encoding_cache key result in
   result
 
+(* Opt-in provenance only. Laziness leaves the unset path free of JSON/pretty
+   printing; every nested scope restores its predecessor even on an exception. *)
+let native_smt_context_scopes : Yojson.Safe.t list ref = ref []
+
+let with_native_smt_context make_context f =
+  match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+  | None -> f ()
+  | Some _ ->
+      let previous = !native_smt_context_scopes in
+      native_smt_context_scopes := make_context () :: previous;
+      Fun.protect ~finally:(fun () -> native_smt_context_scopes := previous) f
+
+let native_smt_logging_parent () =
+  match L.Parent.get () with
+  | None ->
+      `Assoc [ ("id", `Null); ("status", `String "no-active-parent");
+               ("type", `Null); ("content_json", `Null) ]
+  | Some id ->
+      let report = match L.Parent.get_snapshot () with
+        | Some (snapshot_id, type_, content)
+          when L.Report_id.equal id snapshot_id -> Some (content, type_)
+        | _ -> L.Log_queryer.get_report id
+      in
+      let fields = match report with
+        | None ->
+            [ ("status", `String "parent-content-unavailable");
+              ("type", `Null); ("content_json", `Null) ]
+        | Some (content, type_) ->
+            [ ("status", `String
+                (if type_ = L.Logging_constants.Content_type.cmd then
+                   "current-parent-is-command"
+                 else "current-parent-is-not-command; ancestor-unresolved"));
+              ("type", `String type_); ("content_json", `String content) ]
+      in
+      `Assoc (("id", L.Report_id.to_yojson id) :: fields)
+
 module Dump = struct
   let counter = ref 0
 
@@ -1974,11 +2370,12 @@ module Dump = struct
 
   let to_file f =
     let () = L.verbose (fun m -> m "Dumping query %d to file" !counter) in
-    let path = Filename.concat (folder ()) (file ()) in
+    let name = file () in
+    let path = Filename.concat (folder ()) name in
     let c = open_out path in
     let () = f c in
     let () = close_out c in
-    ()
+    name
 
   let dump fs gamma cmds =
     to_file (fun c ->
@@ -1987,9 +2384,64 @@ module Dump = struct
           "GIL query:\nFS: %a\nGAMMA: %a\nEncoded as SMT Query:\n%a@?"
           (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp)
           fs pp_typenv gamma
-          (Fmt.list ~sep:(Fmt.any "\n") Sexplib.Sexp.pp_hum)
+          (Fmt.list ~sep:(Fmt.any "\n") Sexplib.Sexp.pp_mach)
           cmds)
 end
+
+(* Opt-in diagnostics of the concrete tuple, never a reconstructed prelude.
+   Require the existing dump id and an exclusive fresh sidecar; errors propagate. *)
+let capture_native_smt_context ~query ~caller_kind ~timeout_ms ~phase_selection
+    ~primary_command_text ~raw_unknown fs gamma encoded_assertions declarations =
+  match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+  | None -> ()
+  | Some directory ->
+      if
+        directory = "" || Filename.is_relative directory || query = "none"
+        || (Unix.lstat directory).Unix.st_kind <> Unix.S_DIR
+      then invalid_arg "Native SMT capture requires an absolute directory and SMT dumping";
+      let payload =
+        `Assoc
+          [
+            ("format", `String "gillian-native-smt-context-v1");
+            ("query", `String query);
+            ("provenance", `Assoc
+              [ ("format", `String "gillian-native-smt-query-provenance-v1");
+                ("operation_scopes", `List (List.rev !native_smt_context_scopes));
+                ("entry", `String
+                  (if !native_smt_context_scopes = [] then "direct-smt"
+                   else "scoped-fosolver-or-caller"));
+                ("logging_parent", native_smt_logging_parent ());
+                ("result_status", `String "not-yet-requested");
+                ("primary_check_command", `String primary_command_text) ]);
+            ("caller", `String caller_kind);
+            ("timeout_ms", `String timeout_ms);
+            ("phase_selection", `Int phase_selection);
+            ("raw_unknown", `Bool raw_unknown);
+            ("initial_options", `Assoc (List.map
+               (fun (key, value) -> (key, `String value)) z3_config));
+            ("original_fs", `String (Fmt.str "%a"
+               (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs));
+            ("original_gamma", `String (Fmt.str "%a" pp_typenv gamma));
+            ("declarations", sexps_to_yojson declarations);
+            ("encoded_assertions", sexps_to_yojson encoded_assertions);
+            ("encoded_assertion_dump", `String (Fmt.str "%a"
+               (Fmt.list ~sep:(Fmt.any "\n") Sexplib.Sexp.pp_mach) encoded_assertions));
+          ]
+      in
+      let path = Filename.concat directory (query ^ ".context.json") in
+      let channel = open_out_gen
+        [ Open_wronly; Open_creat; Open_excl; Open_binary ] 0o600 path in
+      Fun.protect ~finally:(fun () -> close_out channel)
+        (fun () ->
+          Yojson.Safe.to_channel ~suf:"\n" channel payload;
+          flush channel;
+          Unix.fsync (Unix.descr_of_out_channel channel));
+      (* The closed, file-fsynced sidecar precedes this nondebug event and the
+         original declaration/assert/check sequence. No result is fabricated. *)
+      let loggable = L.Loggable.make
+        (fun fmt json -> Fmt.string fmt (Yojson.Safe.to_string json))
+        (fun json -> Ok json) (fun json -> json) payload in
+      ignore (L.Specific.normal ~title:"SMT query start" loggable "smt_query_start")
 
 (* We never use the solver incrementally: every query starts by fully
    resetting it. Z3 keeps the options that were set with [set-option] across a
@@ -2003,11 +2455,15 @@ let reset_solver () =
   ()
 
 let exec_sat'
+    ~caller_kind
     ~timeout_ms
     ~phase_selection
     ~raw_unknown
     (fs : Expr.Set.t)
     (gamma : typenv) : model option =
+  let () = ensure_solver_open () in
+  let primary_command = primary_check_command_for_phase phase_selection in
+  let primary_command_text = primary_check_command_text primary_command in
   let () =
     L.verbose (fun m ->
         m "@[<v 2>About to check SAT of:@\n%a@]@\nwith gamma:@\n@[%a@]\n"
@@ -2023,7 +2479,11 @@ let exec_sat'
   in
   with_necessary_usr_datatypes @@ fun () ->
   let encoded_assertions, declarations = encode_assertions fs gamma in
-  let () = if !Config.dump_smt then Dump.dump fs gamma encoded_assertions in
+  let query = if !Config.dump_smt then
+    Dump.dump fs gamma encoded_assertions else "none" in
+  let () = capture_native_smt_context ~query ~caller_kind ~timeout_ms
+    ~phase_selection ~primary_command_text ~raw_unknown fs gamma encoded_assertions declarations in
+  let () = Utils.Owned_prefix_lifecycle.query ~query ~caller:caller_kind in
   let sort_declarations = ref [] in
   let emit (declaration : sexp) =
     (match declaration with
@@ -2040,8 +2500,39 @@ let exec_sat'
   let () = List.iter emit declarations in
   let () = List.iter cmd encoded_assertions in
   L.verbose (fun fmt -> fmt "Reached SMT.");
-  let result = check !solver in
-  L.verbose (fun m ->
+  L.normal (fun m ->
+    m "SMT_PRIMARY_CHECK_DISPATCH query=%s command=%s" query primary_command_text);
+  let current_solver = !solver in
+  let result = primary_check current_solver primary_command in
+  (* Join the actual native result to its allocated dump, without changing
+     formulas, solver policy or the existing unknown diagnostic/error path. *)
+  L.normal (fun m ->
+    m "SMT_QUERY_RESULT query=%s caller=%s raw_unknown=%b timeout_ms=%s phase_selection=%d result=%s"
+      query caller_kind raw_unknown timeout_ms phase_selection
+      (match result with Sat -> "sat" | Unsat -> "unsat" | Unknown -> "unknown"));
+  (* Metadata from the same live solver, never another check or reset. Keep
+     missing reasons diagnostic-only and retain UNKNOWN's original policy below.
+     %S keeps the complete response on one physical log line. *)
+  (if result = Unknown then
+     let response =
+       try Ok (current_solver.raw_command "(get-info :reason-unknown)")
+       with
+       | (Out_of_memory | Stack_overflow | Sys.Break) as error -> raise error
+       | error -> Error (Printexc.to_string error)
+     in
+     match response with
+     | Ok reply ->
+         let status = match reply with
+           | Sexplib.Sexp.List [Sexplib.Sexp.Atom ":reason-unknown"; _] -> "available"
+           | _ -> "unavailable" in
+         L.normal (fun m ->
+           m "SMT_PRIMARY_UNKNOWN_REASON query=%s status=%s response=%S" query
+             status (Sexplib.Sexp.to_string_mach reply))
+     | Error error ->
+         L.normal (fun m ->
+           m "SMT_PRIMARY_UNKNOWN_REASON query=%s status=unavailable error=%S" query error));
+  (* Optional unknowns must remain visible without full symbolic-state tracing. *)
+  (if result = Unknown then L.normal else L.verbose) (fun m ->
       let r =
         match result with
         | Sat -> "satisfiable"
@@ -2079,24 +2570,26 @@ let exec_sat'
   ret
 
 let run_sat
+    ~caller_kind
     ?(timeout_ms = List.assoc "timeout" z3_config)
     ~phase_selection
     ~raw_unknown
     (fs : Expr.Set.t)
     (gamma : typenv) : model option =
-  try exec_sat' ~timeout_ms ~phase_selection ~raw_unknown fs gamma
-  with UnexpectedSolverResponse _ as e ->
+  try exec_sat' ~caller_kind ~timeout_ms ~phase_selection ~raw_unknown fs gamma
+  with UnexpectedSolverResponse response as e ->
     let additional_data =
       [
         ("smt_error", `String (Printexc.to_string e));
+        ("smt_response", `String (Sexplib.Sexp.to_string_mach response));
         ("expressions", fs_to_yojson fs);
         ("gamma", typenv_to_yojson gamma);
       ]
     in
     raise Gillian_result.Exc.(internal_error ~additional_data "SMT failure")
 
-let exec_sat ?(phase_selection = 3) fs gamma =
-  run_sat ~phase_selection ~raw_unknown:false fs gamma
+let exec_sat ?(caller_kind = "required-complete") ?(phase_selection = 3) fs gamma =
+  run_sat ~caller_kind ~phase_selection ~raw_unknown:false fs gamma
 
 (* Optional searches have a smaller budget and never exceed the configured
    required-query limit (zero denotes unlimited). Every query sets its own
@@ -2105,9 +2598,133 @@ let optional_timeout cap =
   let configured = int_of_string (List.assoc "timeout" z3_config) in
   string_of_int (if configured = 0 then cap else min cap configured)
 
+(* A strict bounded natural counter pair may use one optional complete-query
+   witness: propose 0/2 for an explicit (lower + 1) < upper, otherwise 0/1.
+   Every original assertion/type remains present. Only a native validated SAT
+   model decides; failed hints keep the unchanged path. *)
+let nonempty_counter_model fs gamma =
+  let vars = Expr.Set.fold (fun e names -> SS.union (Expr.lvars e) names)
+    fs SS.empty in
+  let numbers = SS.filter (fun name ->
+    Hashtbl.find_opt gamma name = Some Type.NumberType) vars in
+  let natural name =
+    Expr.Set.mem (Expr.UnOp (IsInt, Expr.LVar name)) fs
+    && Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThanEqual,
+      Expr.LVar name)) fs in
+  let bounded name = Expr.Set.exists (function
+    | Expr.BinOp (LVar x, FLessThanEqual, Lit (Num bound)) when x = name ->
+        bound >= 0. && bound <= 9007199254740991.
+    | _ -> false) fs in
+  let ordered = List.filter_map (function
+    | Expr.BinOp (LVar lower, FLessThan, LVar upper)
+      when lower <> upper && SS.mem lower numbers && SS.mem upper numbers
+        && natural lower
+        && Expr.Set.mem (Expr.UnOp (IsInt, Expr.LVar upper)) fs
+        && bounded upper ->
+          Some (lower, upper)
+    | _ -> None) (Expr.Set.elements fs) in
+  if not !Config.Verification.total || !Config.under_approximation
+     || SS.cardinal numbers < 2 then None else
+  match ordered with
+  | [] | _ :: _ :: _ -> None
+  | [(lower, upper)] ->
+      let upper_value =
+        if Expr.Set.mem (Expr.BinOp
+          (Expr.BinOp (Expr.LVar lower, FPlus, Expr.num 1.), FLessThan,
+           Expr.LVar upper)) fs then 2. else 1. in
+      let query = List.fold_left (fun query (name, value) -> Expr.Set.add
+        (Expr.BinOp (Expr.LVar name, ValueEqual, Expr.num value)) query)
+        fs [lower, 0.; upper, upper_value] in
+      if Expr.Set.equal query fs then None else
+      try run_sat ~caller_kind:"optional-nonempty-counter" ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+          ~raw_unknown:true query gamma
+      with SMT_unknown -> None
+
+(* A same-value natural counter alias can make a feasible optional query
+   expensive. Try one complete native model first; the two literal hints are
+   guesses, never symbolic facts. Only validated SAT decides the original
+   query. Failed hints preserve the unchanged unseeded search below. *)
+let aliased_counter_model fs gamma =
+  let vars = Expr.Set.fold (fun e names -> SS.union (Expr.lvars e) names)
+    fs SS.empty in
+  let number name = Hashtbl.find_opt gamma name = Some Type.NumberType in
+  let natural name =
+    Expr.Set.mem (Expr.UnOp (IsInt, Expr.LVar name)) fs
+    && Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThanEqual,
+      Expr.LVar name)) fs in
+  let bounded name = Expr.Set.exists (function
+    | Expr.BinOp (LVar x, FLessThanEqual, Lit (Num bound)) when x = name ->
+        bound >= 0. && bound <= 9007199254740991.
+    | _ -> false) fs in
+  let alias = Expr.Set.exists (function
+    | Expr.BinOp (LVar x, Equal, LVar y) when x <> y ->
+        natural x && natural y && (bounded x || bounded y)
+    | _ -> false) fs in
+  if not !Config.Verification.total || !Config.under_approximation
+     || SS.cardinal vars <> 2 || not (SS.for_all number vars) || not alias
+  then None else
+  let query = SS.fold (fun name query -> Expr.Set.add
+    (Expr.BinOp (Expr.LVar name, ValueEqual, Expr.num 1.)) query) vars fs in
+  if Expr.Set.equal query fs then None else
+  try run_sat ~caller_kind:"optional-aliased-counter" ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+      ~raw_unknown:true query gamma
+  with SMT_unknown -> None
+
+(* Keep275 q474 is a feasible focused counterquery, not a slice theorem.
+   Guess only structurally derived zero/one counter roles and an empty prefix
+   in the complete original frame. Only actual native SAT returns a model;
+   failed hints preserve every existing timed unseeded query and error. *)
+let prefix_length_counter_model fs gamma =
+  if not !Config.Verification.total || !Config.under_approximation then None else
+  let expressions = Expr.Set.elements fs in
+  let vars = Expr.Set.fold (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty in
+  let numbers = SS.filter (fun name ->
+    Hashtbl.find_opt gamma name = Some Type.NumberType) vars in
+  let linked a b = Expr.Set.exists (function
+    | Expr.BinOp (left, (Equal | ValueEqual), right) ->
+        (Expr.equal left a && Expr.equal right b)
+        || (Expr.equal right a && Expr.equal left b)
+    | _ -> false) fs in
+  let select prefix_length successor = match prefix_length, successor with
+    | Expr.UnOp (LstLen, (LVar prefix as values)),
+      Expr.UnOp (NumToInt, BinOp ((LVar lower as counter), FPlus, Lit (Num step)))
+      when step = 1. && SS.cardinal numbers = 3 && SS.mem lower numbers
+        && Hashtbl.find_opt gamma prefix = Some Type.ListType ->
+        let count = Expr.UnOp (NumToInt, counter) in
+        let natural = Expr.Set.mem (Expr.UnOp (IsInt, counter)) fs
+          && Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThanEqual, counter)) fs in
+        let bounded = Expr.Set.exists (function
+          | Expr.BinOp (LVar x, FLessThanEqual, Lit (Num limit)) when x = lower ->
+              limit >= 0. && limit <= 4294967295.
+          | _ -> false) fs in
+        if not (natural && bounded && linked count prefix_length
+          && linked successor (Expr.BinOp (Expr.int 1, IPlus, count))) then None else
+        List.find_map (function
+          | Expr.BinOp (LVar k, FLessThan, LVar upper)
+            when k = lower && upper <> lower && SS.mem upper numbers ->
+              let position = SS.choose (SS.remove upper (SS.remove lower numbers)) in
+              if Expr.Set.mem (Expr.BinOp (Expr.LVar position, FLessThanEqual, counter)) fs
+              then Some (lower,upper,position,values) else None
+          | _ -> None) expressions
+    | _ -> None in
+  let shape = List.find_map (function
+    | Expr.UnOp (Not, BinOp (left, (Equal | ValueEqual), right)) ->
+        (match select left right with Some _ as roles -> roles
+         | None -> select right left)
+    | _ -> None) expressions in
+  match shape with None -> None | Some (lower,upper,position,prefix) ->
+  let query = List.fold_left (fun acc (role,value) -> Expr.Set.add
+      (Expr.BinOp (role, ValueEqual, value)) acc) fs
+    [Expr.LVar lower,Expr.num 0.; Expr.LVar upper,Expr.num 1.;
+     Expr.LVar position,Expr.num 0.; prefix,Expr.EList []] in
+  if Expr.Set.equal query fs then None else
+  try run_sat ~caller_kind:"optional-prefix-length-counter"
+      ~timeout_ms:(optional_timeout 1000) ~phase_selection:3 ~raw_unknown:true query gamma
+  with SMT_unknown -> None
+
 (* This is only a sufficient UNSAT check, not a satisfiability decision.
    Native unknown is inconclusive; model/encoding/solver errors still propagate. *)
-let proves_unsat (fs : Expr.Set.t) (gamma : typenv) : bool =
+let proves_unsat ?(caller_kind = "optional-unsat") (fs : Expr.Set.t) (gamma : typenv) : bool =
   let key = formula_key fs gamma in
   match Formula_cache.find_opt sat_cache key with
   | Some result -> Option.is_none result
@@ -2115,8 +2732,14 @@ let proves_unsat (fs : Expr.Set.t) (gamma : typenv) : bool =
   | None -> (
       try
         let result =
-          run_sat ~timeout_ms:(optional_timeout 5000) ~phase_selection:3
-            ~raw_unknown:true fs gamma
+          match nonempty_counter_model fs gamma with
+          | Some _ as witness -> witness
+          | None -> (match aliased_counter_model fs gamma with
+            | Some _ as witness -> witness
+            | None -> (match prefix_length_counter_model fs gamma with
+              | Some _ as witness -> witness
+              | None -> run_sat ~caller_kind ~timeout_ms:(optional_timeout 5000) ~phase_selection:3
+                  ~raw_unknown:true fs gamma))
         in
         Formula_cache.replace sat_cache key result;
         Option.is_none result
@@ -2124,12 +2747,112 @@ let proves_unsat (fs : Expr.Set.t) (gamma : typenv) : bool =
         Formula_cache.replace inconclusive_prechecks key ();
         false)
 
+(* A suffix-only, binder-free compiler copy. The caller retains its original
+   frame and caches; a model of this copy is never returned or published. *)
+let suffix_alpha_copy full_fs selected gamma roles =
+  let preferred_targets = [ "#prefix"; "#dhTailValues"; "#dhHead"; "#k" ] in
+  let bindings table = Hashtbl.to_seq table |> List.of_seq |> List.sort Stdlib.compare in
+  let originals = List.map fst roles in
+  let names = SS.of_list originals in
+  let encoded_names xs = SS.of_list (List.map sanitize_identifier xs) in
+  let gamma_before = bindings gamma in
+  let gamma_names = List.map fst gamma_before in
+  (* A simultaneous copy may permute or retain mapped source names. Only
+     unmapped Gamma bindings must remain disjoint from the four targets. *)
+  let unmapped_names = List.filter (fun name -> not (SS.mem name names)) gamma_names in
+  let unmapped_ids = encoded_names unmapped_names in
+  let preferred_clashes = SS.inter (encoded_names preferred_targets) unmapped_ids in
+  (* Only an occupied preferred head admits this one alternate. Every other
+     collision, including an occupied alternate, retains the original fallback. *)
+  let targets = if SS.equal preferred_clashes (SS.singleton (sanitize_identifier "#dhHead"))
+    then [ "#prefix"; "#dhTailValues"; "#s05_suffix_role_head"; "#k" ]
+    else preferred_targets in
+  let target_ids = encoded_names targets in
+  let source_ids = encoded_names originals in
+  let reject reason =
+    L.normal (fun m -> m "SUFFIX_ALPHA_COPY_INELIGIBLE reason=%s" reason); false in
+  let rec safe = function
+    | Expr.LVar name -> SS.mem name names
+    | Expr.Lit (Int _ | Num _) -> true
+    | Expr.UnOp ((Not | NumToInt | LstLen | IsInt), e) -> safe e
+    | Expr.BinOp (a, (Equal | ValueEqual | FLessThanEqual | FPlus | IPlus | ITimes), b) -> safe a && safe b
+    | Expr.LstSub (a,b,c) -> safe a && safe b && safe c
+    | Expr.NOp (LstCat, es) | Expr.EList es -> List.for_all safe es
+    | _ -> false in
+  let used = Expr.Set.fold (fun e acc -> SS.union (Expr.lvars e) acc) selected SS.empty in
+  if List.length roles <> 4 || SS.cardinal names <> 4
+     || List.map snd roles <> [Type.ListType;Type.ListType;Type.Utf16Type;Type.NumberType]
+     || not (List.for_all (fun (name,typ) -> Hashtbl.find_opt gamma name = Some typ) roles)
+     || Expr.Set.cardinal selected <> 6 || not (Expr.Set.subset selected full_fs)
+     || Expr.Set.cardinal selected >= Expr.Set.cardinal full_fs
+     || not (SS.equal used names && Expr.Set.for_all safe selected)
+  then reject "shape-or-alias" else
+  (* The matched fragment emits no binders/functions with this logical-variable
+     prefix. Reject nonstandard identifiers rather than guessing their scope. *)
+  let identifier name = String.starts_with ~prefix:"$$" name
+    && String.for_all (function 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' | '-' | '$' -> true | _ -> false) name in
+  if not (SS.for_all identifier (SS.union source_ids target_ids))
+     || SS.cardinal source_ids <> 4 || SS.cardinal target_ids <> 4
+     || SS.cardinal (encoded_names gamma_names) <> List.length gamma_names
+     || not (SS.is_empty (SS.inter target_ids unmapped_ids))
+  then reject "encoded-name-collision" else
+  let mapping = List.combine originals targets in
+  let inverse = List.map (fun (a,b) -> b,a) mapping in
+  let rename map name = Option.value ~default:name (List.assoc_opt name map) in
+  let map_expr map e = Expr.map_opt (function
+    | Expr.LVar name -> Some (Expr.LVar (rename map name)),false
+    | e -> Some e,true) None e |> Option.get in
+  let map_fs map fs = Expr.Set.fold (fun e acc -> Expr.Set.add (map_expr map e) acc) fs Expr.Set.empty in
+  let map_gamma map table =
+    let copied = Hashtbl.create (Hashtbl.length table) in
+    Hashtbl.iter (fun name typ -> Hashtbl.add copied (rename map name) typ) table; copied in
+  let copied = map_fs mapping selected and copied_gamma = map_gamma mapping gamma in
+  if Expr.Set.cardinal copied <> 6 || Hashtbl.length copied_gamma <> Hashtbl.length gamma
+     || SS.cardinal (encoded_names (List.map fst (bindings copied_gamma))) <> Hashtbl.length copied_gamma
+     || not (Expr.Set.equal (map_fs inverse copied) selected)
+     || bindings (map_gamma inverse copied_gamma) <> gamma_before
+  then reject "inverse" else
+  let commands, prelude = with_necessary_usr_datatypes (fun () -> encode_assertions selected gamma) in
+  let copied_commands, copied_prelude = with_necessary_usr_datatypes (fun () -> encode_assertions copied copied_gamma) in
+  let rec atoms = function
+    | Sexplib.Sexp.Atom a -> SS.singleton a
+    | Sexplib.Sexp.List xs -> List.fold_left (fun acc x -> SS.union acc (atoms x)) SS.empty xs in
+  let prelude_atoms = List.fold_left (fun acc x -> SS.union acc (atoms x)) SS.empty (prelude @ copied_prelude) in
+  let rec binder_free = function
+    | Sexplib.Sexp.List (Sexplib.Sexp.Atom ("forall" | "exists" | "let") :: _) -> false
+    | Sexplib.Sexp.List xs -> List.for_all binder_free xs
+    | Sexplib.Sexp.Atom _ -> true in
+  let declaration_names xs = List.filter_map (function
+    | Sexplib.Sexp.List [Sexplib.Sexp.Atom "declare-const";Sexplib.Sexp.Atom name;_] -> Some name
+    | _ -> None) xs |> SS.of_list in
+  let encoded_mapping = List.map (fun (a,b) -> sanitize_identifier a,sanitize_identifier b) mapping in
+  let rec rename_sexp = function
+    | Sexplib.Sexp.Atom a -> Sexplib.Sexp.Atom (rename encoded_mapping a)
+    | Sexplib.Sexp.List xs -> Sexplib.Sexp.List (List.map rename_sexp xs) in
+  if not (SS.is_empty (SS.inter prelude_atoms (SS.union source_ids target_ids)))
+  then reject "prelude-collision" else
+  if not (List.for_all binder_free (commands @ copied_commands))
+     || not (SS.equal (declaration_names commands) source_ids)
+     || not (SS.equal (declaration_names copied_commands) target_ids)
+     || prelude <> copied_prelude
+     || List.sort Stdlib.compare (List.map rename_sexp commands) <> List.sort Stdlib.compare copied_commands
+  then reject "encoded-correspondence" else
+  let () = L.normal (fun m -> m "SUFFIX_ALPHA_COPY_MAP %s"
+    (String.concat ";" (List.map (fun (a,b) -> a ^ "->" ^ b) mapping))) in
+  try
+    let result = run_sat ~caller_kind:"optional-symbolic-suffix-alpha-copy"
+      ~timeout_ms:(optional_timeout 5000) ~phase_selection:3 ~raw_unknown:true copied copied_gamma in
+    if bindings gamma <> gamma_before then exceptf "suffix alpha copy changed caller Gamma";
+    Option.is_none result
+  with SMT_unknown -> false
+
 (* Search for an existential witness using extra equalities, without changing
    the symbolic state. Only a native, validated SAT model of the complete
    strengthened query can decide the original query. UNSAT/unknown says nothing
    about the original inputs and must fall back. Keep this optimization limited
-   to total-mode feasibility with multiple UTF-16/Number variables or a direct
-   single-pair rounded-length equality. Other queries keep their existing path. *)
+   to total-mode feasibility with multiple UTF-16/Number variables, a direct
+   rounded-length equality, or the retained finite predecessor/ListNth shape.
+   The latter admits numeric zero, not an implied bitwise predecessor identity. *)
 let seeded_model fs gamma =
   let vars =
     Expr.Set.fold (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty
@@ -2204,7 +2927,7 @@ let seeded_model fs gamma =
     in
     let try_seed query =
       try
-        run_sat ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+        run_sat ~caller_kind:"optional-seeded-model" ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
           ~raw_unknown:true query gamma
       with SMT_unknown -> None
     in
@@ -2287,8 +3010,260 @@ let seeded_model fs gamma =
                 acc)
             names query
         in
+        (* Propagation only proposes additional witness values. It neither
+           proves an arithmetic identity nor changes the symbolic state. *)
+        let rec extend_values guesses =
+          let next = Expr.Set.fold (fun e acc ->
+            let add left right acc = match left, right with
+              | Expr.LVar x, Expr.BinOp (LVar from, (FPlus | FMinus as op), Lit (Num 1.))
+                when Hashtbl.find_opt gamma x = Some Type.NumberType
+                     && not (List.mem_assoc x acc) ->
+                (match List.assoc_opt from acc with
+                 | Some value -> (x, (if op = FPlus then value +. 1.
+                                      else value -. 1.)) :: acc
+                 | None -> acc)
+              | _ -> acc in
+            match e with
+            | BinOp (left, (Equal | ValueEqual), right) ->
+                add right left (add left right acc)
+            | _ -> acc) fs guesses in
+          if List.length next = List.length guesses then next else extend_values next
+        in
+        let seed_values initial query =
+          let initial = Expr.Set.fold (fun e acc -> match e with
+            | BinOp (LVar x, (Equal | ValueEqual), Lit (Num value))
+            | BinOp (Lit (Num value), (Equal | ValueEqual), LVar x)
+              when Hashtbl.find_opt gamma x = Some Type.NumberType
+                   && not (List.mem_assoc x acc) -> (x, value) :: acc
+            | _ -> acc) fs initial in
+          List.fold_left (fun acc (x, value) -> Expr.Set.add
+            (Expr.BinOp (LVar x, ValueEqual, Expr.num value)) acc)
+            query (extend_values initial)
+        in
+        (* Loop feasibility can need a concrete adjacent-index counter even
+           in queries without UTF-16 content operations. Keep the existing
+           character-position search unchanged for content queries. Otherwise
+           try zero and one with length one;
+           retain the complete formula and accept only a validated native model.
+           Failure leaves every existing search and the required query intact. *)
+        let advancing =
+          object
+            inherit [_] Visitors.iter as super
+            val mutable names = SS.empty
+            val mutable contents = false
+            method names = names
+            method observes_contents = contents
+            method! visit_expr () e =
+              (match e with
+              | BinOp (_, (Utf16Nth | Utf16CodeUnit | Utf16Cat | Utf16Less), _)
+              | UnOp (Utf16ToNumber, _) -> contents <- true
+              | BinOp (LVar x, (FPlus | FMinus), Lit (Num 1.))
+                when Hashtbl.find_opt gamma x = Some Type.NumberType ->
+                  names <- SS.add x names
+              | _ -> ());
+              super#visit_expr () e
+          end
+        in
+        Expr.Set.iter (advancing#visit_expr ()) fs;
+        (* A carried loop limit need not share the advancing counter's value.
+           Guess distinct roots and their adjacent derived values, retaining
+           every original equation. A native validated model, under the same
+           optional budget, is the only success; failed guesses still fall back. *)
+        let counter_roots = SS.inter roots advancing#names in
+        let carried_roots = SS.diff roots advancing#names in
+        let carried =
+          if advancing#observes_contents || SS.is_empty carried_roots then None
+          else
+            (* A chain can begin at an original literal-bound counter as well
+               as a free root. Those bindings remain in the full formula; here
+               they only guide a candidate model. *)
+            let literal_values = Expr.Set.fold (fun e acc -> match e with
+              | BinOp (LVar x, (Equal | ValueEqual), Lit (Num value))
+              | BinOp (Lit (Num value), (Equal | ValueEqual), LVar x)
+                when Hashtbl.find_opt gamma x = Some Type.NumberType
+                     && not (List.mem_assoc x acc) -> (x, value) :: acc
+              | _ -> acc) fs [] in
+            let initial = SS.fold (fun x acc -> (x, 0.) :: acc) counter_roots
+              (SS.fold (fun x acc -> (x, 1.) :: acc) carried_roots literal_values) in
+            let counter_initial = SS.fold (fun x acc -> (x, 0.) :: acc)
+              counter_roots literal_values in
+            if List.length (extend_values counter_initial) < List.length counter_initial + 2
+            then None else
+            (* A deeper adjacent chain may require distinct carried limits.
+               Raise only guessed free limits to observed lower guesses. This
+               never establishes a fact; all original bounds remain checked. *)
+            let rec carry_limits guesses =
+              let values = extend_values guesses in
+              let next = Expr.Set.fold (fun e acc -> match e with
+                | Expr.BinOp (LVar lower, FLessThanEqual, LVar upper)
+                  when SS.mem upper carried_roots ->
+                  (match List.assoc_opt lower values, List.assoc_opt upper acc with
+                   | Some value, Some old when value > old ->
+                       List.map (fun (name, guess) ->
+                         (name, if name = upper then value else guess)) acc
+                   | _ -> acc)
+                | _ -> acc) fs values in
+              if next = values then values else carry_limits next
+            in
+            let values = carry_limits initial in
+            (* Keep allocation bounded even when unrelated Number values are
+               large. Failed short guesses still reach the existing fallback. *)
+            let length = List.fold_left (fun bound (_, value) ->
+              if value >= 0. && value <= 8. && floor value = value
+              then max bound (int_of_float value) else bound) 2 values in
+            let value = Utils.Utf16.of_canonical (Utils.Utf16.of_code_units
+              (List.init length (fun _ -> 0x41))) in
+            let query = SS.fold
+              (fun string acc -> Expr.Set.add
+                (Expr.BinOp (LVar string, Equal,
+                  Lit (Utf16String value))) acc) length_strings fs in
+            let query = seed_values values query in
+            try_seed query
+        in
+        (* Some complete pure/list branch queries require a free counter
+           beyond the existing zero/one guesses. Literal lower bounds select
+           a small candidate only; all original assertions remain checked. *)
+        let root_guess x = Expr.Set.fold (fun e value ->
+          let bound lower strict =
+            if lower >= 0. && lower < 8. then
+              max value (if strict then floor lower +. 1. else ceil lower)
+            else value in
+          match e with
+          | BinOp (Lit (Num lower), FLessThan, LVar name) when name = x ->
+              bound lower true
+          | BinOp (Lit (Num lower), FLessThanEqual, LVar name)
+          | UnOp (Not, BinOp (LVar name, FLessThan, Lit (Num lower)))
+            when name = x -> bound lower false
+          | _ -> value) fs 0. in
+        let bounded =
+          if advancing#observes_contents
+             || not (SS.exists (fun x -> root_guess x > 1.) advancing#names)
+          then None else
+            (* A self-referential identity is not an assignment, but may
+               exclude its counter from the older free-root heuristic. *)
+            let guesses = SS.fold (fun x acc -> (x, root_guess x) :: acc)
+              (SS.union roots advancing#names) [] in
+            let query = SS.fold (fun string acc -> Expr.Set.add
+              (Expr.BinOp (LVar string, Equal,
+                Lit (Utf16String (Utils.Utf16.of_canonical "A")))) acc)
+              length_strings fs in
+            try_seed (seed_values guesses query)
+        in
+        (* Two adjacent units at a fixed zero index can arise during
+           predicate recovery. Select a code-unit hint from the observed
+           surrogate bounds; every fact remains in the complete SAT query. *)
+        let fixed_pair_index string =
+          Expr.Set.fold (fun assertion found -> match found with
+            | Some _ -> found
+            | None ->
+              let matches left right = match left, right with
+                | Expr.UnOp (IntToNum, UnOp (Utf16Len, LVar observed)),
+                  Expr.BinOp (BinOp (LVar index, FPlus, Lit (Num 1.)),
+                    FPlus, Lit (Num 1.)) when observed = string ->
+                  if Hashtbl.find_opt gamma index = Some Type.NumberType
+                    && (Expr.Set.mem (Expr.BinOp (LVar index, Equal, Expr.num 0.)) fs
+                        || Expr.Set.mem (Expr.BinOp (Expr.num 0., Equal, LVar index)) fs)
+                  then Some index else None
+                | _ -> None in
+              match assertion with
+              | Expr.BinOp (left, (Equal | ValueEqual), right) ->
+                  (match matches left right with Some _ as index -> index
+                   | None -> matches right left)
+              | _ -> None) fs None
+        in
+        let fixed_pair_strings = SS.filter (fun string ->
+          Option.is_some (fixed_pair_index string)) length_strings in
+        let unit_hint string position =
+          let code = Expr.BinOp (LVar string, Utf16CodeUnit,
+            UnOp (ToIntOp, position)) in
+          let lower bound = Expr.Set.mem
+            (Expr.BinOp (Expr.num bound, FLessThanEqual, code)) fs in
+          let upper bound = Expr.Set.mem
+            (Expr.BinOp (code, FLessThanEqual, Expr.num bound)) fs in
+          if lower 55296. && upper 56319. then 0xd800
+          else if lower 56320. && upper 57343. then 0xdc00
+          else if lower 55296. || lower 56320. then 0xe000
+          else 0x41
+        in
+        let fixed_pair =
+          if SS.is_empty fixed_pair_strings then None else
+          let query = SS.fold (fun string acc ->
+            let position = Expr.LVar (Option.get (fixed_pair_index string)) in
+            let next = Expr.BinOp (position, FPlus, Expr.num 1.) in
+            let value = Utils.Utf16.of_canonical (Utils.Utf16.of_code_units
+              [unit_hint string position; unit_hint string next]) in
+            Expr.Set.add (Expr.BinOp (LVar string, Equal,
+              Lit (Utf16String value))) acc) fixed_pair_strings fs in
+          let guesses = SS.fold (fun x acc -> (x, 1.) :: acc) roots [] in
+          try_seed (seed_values guesses query)
+        in
+        (* The one-unit shape includes ordinary units and lone high
+           surrogates. Select only a hint; all content/range facts and the
+           original complete-query validation remain authoritative. *)
+        let singleton_index string = List.find_opt (fun index ->
+          let pos = Expr.LVar index in
+          let rounded = Expr.UnOp (IntToNum, UnOp (Utf16Len, LVar string)) in
+          let next = Expr.BinOp (pos, FPlus, Expr.num 1.) in
+          let equal left right = List.exists (fun op ->
+            Expr.Set.mem (Expr.BinOp (left, op, right)) fs
+            || Expr.Set.mem (Expr.BinOp (right, op, left)) fs)
+            [ Equal; ValueEqual ] in
+          Hashtbl.find_opt gamma index = Some Type.NumberType
+          && equal pos (Expr.num 0.) && equal rounded next) (SS.elements vars) in
+        let singleton_strings = SS.filter (fun string ->
+          Option.is_some (singleton_index string)) length_strings in
+        let singleton =
+          if SS.is_empty singleton_strings then None else
+          let query = SS.fold (fun string acc ->
+            let position = Expr.LVar (Option.get (singleton_index string)) in
+            let value = Utils.Utf16.of_canonical (Utils.Utf16.of_code_units
+              [unit_hint string position]) in
+            Expr.Set.add (Expr.BinOp (LVar string, Equal,
+              Lit (Utf16String value))) acc) singleton_strings fs in
+          let guesses = SS.fold (fun x acc -> (x, 1.) :: acc) roots [] in
+          try_seed (seed_values guesses query)
+        in
+        let stepped =
+          match bounded with
+          | Some _ as witness -> witness
+          | None ->
+          match (match singleton with Some _ -> singleton
+            | None -> (match fixed_pair with Some _ -> fixed_pair | None -> carried)) with
+          | Some _ as witness -> witness
+          | None ->
+          if advancing#observes_contents || SS.is_empty advancing#names then None
+          else
+            let try_values names base = List.find_map
+              (fun value ->
+                let query = SS.fold
+                  (fun x acc -> Expr.Set.add
+                    (Expr.BinOp (LVar x, ValueEqual, Lit (Num value))) acc)
+                  names base in
+                try_seed query)
+              [ 0.; 1. ] in
+            match try_values advancing#names (with_length 1) with
+            | Some _ as witness -> witness
+            | None ->
+                (* Independent loops may need different counter values.
+                   Preserve the existing guesses, then use literal-bound values
+                   in this optional witness, including the literal zero sign.
+                   Original equalities remain; only a validated SAT model wins. *)
+                let fixed, base = Expr.Set.fold
+                  (fun e (names, query) -> match e with
+                   | BinOp (LVar x, (Equal | ValueEqual), Lit (Num value))
+                   | BinOp (Lit (Num value), (Equal | ValueEqual), LVar x)
+                     when SS.mem x advancing#names ->
+                       (SS.add x names, Expr.Set.add
+                         (Expr.BinOp (LVar x, ValueEqual, Lit (Num value))) query)
+                   | _ -> (names, query)) fs (SS.empty, with_length 1) in
+                let remaining = SS.diff advancing#names fixed in
+                if SS.is_empty remaining || SS.equal remaining advancing#names
+                then None else try_values remaining base
+        in
         let positioned =
-          if SS.is_empty numbers then None
+          match stepped with
+          | Some _ as witness -> witness
+          | None -> if SS.is_empty numbers then None
           else
             List.find_map
               (fun length ->
@@ -2308,7 +3283,87 @@ let seeded_model fs gamma =
            attempt preserves the full query and only a validated SAT model
            succeeds. *)
         | None -> List.find_map (fun n -> try_seed (with_length n)) [ 0; 1; 2 ])
-    | None -> None
+    | None ->
+        (* No rounded-length/content search is added here. For a pure/list
+           query, original small literal lower bounds may guide one complete
+           candidate after the unchanged all-zero attempt has failed. Guesses
+           never become state facts; only a native validated SAT model wins. *)
+        let contents =
+          object
+            inherit [_] Visitors.iter as super
+            val mutable seen = false
+            method seen = seen
+            method! visit_expr () e =
+              (match e with
+              | BinOp (_, (Utf16Nth | Utf16CodeUnit | Utf16Cat | Utf16Less
+                          | StrNth | StrCat | StrLess), _)
+              | UnOp ((Utf16Len | Utf16Trim | Utf16ToNumber | NumberToUtf16
+                      | StrLen | ToNumberOp | ToStringOp | StrToBytes), _) ->
+                  seen <- true
+              | _ -> ());
+              super#visit_expr () e
+          end
+        in
+        Expr.Set.iter (contents#visit_expr ()) fs;
+        if contents#seen then None else
+        let number x = Hashtbl.find_opt gamma x = Some Type.NumberType in
+        let literal_values = Expr.Set.fold (fun e acc -> match e with
+          | BinOp (LVar x, (Equal | ValueEqual), Lit (Num value))
+          | BinOp (Lit (Num value), (Equal | ValueEqual), LVar x)
+            when number x && not (List.mem_assoc x acc) -> (x,value)::acc
+          | _ -> acc) fs [] in
+        let root_guess x = Expr.Set.fold (fun e value ->
+          let bound lower strict =
+            if lower >= 0. && lower < 8. then
+              max value (if strict then floor lower +. 1. else ceil lower)
+            else value in
+          match e with
+          | BinOp (Lit (Num lower), FLessThan, LVar name) when name = x ->
+              bound lower true
+          | BinOp (Lit (Num lower), FLessThanEqual, LVar name)
+          | UnOp (Not, BinOp (LVar name, FLessThan, Lit (Num lower)))
+            when name = x -> bound lower false
+          | _ -> value) fs 0. in
+        let initial = SS.fold (fun x acc ->
+          let guess = root_guess x in
+          if number x && guess > 1. && not (List.mem_assoc x acc)
+          then (x,guess)::acc else acc) vars literal_values in
+        if List.length initial = List.length literal_values then None else
+        let value guesses = function
+          | Expr.LVar x -> List.assoc_opt x guesses
+          | Lit (Num n) -> Some n
+          | BinOp (LVar x, (FPlus | FMinus as op), Lit (Num 1.)) ->
+              Option.map (fun n -> if op = FPlus then n +. 1. else n -. 1.)
+                (List.assoc_opt x guesses)
+          | _ -> None in
+        let assign grow x guess acc =
+          if not (number x) || List.mem_assoc x literal_values then acc
+          else match List.assoc_opt x acc with
+          | None -> (x,guess)::acc
+          | Some old when grow && guess > old ->
+              List.map (fun (name,n) -> name,(if name = x then guess else n)) acc
+          | _ -> acc in
+        let step guesses = Expr.Set.fold (fun e acc ->
+          let equal left right acc = match left,value acc right with
+            | Expr.LVar x,Some n -> assign false x n acc | _ -> acc in
+          match e with
+          | BinOp (left,(Equal | ValueEqual),right) ->
+              equal right left (equal left right acc)
+          | BinOp (lower,(FLessThan | FLessThanEqual as op),LVar upper) ->
+              (match value acc lower with
+              | Some n -> assign true upper
+                  (if op = FLessThan then floor n +. 1. else n) acc
+              | None -> acc)
+          | _ -> acc) fs guesses in
+        (* Fixed rounds bound cyclic inequalities deterministically. No fixed
+           point, feasibility result, or arithmetic law is assumed. *)
+        let rec propagate remaining guesses =
+          if remaining = 0 then guesses
+          else propagate (remaining-1) (step guesses) in
+        let guesses = propagate (SS.cardinal vars) initial in
+        let query = List.fold_left (fun acc (x,n) -> Expr.Set.add
+          (Expr.BinOp (LVar x,ValueEqual,Expr.num n)) acc) fs guesses in
+        try_seed query
 
 (* Rounded-length upper-bound queries can combine expensive sequence and
    floating-point theories. First prove an exact index identity using original
@@ -2344,7 +3399,7 @@ let with_checked_index_identities fs gamma =
         in
         if
           (not (Expr.Set.is_empty premises))
-          && proves_unsat
+          && proves_unsat ~caller_kind:"optional-checked-index-identity"
                (Expr.Set.add (Expr.UnOp (Not, identity)) premises)
                gamma
         then Expr.Set.add identity augmented
@@ -2364,6 +3419,43 @@ let with_checked_index_identities fs gamma =
    actually reference a UTF-16 variable are eligible, because pure-numeric
    queries already use the cheaper path and the crash risk is specific to
    mixed UTF-16/Number formulas. *)
+(* A failed Number rank can be a disjunction of up to three negated
+   arithmetic conditions. Prove each branch impossible over original numeric
+   premises. Boolean case splitting and premise omission add no arithmetic law;
+   every branch still needs native UNSAT with unchanged binary64 semantics. *)
+let number_rank_cases fs gamma =
+  let rec number = function
+    | Expr.Lit (Num _) -> true
+    | LVar x -> Hashtbl.find_opt gamma x = Some Type.NumberType
+    | BinOp (a, (FPlus | FMinus), b) -> number a && number b
+    | _ -> false in
+  let atom = function
+    | Expr.UnOp (IsInt, e) -> number e
+    | BinOp (a, (Equal | ValueEqual | FLessThan | FLessThanEqual), b) ->
+        number a && number b
+    | _ -> false in
+  let rec difference = function
+    | Expr.BinOp (_, FMinus, _) -> true
+    | BinOp (a, _, b) -> difference a || difference b
+    | UnOp (_, e) -> difference e
+    | _ -> false in
+  let rec alternatives = function
+    | Expr.BinOp (a, Or, b) ->
+        (match alternatives a, alternatives b with
+         | Some a, Some b when List.length a + List.length b <= 3 -> Some (a @ b)
+         | _ -> None)
+    | (UnOp (Not, e) as failed) when atom e && difference e -> Some [ failed ]
+    | _ -> None in
+  let premises = Expr.Set.filter (function
+    | Expr.UnOp (Not, e) -> atom e
+    | e -> atom e) fs in
+  if Expr.Set.is_empty premises then None else
+  List.find_map (fun e -> match alternatives e with
+    | Some cases when List.length cases >= 2
+        && Expr.Set.cardinal premises + 1 < Expr.Set.cardinal fs ->
+        Some (List.map (fun failed -> Expr.Set.add failed premises) cases)
+    | _ -> None) (Expr.Set.elements fs)
+
 let numeric_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
   if not !Config.Verification.total then false
   else
@@ -2377,7 +3469,12 @@ let numeric_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
             (Expr.lvars e))
         fs
     in
-    if not has_utf16_ref then false
+    let rank_impossible = has_utf16_ref &&
+      (match number_rank_cases fs gamma with
+       | Some cases -> List.for_all (fun branch -> proves_unsat ~caller_kind:"optional-numeric-rank-case" branch gamma) cases
+       | None -> false) in
+    if rank_impossible then true
+    else if not has_utf16_ref then false
     else
       (* A conservative recursive numeric-term recognizer over the original
          gamma: a term is numeric iff it is a numeric literal, a variable of
@@ -2412,7 +3509,929 @@ let numeric_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
         (not (Expr.Set.is_empty subset))
         && Expr.Set.cardinal subset < Expr.Set.cardinal fs
       in
-      if not proper_nonempty then false else proves_unsat subset gamma
+      if not proper_nonempty then false else proves_unsat ~caller_kind:"optional-numeric-subset" subset gamma
+
+(* Sufficient UNSAT checks for observed mixed-theory obligations. Each selected
+   core consists of original expressions. The final length check uses an
+   explicitly weakened projection of an original core. We add no axioms and
+   never infer SAT from a subset or projection. At most one core per shape is
+   tried; native SAT/unknown preserves the complete fallback. *)
+let original_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
+  if (not !Config.Verification.total) || !Config.under_approximation then false
+  else
+    let expressions = Expr.Set.elements fs in
+    let core atoms =
+      let selected = Expr.Set.of_list atoms in
+      if
+        Expr.Set.cardinal selected = List.length atoms
+        && Expr.Set.subset selected fs
+        && Expr.Set.cardinal selected < Expr.Set.cardinal fs
+      then Some selected
+      else None
+    in
+    let try_shape select =
+      match List.find_map select expressions with
+      | None -> false
+      | Some selected -> proves_unsat ~caller_kind:"optional-original-core" selected gamma
+    in
+    let number = function
+      | Expr.LVar n -> Hashtbl.find_opt gamma n = Some Type.NumberType
+      | _ -> false
+    in
+    (* The original pair stays unchanged. ValueEqual assumptions are separate
+       exact-bit cases: native coverage must precede every native branch proof.
+       They are never labelled or cached as an original-subset core. *)
+    let literal_rank_split () =
+      let one n = Int64.bits_of_float n = Int64.bits_of_float 1. in
+      let rank_variable = function
+        | Expr.BinOp
+            ((BinOp ((UnOp (NumToInt,
+                BinOp (BinOp ((LVar _ as variable), FMinus, Lit (Num down)),
+                       FPlus, Lit (Num up))) as rank), ILessThan, Lit (Int zero))),
+             Or, BinOp (UnOp (NumToInt,
+                 BinOp (same_variable, FPlus, Lit (Num next))),
+               ILessThanEqual, same_rank))
+          when number variable && one down && one up && one next
+               && Z.equal zero Z.zero && Expr.equal variable same_variable
+               && Expr.equal rank same_rank -> Some variable
+        | _ -> None
+      in
+      let candidates = List.concat_map (fun failed ->
+        match rank_variable failed with
+        | None -> []
+        | Some variable -> List.filter_map (function
+            | (Expr.BinOp ((LVar _ as left), Equal, Lit (Num value)) as binding)
+            | (Expr.BinOp (Lit (Num value), Equal, (LVar _ as left)) as binding)
+              when Expr.equal left variable && Float.is_finite value
+                   && Option.is_some (core [binding; failed]) ->
+                Some (binding, failed, variable, value)
+            | _ -> None) expressions) expressions in
+      match candidates with
+      | [(binding, failed, variable, value)] ->
+          let values = if value = 0. then
+              [0.; Int64.float_of_bits Int64.min_int] else [value] in
+          let identities = List.map (fun value ->
+            Expr.BinOp (variable, ValueEqual, Expr.num value)) values in
+          let covered = match identities with
+            | [identity] -> identity
+            | [positive; negative] -> Expr.BinOp (positive, Or, negative)
+            | _ -> assert false in
+          proves_unsat
+            (Expr.Set.of_list [binding; Expr.UnOp (Not, covered)]) gamma
+          && List.for_all (fun identity -> proves_unsat
+               (Expr.Set.of_list [binding; failed; identity]) gamma) identities
+      | _ -> false
+    in
+    (* Select only two unchanged original atoms: a Number literal binding and
+       a comparison it contradicts. Host arithmetic chooses an optional core;
+       only native binary64 UNSAT proves anything about the complete query. *)
+    let literal_comparison = function
+      | (Expr.BinOp ((LVar x as variable),
+          ((FLessThan | FLessThanEqual) as op), Lit (Num bound)) as comparison)
+        when number variable ->
+          List.find_map (function
+            | (Expr.BinOp (LVar y, (Equal | ValueEqual), Lit (Num value)) as binding)
+            | (Expr.BinOp (Lit (Num value), (Equal | ValueEqual), LVar y) as binding)
+              when x = y && not (if op = FLessThan then value < bound
+                                 else value <= bound) -> core [ comparison; binding ]
+            | _ -> None) expressions
+      | (Expr.BinOp (Lit (Num bound),
+          ((FLessThan | FLessThanEqual) as op), (LVar x as variable)) as comparison)
+        when number variable ->
+          List.find_map (function
+            | (Expr.BinOp (LVar y, (Equal | ValueEqual), Lit (Num value)) as binding)
+            | (Expr.BinOp (Lit (Num value), (Equal | ValueEqual), LVar y) as binding)
+              when x = y && not (if op = FLessThan then bound < value
+                                 else bound <= value) -> core [ comparison; binding ]
+            | _ -> None) expressions
+      | _ -> None
+    in
+    let finite_add = function
+      | (Expr.UnOp
+           (Not, BinOp ((BinOp ((LVar _ as p), FPlus, Lit (Num 1.)) as sum),
+                        Equal, same)) as failed)
+        when Expr.equal sum same && number p ->
+          core [ failed; Expr.UnOp (IsInt, p) ]
+      | _ -> None
+    in
+    let code_upper = function
+      | (Expr.UnOp
+           (Not, BinOp ((BinOp (_, Utf16CodeUnit, _) as code),
+                        FLessThanEqual, (Lit (Num _) as bound))) as failed) ->
+          core [ failed; Expr.UnOp (Not, BinOp (bound, FLessThan, code)) ]
+      | _ -> None
+    in
+    let length_index = function
+      | (Expr.BinOp
+           ((UnOp (Utf16Len, LVar s) as length), ILessThanEqual,
+            UnOp (NumToInt, UnOp (ToIntOp,
+              (BinOp ((LVar _ as p), FPlus, Lit (Num 1.)) as index)))) as failed)
+        when Hashtbl.find_opt gamma s = Some Type.Utf16Type && number p ->
+          let rounded = Expr.UnOp (IntToNum, length) in
+          (* Find existing Number-length and nonnegative counter links. The
+             exact safe-integer bounds remain original premises, not axioms. *)
+          List.find_map
+            (function
+              | (Expr.BinOp ((LVar _ as n), Equal, rhs) as link)
+                when Expr.equal rhs rounded && number n ->
+                  List.find_map
+                    (function
+                      | (Expr.BinOp (Lit (Num 0.), FLessThanEqual,
+                                     (LVar _ as count)) as nonnegative)
+                        when number count ->
+                          core
+                            [ failed;
+                              Expr.UnOp (Not, BinOp (rounded, FLessThanEqual,
+                                                     UnOp (ToIntOp, index)));
+                              Expr.UnOp (IsInt, p);
+                              nonnegative;
+                              Expr.BinOp (count, FLessThanEqual, p);
+                              link;
+                              Expr.BinOp (n, FLessThanEqual,
+                                          Lit (Num 9007199254740991.));
+                              Expr.BinOp (p, FLessThan, n);
+                              Expr.BinOp (length, ILessThanEqual,
+                                          Lit (Int (Z.of_string "9007199254740991")));
+                              Expr.BinOp (index, FLessThan, n) ]
+                      | _ -> None)
+                    expressions
+              | _ -> None)
+            expressions
+      | _ -> None
+    in
+    let mask_test code =
+      Expr.BinOp
+        (BinOp (UnOp (ToInt32Op, code), BitwiseAndF, Lit (Num 64512.)),
+         Equal, Lit (Num 56320.))
+    in
+    let mask_lower = function
+      | (Expr.UnOp
+           (Not, BinOp (Lit (Num 56320.), FLessThanEqual,
+                        (BinOp (_, Utf16CodeUnit, _) as code))) as failed) ->
+          core [ failed; mask_test code ]
+      | _ -> None
+    in
+    let mask_upper = function
+      | (Expr.UnOp
+           (Not, BinOp ((BinOp (_, Utf16CodeUnit, _) as code),
+                        FLessThanEqual, Lit (Num 57343.))) as failed) ->
+          core [ failed; mask_test code ]
+      | _ -> None
+    in
+    let mask_complement = function
+      | (Expr.UnOp
+           (Not, BinOp (Lit (Num 57343.), FLessThan,
+                        (BinOp (_, Utf16CodeUnit, _) as code))) as failed) ->
+          core [ failed;
+                 Expr.UnOp (Not, BinOp (code, FLessThan, Lit (Num 56320.)));
+                 Expr.UnOp (Not, mask_test code) ]
+      | _ -> None
+    in
+    let length_projection = function
+      | (Expr.BinOp
+           ((UnOp (IntToNum, UnOp (Utf16Len, LVar s)) as rounded),
+            FLessThanEqual, (UnOp (ToIntOp,
+              (BinOp ((LVar _ as p), FPlus, Lit (Num 1.)) as sum)) as index))
+         as failed)
+        when Hashtbl.find_opt gamma s = Some Type.Utf16Type && number p ->
+          List.find_map
+            (function
+              | (Expr.BinOp ((LVar _ as n), Equal, rhs) as link)
+                when Expr.equal rhs rounded && number n ->
+                  let integral = Expr.UnOp (IsInt, p) in
+                  let below = Expr.BinOp (sum, FLessThan, n) in
+                  (match core [ failed; integral; link; below ] with
+                  | None -> None
+                  | Some _ ->
+                      (* IntToNum produces a Number. Replacing this identical
+                         subterm twice with one unconstrained fresh Number is
+                         an overapproximation: every original model extends to
+                         a projected model. Only native UNSAT can conclude.
+                         Generic Number comparison also drops the specialised
+                         UTF-16 index guard; that only weakens the formula. *)
+                      let names = Expr.Set.fold
+                        (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty in
+                      let rec fresh i =
+                        let name = "#utf16_length_projection_" ^ string_of_int i in
+                        if Hashtbl.mem gamma name || SS.mem name names then
+                          fresh (i + 1)
+                        else name
+                      in
+                      let name = fresh 0 in
+                      let abstract = Expr.LVar name in
+                      let projected_gamma = Hashtbl.copy gamma in
+                      Hashtbl.add projected_gamma name Type.NumberType;
+                      Some
+                        (Expr.Set.of_list
+                           [ integral;
+                             Expr.BinOp (n, Equal, abstract);
+                             Expr.BinOp (abstract, FLessThanEqual, index);
+                             below ], projected_gamma))
+              | _ -> None)
+            expressions
+      | _ -> None
+    in
+    (* A list-prefix restoration check may retain a concrete list equal to
+       prefix ++ suffix while asking whether take(list, length-list - suffix)
+       ++ suffix differs. Submit only that original equality and failed goal;
+       native UNSAT proves the larger conjunction. No list law is assumed. *)
+    let list_prefix = function
+      | (Expr.UnOp (Not, BinOp ((EList items as values),
+          (Equal | ValueEqual), NOp (LstCat,
+            [ LstSub (whole, Lit (Int zero), length); (LVar tail as suffix) ])))
+          as failed)
+        when Z.equal zero Z.zero
+          && Hashtbl.find_opt gamma tail = Some Type.ListType ->
+          let expected = Expr.BinOp
+            (Expr.Lit (Int (Z.of_int (List.length items))), IPlus,
+             BinOp (Lit (Int Z.minus_one), ITimes, UnOp (LstLen, suffix))) in
+          if not (Expr.equal length expected) then None else
+          List.find_map (function
+            | (Expr.BinOp (left, (Equal | ValueEqual), right) as link)
+              when (Expr.equal left values && Expr.equal right whole)
+                || (Expr.equal right values && Expr.equal left whole) ->
+                core [ failed; link ]
+            | _ -> None) expressions
+      | _ -> None
+    in
+    (* The inverse prefix check asks whether the concatenated prefix itself
+       differs from take(prefix ++ suffix, known-length - suffix-length).
+       Only the original decomposition and failed goal are submitted. *)
+    let list_prefix_only = function
+      | (Expr.UnOp (Not, BinOp ((NOp (LstCat, _) as prefix),
+          (Equal | ValueEqual), LstSub ((NOp (LstCat, parts) as whole),
+            Lit (Int zero), length))) as failed)
+        when Z.equal zero Z.zero ->
+          (match List.rev parts with
+           | (LVar tail as suffix) :: before
+             when Hashtbl.find_opt gamma tail = Some Type.ListType
+               && Expr.equal prefix (Expr.NOp (LstCat, List.rev before)) ->
+               List.find_map (function
+                 | (Expr.BinOp ((EList items), (Equal | ValueEqual), right) as link)
+                   when Expr.equal right whole ->
+                     let expected = Expr.BinOp
+                       (Expr.Lit (Int (Z.of_int (List.length items))), IPlus,
+                        BinOp (Lit (Int Z.minus_one), ITimes,
+                          UnOp (LstLen, suffix))) in
+                     if Expr.equal length expected then core [ failed; link ]
+                     else None
+                 | _ -> None) expressions
+           | _ -> None)
+      | _ -> None
+    in
+    (* Keep275 q472/q478 retain a symbolic prefix followed by one head.
+       Select only the failed original equality and its two original length
+       links. No sequence law, witness, projection or fresh fact is added;
+       only native UNSAT of this proper original-expression subset suffices. *)
+    let symbolic_slice_info = function
+      | (Expr.LstSub
+           (NOp (LstCat, [ (LVar before as prefix); (EList [ LVar head ] as one); LVar tail ]),
+            Lit (Int zero),
+            (UnOp (NumToInt, BinOp ((LVar index as counter), FPlus, Lit (Num step))) as length)))
+        when Z.equal zero Z.zero && step = 1.
+          && Hashtbl.find_opt gamma before = Some Type.ListType
+          && Hashtbl.find_opt gamma tail = Some Type.ListType
+          && Hashtbl.find_opt gamma head = Some Type.Utf16Type
+          && Hashtbl.find_opt gamma index = Some Type.NumberType ->
+          Some (Expr.NOp (LstCat, [ prefix; one ]), prefix, counter, length)
+      | _ -> None
+    in
+    let symbolic_slice_core failed slice =
+      match symbolic_slice_info slice with
+      | None -> None
+      | Some (_, prefix, counter, length) ->
+          let count = Expr.UnOp (NumToInt, counter) in
+          let find_link a b = List.find_opt (function
+            | Expr.BinOp (left, (Equal | ValueEqual), right) ->
+                (Expr.equal left a && Expr.equal right b)
+                || (Expr.equal right a && Expr.equal left b)
+            | _ -> false) expressions in
+          (match find_link count (Expr.UnOp (LstLen, prefix)),
+             find_link length (Expr.BinOp (Expr.int 1, IPlus, count)) with
+          | Some prefix_length, Some successor -> core [ failed; prefix_length; successor ]
+          | _ -> None)
+    in
+    let symbolic_prefix_slice = function
+      | (Expr.UnOp (Not, BinOp (left, (Equal | ValueEqual), right)) as failed) ->
+          let select prefix slice = match symbolic_slice_info slice with
+            | Some (expected, _, _, _) when Expr.equal prefix expected ->
+                symbolic_slice_core failed slice
+            | _ -> None in
+          (match select left right with Some _ as selected -> selected
+           | None -> select right left)
+      | _ -> None
+    in
+    let symbolic_prefix_cons = function
+      | (Expr.UnOp (Not, BinOp (left, (Equal | ValueEqual), right)) as failed) ->
+          let select slice = function
+            | Expr.NOp (LstCat,
+                [ EList [ BinOp (LstSub (same, Lit (Int zero), Lit (Int one)),
+                    LstNth, Lit (Int index)) ]; UnOp (Cdr, rest) ])
+              when Z.equal zero Z.zero && Z.equal one Z.one && Z.equal index Z.zero
+                && Expr.equal same slice && Expr.equal rest slice ->
+                symbolic_slice_core failed slice
+            | _ -> None in
+          (match select left right with Some _ as selected -> selected
+           | None -> select right left)
+      | _ -> None
+    in
+    (* Keep276 q474/q476 ask for the suffix after the symbolic prefix/head.
+       Keep the exact integer length AST and both original length links;
+       only native UNSAT of this proper original subset can discharge it. *)
+    let symbolic_suffix_slice = function
+      | (Expr.UnOp (Not, BinOp (left, (Equal | ValueEqual), right)) as failed) ->
+          let select suffix = function
+            | Expr.LstSub
+                (NOp (LstCat, [ (LVar before as prefix); EList [ LVar head ];
+                   (LVar tail as rest) ]),
+                 (UnOp (NumToInt, BinOp ((LVar index as counter), FPlus,
+                    Lit (Num step))) as start), length)
+              when step = 1. && Expr.equal suffix rest
+                && Hashtbl.find_opt gamma before = Some Type.ListType
+                && Hashtbl.find_opt gamma tail = Some Type.ListType
+                && Hashtbl.find_opt gamma head = Some Type.Utf16Type
+                && Hashtbl.find_opt gamma index = Some Type.NumberType ->
+                let expected = Expr.BinOp (Expr.int 1, IPlus,
+                  BinOp (BinOp (UnOp (LstLen, rest), IPlus, UnOp (LstLen, prefix)),
+                    IPlus, BinOp (Expr.int (-1), ITimes, start))) in
+                if not (Expr.equal length expected) then None else
+                let count = Expr.UnOp (NumToInt, counter) in
+                let find_link a b = List.find_opt (function
+                  | Expr.BinOp (left, (Equal | ValueEqual), right) ->
+                      (Expr.equal left a && Expr.equal right b)
+                      || (Expr.equal right a && Expr.equal left b)
+                  | _ -> false) expressions in
+                (match find_link count (Expr.UnOp (LstLen, prefix)),
+                   find_link start (Expr.BinOp (Expr.int 1, IPlus, count)) with
+                 | Some prefix_length, Some successor ->
+                     let integer = Expr.UnOp (IsInt, counter) in
+                     let nonnegative = Expr.BinOp (Expr.num 0., FLessThanEqual, counter) in
+                     let upper = Expr.BinOp (counter, FLessThanEqual, Expr.num 4294967294.) in
+                     if List.for_all (fun premise -> Expr.Set.mem premise fs)
+                       [ integer; nonnegative; upper ] then
+                        Option.map (fun selected -> selected,
+                          [before,Type.ListType;tail,Type.ListType;
+                           head,Type.Utf16Type;index,Type.NumberType])
+                          (core [ failed; prefix_length; successor;
+                            integer; nonnegative; upper ])
+                     else None
+                 | _ -> None)
+            | _ -> None in
+          (match select left right with Some _ as selected -> selected
+           | None -> select right left)
+      | _ -> None
+    in
+    let try_symbolic caller_kind select =
+      match List.find_map select expressions with
+      | None -> false
+      | Some selected -> proves_unsat ~caller_kind selected gamma
+    in
+    let try_suffix () =
+      match List.find_map symbolic_suffix_slice expressions with
+      | None -> false
+      | Some (selected,roles) -> suffix_alpha_copy fs selected gamma roles
+          || proves_unsat ~caller_kind:"optional-symbolic-suffix-slice" selected gamma
+    in
+    let try_projection () =
+      match List.find_map length_projection expressions with
+      | None -> false
+      | Some (projected, projected_gamma) ->
+          proves_unsat ~caller_kind:"optional-length-projection" projected projected_gamma
+    in
+    (* Select only unchanged original atoms. Even a licensed finite-literal
+       shape is merely a candidate: native UNSAT remains authoritative. *)
+    let subtraction_ceiling = function
+      | (Expr.UnOp (Not,
+           BinOp (BinOp (Lit (Num c), FMinus, (LVar name as variable)),
+                  FLessThanEqual, Lit (Num ceiling))) as failed)
+        when number variable && Float.is_finite c
+             && Float.is_finite ceiling && c <= ceiling ->
+          let nonnegative = List.find_opt (function
+            | Expr.BinOp (Lit (Num zero), FLessThanEqual, LVar same) ->
+                same = name && zero = 0.
+            | _ -> false) expressions in
+          (* Choose the weakest eligible retained upper, never a derived one.
+             Equal literal values keep the first original atom in Set order. *)
+          let upper = List.fold_left (fun chosen -> function
+            | (Expr.BinOp (LVar same, FLessThanEqual, Lit (Num limit)) as atom)
+              when same = name && Float.is_finite limit && limit >= 0. ->
+                (match chosen with
+                 | Some (previous, _) when previous >= limit -> chosen
+                 | _ -> Some (limit, atom))
+            | _ -> chosen) None expressions in
+          (match nonnegative, upper with
+           | Some lower, Some (_, upper) -> core [failed; lower; upper]
+           | _ -> None)
+      | (Expr.UnOp (Not,
+           BinOp (Lit (Num floor), FLessThanEqual,
+                  BinOp (Lit (Num c), FMinus, (LVar name as variable)))) as failed)
+        when number variable && Float.is_finite floor
+             && Float.is_finite c && floor <= 0. ->
+          (* The retained upper excludes NaN/+Infinity. Negative infinity
+             gives +Infinity; finite x <= c gives a nonnegative difference.
+             This only selects an original pair for native UNSAT validation. *)
+          let upper = List.fold_left (fun chosen -> function
+            | (Expr.BinOp (LVar same, FLessThanEqual, Lit (Num limit)) as atom)
+              when same = name && Float.is_finite limit && limit <= c ->
+                (match chosen with
+                 | Some (previous, _) when previous >= limit -> chosen
+                 | _ -> Some (limit, atom))
+            | _ -> chosen) None expressions in
+          (match upper with
+           | Some (_, upper) -> core [failed; upper]
+           | None -> None)
+      | (Expr.UnOp (Not,
+           BinOp (Lit (Num floor), FLessThanEqual,
+             BinOp (Lit (Num c), FMinus,
+               BinOp ((LVar name as variable), FPlus, Lit (Num step))))) as failed)
+        when number variable && Float.is_finite floor && Float.is_finite c
+             && Float.is_finite step && floor <= 0. ->
+          (* Keep the original alias and matching addition, never substitute.
+             Multiple one-hop alias atoms are deliberately ineligible. *)
+          let aliases = List.filter_map (function
+            | (Expr.BinOp (LVar left, Equal, LVar right) as atom)
+              when left = name && right <> name && number (Expr.LVar right) ->
+                Some (right, atom)
+            | (Expr.BinOp (LVar left, Equal, LVar right) as atom)
+              when right = name && left <> name && number (Expr.LVar left) ->
+                Some (left, atom)
+            | _ -> None) expressions in
+          (match aliases with
+           | [(alias, link)] ->
+               let upper = List.fold_left (fun chosen -> function
+                 | (Expr.BinOp
+                      (BinOp (LVar same, FPlus, Lit (Num amount)),
+                       FLessThanEqual, Lit (Num limit)) as atom)
+                   when same = alias && Float.is_finite limit && limit <= c
+                        && Int64.bits_of_float amount = Int64.bits_of_float step ->
+                     (match chosen with
+                      | Some (previous, _) when previous >= limit -> chosen
+                      | _ -> Some (limit, atom))
+                 | _ -> chosen) None expressions in
+               (match upper with
+                | Some (_, upper) -> core [failed; link; upper]
+                | None -> None)
+           | _ -> None)
+      | _ -> None
+    in
+    (* A candidate original pair, never an assumed binary64 order law. *)
+    let strict_order_successor = function
+      | (Expr.UnOp (Not,
+           BinOp ((LVar _ as lower), FLessThan,
+                  BinOp ((LVar _ as upper), FPlus, Lit (Num 1.)))) as failed)
+        when number lower && number upper ->
+          List.find_map (function
+            | (Expr.BinOp (left, FLessThan, right) as ordered)
+              when Expr.equal left lower && Expr.equal right upper ->
+                core [failed; ordered]
+            | _ -> None) expressions
+      | _ -> None
+    in
+    literal_rank_split () || try_shape literal_comparison || try_shape finite_add
+    || try_shape code_upper || try_shape length_index
+    || try_shape mask_lower || try_shape mask_upper || try_shape mask_complement
+    || try_shape list_prefix || try_shape list_prefix_only || try_projection ()
+    || try_symbolic "optional-symbolic-prefix-slice" symbolic_prefix_slice
+    || try_symbolic "optional-symbolic-prefix-cons" symbolic_prefix_cons
+    || try_suffix () || try_shape subtraction_ceiling
+    || try_shape strict_order_successor
+
+(* Small bounded natural counters guide only an optional complete-query
+   model search. Native SAT must validate every original assertion; a failed
+   hint leaves all existing searches and the required-query policy unchanged. *)
+let natural_counter_model fs gamma =
+  (* Existing UTF16 witness paths keep their query order and bounds. *)
+  let strings = object
+    inherit [_] Visitors.iter as super
+    val mutable observed = false
+    method observed = observed
+    method! visit_expr () e =
+      (match e with
+       | Expr.Lit (Utf16String _ | String _)
+       | Expr.UnOp ((Utf16Len | Utf16ToNumber), _)
+       | Expr.BinOp (_, (Utf16Nth | Utf16CodeUnit | Utf16Cat | Utf16Less), _) ->
+           observed <- true
+       | Expr.LVar x when Hashtbl.find_opt gamma x = Some Type.Utf16Type
+           || Hashtbl.find_opt gamma x = Some Type.StringType -> observed <- true
+       | _ -> ());
+      super#visit_expr () e
+  end in
+  Expr.Set.iter (strings#visit_expr ()) fs;
+  let counters = Expr.Set.fold (fun assertion names -> match assertion with
+    | Expr.UnOp (IsInt, LVar x)
+      when Hashtbl.find_opt gamma x = Some Type.NumberType ->
+        let nonnegative = Expr.Set.mem
+          (Expr.BinOp (Expr.num 0., FLessThanEqual, LVar x)) fs
+          || Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThan, LVar x)) fs in
+        let bounded = Expr.Set.exists (function
+          | Expr.BinOp (LVar y, FLessThanEqual, Lit (Num limit))
+            when x = y -> limit >= 0. && limit <= 9007199254740991.
+          | _ -> false) fs in
+        if nonnegative && bounded then SS.add x names else names
+    | _ -> names) fs SS.empty in
+  (* A single literal-bounded natural counter can also guide its original
+     nonnegative integral predecessor. This selects a complete-query witness
+     attempt only: no transitive bound or type is added to the symbolic state.
+     Keep all existing multi-counter hints byte-for-byte on their old path. *)
+  let ordered_lower =
+    if SS.cardinal counters <> 1 then None else
+    List.find_map (function
+      | Expr.BinOp (LVar lower, FLessThan, LVar upper)
+        when lower <> upper && SS.mem upper counters
+          && Hashtbl.find_opt gamma lower = Some Type.NumberType
+          && Expr.Set.mem (Expr.UnOp (IsInt, LVar lower)) fs
+          && (Expr.Set.mem
+                (Expr.BinOp (Expr.num 0., FLessThanEqual, LVar lower)) fs
+              || Expr.Set.mem
+                (Expr.BinOp (Expr.num 0., FLessThan, LVar lower)) fs) ->
+          Some lower
+      | _ -> None) (Expr.Set.elements fs) in
+  let hinted_counters = match ordered_lower with
+    | Some lower -> SS.add lower counters
+    | None -> counters in
+  if not !Config.Verification.total || strings#observed
+     || SS.cardinal hinted_counters < 2 then None else
+  let query = SS.fold (fun x acc ->
+    let literal = Expr.Set.fold (fun assertion found -> match found, assertion with
+      | None, Expr.BinOp (LVar y, (Equal | ValueEqual), Lit (Num value))
+      | None, Expr.BinOp (Lit (Num value), (Equal | ValueEqual), LVar y)
+        when x = y -> Some value
+      | _ -> found) fs None in
+    Expr.Set.add (Expr.BinOp (LVar x, ValueEqual,
+      Expr.num (Option.value literal
+        ~default:(if ordered_lower = Some x then 0. else 1.)))) acc)
+    hinted_counters fs in
+  if Expr.Set.equal query fs then None else
+  try run_sat ~caller_kind:"optional-natural-counter" ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+      ~raw_unknown:true query gamma
+  with SMT_unknown -> None
+
+(* Previously-ineligible one-head trim feasibility may use a small existential
+   witness. Preserve all old UTF16/rounded-length searches. Every hint is added
+   only to the complete native query; no symbolic fact or type is produced. *)
+let trimmed_counter_model fs gamma =
+  let vars = Expr.Set.fold (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty in
+  let of_type typ = SS.filter (fun x -> Hashtbl.find_opt gamma x = Some typ) vars in
+  let heads = of_type Type.Utf16Type and numbers = of_type Type.NumberType in
+  let rounded = object
+    inherit [_] Visitors.iter as super
+    val mutable observed = false
+    method observed = observed
+    method! visit_expr () e =
+      (match e with Expr.UnOp (IntToNum, UnOp (Utf16Len, _)) -> observed <- true
+       | _ -> ()); super#visit_expr () e
+  end in
+  Expr.Set.iter (rounded#visit_expr ()) fs;
+  if not !Config.Verification.total || SS.cardinal heads <> 1
+     || SS.cardinal numbers <> 3 || rounded#observed
+     || not (SS.is_empty (of_type Type.StringType)) then None else
+  let head = SS.choose heads in
+  let empty = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical "")) in
+  let trimmed = Expr.UnOp (Utf16Trim, Expr.LVar head) in
+  let trim_empty = Expr.Set.exists (function
+    | Expr.BinOp (left, (Equal | ValueEqual), right) ->
+        (left = trimmed && right = empty) || (left = empty && right = trimmed)
+    | _ -> false) fs in
+  let bounded_integer x = SS.mem x numbers
+    && Expr.Set.mem (Expr.UnOp (IsInt, LVar x)) fs
+    && Expr.Set.exists (function
+      | Expr.BinOp (LVar y, FLessThanEqual, Lit (Num limit)) when x = y ->
+          limit >= 0. && limit <= 9007199254740991.
+      | _ -> false) fs in
+  let natural x = bounded_integer x && Expr.Set.mem
+    (Expr.BinOp (Expr.num 0., FLessThanEqual, LVar x)) fs in
+  let shape = if not trim_empty then None else
+    List.find_map (function
+      | Expr.BinOp (LVar lower, FLessThan, LVar upper)
+        when lower <> upper && natural lower && bounded_integer upper ->
+          let remaining = SS.remove upper (SS.remove lower numbers) in
+          let position = SS.choose remaining in
+          if natural position && Expr.Set.mem
+            (Expr.BinOp (LVar position, FLessThanEqual, LVar lower)) fs
+          then Some (lower,upper,position) else None
+      | _ -> None) (Expr.Set.elements fs) in
+  match shape with None -> None | Some (lower,upper,position) ->
+  let literal name default =
+    Expr.Set.fold (fun assertion found -> match found, assertion with
+      | None, Expr.BinOp (LVar x, (Equal | ValueEqual), (Lit _ as value))
+      | None, Expr.BinOp ((Lit _ as value), (Equal | ValueEqual), LVar x)
+        when x = name -> Some value
+      | _ -> found) fs None |> Option.value ~default in
+  let query = List.fold_left (fun acc (name,default) -> Expr.Set.add
+    (Expr.BinOp (LVar name, ValueEqual, literal name default)) acc) fs
+    [lower,Expr.num 0.; upper,Expr.num 1.; position,Expr.num 0.; head,empty] in
+  try run_sat ~caller_kind:"optional-trimmed-counter" ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+      ~raw_unknown:true query gamma
+  with SMT_unknown -> None
+
+(* A nonblank trimmed head may use its own bounded complete-query witness.
+   Keep this after every old witness attempt. Literal pins are respected, and
+   only native SAT for the full original frame plus hints returns a model. *)
+let nonblank_counter_model fs gamma =
+  let vars = Expr.Set.fold (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty in
+  let of_type typ = SS.filter (fun x -> Hashtbl.find_opt gamma x = Some typ) vars in
+  let heads = of_type Type.Utf16Type and numbers = of_type Type.NumberType in
+  let rounded = object
+    inherit [_] Visitors.iter as super
+    val mutable observed = false
+    method observed = observed
+    method! visit_expr () e =
+      (match e with Expr.UnOp (IntToNum, UnOp (Utf16Len, _)) -> observed <- true
+       | _ -> ()); super#visit_expr () e
+  end in
+  Expr.Set.iter (rounded#visit_expr ()) fs;
+  if not !Config.Verification.total || SS.cardinal heads <> 1
+     || SS.cardinal numbers < 3 || rounded#observed
+     || not (SS.is_empty (of_type Type.StringType)) then None else
+  let head = SS.choose heads in
+  let empty = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical "")) in
+  let trimmed = Expr.UnOp (Utf16Trim, Expr.LVar head) in
+  let trim_nonblank = Expr.Set.exists (function
+    | Expr.UnOp (Not, Expr.BinOp (left, (Equal | ValueEqual), right)) ->
+        (left = trimmed && right = empty) || (left = empty && right = trimmed)
+    | _ -> false) fs in
+  let bounded_integer x = SS.mem x numbers
+    && Expr.Set.mem (Expr.UnOp (IsInt, LVar x)) fs
+    && Expr.Set.exists (function
+      | Expr.BinOp (LVar y, FLessThanEqual, Lit (Num limit)) when x = y ->
+          limit >= 0. && limit <= 9007199254740991.
+      | _ -> false) fs in
+  let natural x = bounded_integer x && Expr.Set.mem
+    (Expr.BinOp (Expr.num 0., FLessThanEqual, LVar x)) fs in
+  let shape = if not trim_nonblank then None else
+    List.find_map (function
+      | Expr.BinOp (LVar lower, FLessThan, LVar upper)
+        when lower <> upper && natural lower && bounded_integer upper ->
+          let remaining = SS.remove upper (SS.remove lower numbers) in
+          let positions = SS.filter (fun position -> natural position
+            && Expr.Set.mem
+              (Expr.BinOp (LVar position, FLessThanEqual, LVar lower)) fs)
+            remaining in
+          (* Extra Number variables license no role; ambiguous positions
+             leave the original complete-query fallback untouched. *)
+          (match SS.elements positions with
+           | [position] -> Some (lower,upper,position)
+           | _ -> None)
+      | _ -> None) (Expr.Set.elements fs) in
+  match shape with None -> None | Some (lower,upper,position) ->
+  let literal name default =
+    Expr.Set.fold (fun assertion found -> match found, assertion with
+      | None, Expr.BinOp (LVar x, (Equal | ValueEqual), (Lit _ as value))
+      | None, Expr.BinOp ((Lit _ as value), (Equal | ValueEqual), LVar x)
+        when x = name -> Some value
+      | _ -> found) fs None |> Option.value ~default in
+  let distinct_counters =
+    Expr.Set.mem (Expr.UnOp (Not, Expr.BinOp (LVar lower, ValueEqual, LVar position))) fs
+    || Expr.Set.mem (Expr.UnOp (Not, Expr.BinOp (LVar position, ValueEqual, LVar lower))) fs in
+  let lower_default,upper_default = if distinct_counters then 1.,2. else 0.,1. in
+  let make_query default_head = List.fold_left (fun acc (name,default) -> Expr.Set.add
+    (Expr.BinOp (LVar name, ValueEqual, literal name default)) acc) fs
+    [lower,Expr.num lower_default; upper,Expr.num upper_default; position,Expr.num 0.; head,Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical default_head))] in
+  let attempt caller_kind query =
+    try run_sat ~caller_kind ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+      ~raw_unknown:true query gamma
+    with SMT_unknown -> None in
+  let original_query = make_query "a" in
+  match attempt "optional-nonblank-counter" original_query with
+  | Some _ as witness -> witness
+  | None ->
+      let whitespace_query = make_query " a" in
+      if Expr.Set.equal original_query whitespace_query then None
+      else attempt "optional-nonblank-whitespace-counter" whitespace_query
+
+
+(* Neutral collection values guide only a complete-query SAT attempt. All
+   retained formulas/types remain; failed hints cannot decide the original. *)
+let neutral_collection_model fs gamma =
+  if not !Config.Verification.total || !Config.under_approximation then None else
+  let vars = Expr.Set.fold (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty in
+  let of_type typ = SS.filter (fun x -> Hashtbl.find_opt gamma x = Some typ) vars in
+  let numbers = of_type Type.NumberType and sets = of_type Type.SetType
+  and lists = of_type Type.ListType in
+  if SS.cardinal vars <> 4 || SS.cardinal numbers <> 2
+     || SS.cardinal sets <> 1 || SS.cardinal lists <> 1 then None else
+  let keys = SS.choose sets and values = SS.choose lists in
+  let absent = Expr.Set.exists (function
+    | Expr.UnOp (Not, BinOp (_, SetMem, LVar x)) -> x = keys
+    | _ -> false) fs in
+  let length_guard = Expr.Set.mem
+    (Expr.BinOp (Expr.int 0, ILessThanEqual, UnOp (LstLen, LVar values))) fs in
+  let shapes = List.filter_map (function
+    | Expr.BinOp (LVar lower, FLessThanEqual, LVar upper)
+      when lower <> upper && SS.mem lower numbers && SS.mem upper numbers ->
+        let bounded = Expr.Set.exists (function
+          | Expr.BinOp (LVar x, FLessThanEqual, Lit (Num limit)) when x = upper ->
+              Float.is_finite limit && limit >= 0. && limit <= 9007199254740991.
+          | _ -> false) fs in
+        let retained = List.for_all (fun e -> Expr.Set.mem e fs)
+          [Expr.UnOp (IsInt, LVar lower); Expr.UnOp (IsInt, LVar upper);
+           Expr.BinOp (Expr.num 0., FLessThanEqual, LVar lower);
+           Expr.BinOp (Expr.int 0, ILessThanEqual,
+             UnOp (NumToInt, BinOp (LVar upper, FMinus, LVar lower)))] in
+        if bounded && retained then Some (lower,upper) else None
+    | _ -> None) (Expr.Set.elements fs) in
+  match absent && length_guard, shapes with
+  | true, [(lower,upper)] ->
+      let excludes_zero = Expr.Set.exists (function
+        | Expr.UnOp (Not, BinOp (LVar x, Equal, Lit (Num value)))
+        | Expr.UnOp (Not, BinOp (Lit (Num value), Equal, LVar x))
+          when x = upper -> value = 0.
+        | _ -> false) fs in
+      let upper_value = if excludes_zero then 1. else 0. in
+      let query = List.fold_left (fun acc (name,value) -> Expr.Set.add
+        (Expr.BinOp (LVar name, ValueEqual, value)) acc) fs
+        [lower,Expr.num 0.; upper,Expr.num upper_value;
+         keys,Expr.ESet []; values,Expr.EList []] in
+      if Expr.Set.equal query fs then None else
+      (try run_sat ~caller_kind:"optional-neutral-collection"
+        ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+        ~raw_unknown:true query gamma with SMT_unknown -> None)
+  | _ -> None
+
+(* A strict natural gap with an original one-hop successor alias may try
+   one complete-query witness. All existing facts/types remain; only native
+   SAT can return a model. A failed hint leaves the required query unchanged. *)
+let natural_gap_model fs gamma =
+  let number x = Hashtbl.find_opt gamma x = Some Type.NumberType in
+  let natural x = number x
+    && Expr.Set.mem (Expr.UnOp (IsInt, LVar x)) fs
+    && Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThanEqual, LVar x)) fs
+    && Expr.Set.exists (function
+      | Expr.BinOp (LVar y, FLessThanEqual, Lit (Num bound)) when x = y ->
+          bound >= 0. && bound <= 9007199254740991.
+      | _ -> false) fs in
+  let linked x y = Expr.Set.mem (Expr.BinOp (LVar x, Equal, LVar y)) fs
+    || Expr.Set.mem (Expr.BinOp (LVar y, Equal, LVar x)) fs in
+  let select upper successor = match upper, successor with
+    | Expr.LVar upper, Expr.BinOp (LVar alias, FPlus, Lit (Num step))
+      when step = 1. && number alias && natural upper ->
+        Expr.Set.fold (fun e roles -> match e with
+          | Expr.BinOp (LVar lower, FLessThan, LVar limit)
+            when limit = upper && lower <> upper && alias <> lower
+              && alias <> upper && natural lower && linked alias lower ->
+                (lower, upper, alias) :: roles
+          | _ -> roles) fs []
+    | _ -> [] in
+  if not !Config.Verification.total || !Config.under_approximation then None else
+  let roles = Expr.Set.fold (fun e roles -> match e with
+    | Expr.UnOp (Not, BinOp (left, ValueEqual, right)) ->
+        select left right @ select right left @ roles
+    | _ -> roles) fs [] |> List.sort_uniq Stdlib.compare in
+  match roles with
+  | [(lower, upper, _)] ->
+      let query = List.fold_left (fun query (name, value) -> Expr.Set.add
+        (Expr.BinOp (LVar name, ValueEqual, Expr.num value)) query)
+        fs [lower, 0.; upper, 2.] in
+      if Expr.Set.equal query fs then None else
+      (try run_sat ~caller_kind:"optional-natural-counter"
+        ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+        ~raw_unknown:true query gamma with SMT_unknown -> None)
+  | _ -> None
+
+(* One optional complete-current-query witness for the retained trace PRE.
+   This recognises original ASTs and existing types only. The positive1 pin is
+   a search candidate, never a symbolic-state fact or a domain restriction.
+   Every assertion and Gamma entry survives. Only native validated SAT may
+   decide; a failed candidate leaves the original required path unchanged. *)
+let positive_trace_index_witness_query fs gamma =
+  if not !Config.Verification.total || !Config.under_approximation then None
+  else
+    let eq a b = Expr.BinOp (a, Equal, b) in
+    let le a b = Expr.BinOp (a, FLessThanEqual, b) in
+    let ile a b = Expr.BinOp (a, ILessThanEqual, b) in
+    let has_equal a b = Expr.Set.mem (eq a b) fs || Expr.Set.mem (eq b a) fs in
+    let alias typ value = Expr.Set.fold (fun atom names -> match atom with
+      | Expr.BinOp (LVar a, ValueEqual, LVar b) ->
+          let matches name target = Expr.equal value (Expr.LVar target)
+            && Hashtbl.find_opt gamma target = Some typ
+            && Hashtbl.find_opt gamma name = None in
+          if matches a b then a :: names else if matches b a then b :: names else names
+      | _ -> names) fs [] |> List.sort_uniq String.compare in
+    let candidates = Expr.Set.fold (fun atom found -> match atom with
+      | Expr.UnOp (IsInt, (LVar name as index))
+        when Hashtbl.find_opt gamma name = Some Type.NumberType ->
+          let successor = Expr.BinOp (index, FPlus, Expr.num 1.) in
+          let predecessor = Expr.BinOp (successor, FMinus, Expr.num 1.) in
+          let count = Expr.UnOp (NumToInt,index) in
+          let values = Expr.Set.fold (fun atom values -> match atom with
+            | Expr.BinOp (BinOp (Lit (Int one), IPlus, cast), ILessThanEqual,
+                UnOp (LstLen,(LVar list_name as list)))
+              when Z.equal one Z.one && Expr.equal cast count
+                && Hashtbl.find_opt gamma list_name = Some Type.ListType ->
+                  list :: values
+            | _ -> values) fs [] |> List.sort_uniq Stdlib.compare in
+          List.fold_left (fun found values ->
+            let length = Expr.UnOp (LstLen,values) in
+            let retained = List.for_all (fun e -> Expr.Set.mem e fs)
+              [Expr.UnOp (IsInt,successor); le (Expr.num 0.) index;
+               le index (Expr.num 4294967295.);
+               le successor (Expr.num 4294967295.);
+               Expr.BinOp (Expr.num 0.,FLessThan,successor);
+               ile (Expr.int 0) count; ile (Expr.int 0) length;
+               ile length (Expr.int 4294967295)]
+              && has_equal predecessor index
+              && has_equal (Expr.UnOp (NumToInt,predecessor)) count
+              && has_equal (Expr.UnOp (NumberToUtf16,predecessor))
+                   (Expr.UnOp (NumberToUtf16,index)) in
+            let currents = Expr.Set.fold (fun atom currents -> match atom with
+              | Expr.BinOp (LVar a, ValueEqual, LVar b) ->
+                  if Hashtbl.find_opt gamma a = None
+                     && Hashtbl.find_opt gamma b = Some Type.Utf16Type
+                  then Expr.LVar b :: currents
+                  else if Hashtbl.find_opt gamma b = None
+                     && Hashtbl.find_opt gamma a = Some Type.Utf16Type
+                  then Expr.LVar a :: currents else currents
+              | _ -> currents) fs [] |> List.sort_uniq Stdlib.compare in
+            if not retained then found else
+            List.fold_left (fun found current ->
+              match alias Type.NumberType index, alias Type.ListType values,
+                    alias Type.Utf16Type current with
+              | [i],[v],[c] when List.length (List.sort_uniq String.compare
+                    [i;v;c;name;
+                     (match values with LVar n -> n | _ -> assert false);
+                     (match current with LVar n -> n | _ -> assert false)]) = 6 ->
+                  index :: found
+              | _ -> found) found currents) found values
+      | _ -> found) fs [] in
+    (* Multiple complete role matches are ambiguous even if they share index. *)
+    match candidates with
+    | [index] ->
+        let hint = Expr.BinOp (index,ValueEqual,Expr.num 1.) in
+        if Expr.Set.mem hint fs then None else Some (Expr.Set.add hint fs)
+    | [] ->
+        (* Two smaller retained current frames lack the old joint support.
+           Match existing typed roles/support only; preserve every extra
+           constraint and Gamma row in the complete candidate. *)
+        let roles typ = Hashtbl.fold (fun name actual names ->
+          if actual = typ then name :: names else names) gamma [] in
+        let supported_types = Hashtbl.fold (fun _ typ ok -> ok &&
+          List.mem typ [Type.NumberType; Type.Utf16Type; Type.ListType;
+                         Type.ObjectType]) gamma true in
+        let names = Hashtbl.fold (fun name _ names -> name :: names) gamma [] in
+        (match roles Type.NumberType, roles Type.Utf16Type, roles Type.ListType with
+        | [index_name], [current_name], [values_name]
+          when supported_types && List.length (List.sort_uniq String.compare names)
+               = Hashtbl.length gamma
+            && List.length (List.sort_uniq String.compare
+                 [index_name; current_name; values_name]) = 3 ->
+            let index = Expr.LVar index_name and current = Expr.LVar current_name
+            and values = Expr.LVar values_name in
+            let successor = Expr.BinOp (index, FPlus, Expr.num 1.) in
+            let predecessor = Expr.BinOp (successor, FMinus, Expr.num 1.) in
+            let count = Expr.UnOp (NumToInt, index) in
+            let length = Expr.UnOp (LstLen, values) in
+            let cast_lower = ile (Expr.int 0) count in
+            let next_length = ile (Expr.BinOp (Expr.int 1, IPlus, count)) length in
+            let nth_count = Expr.BinOp (values, LstNth, count) in
+            let nth_predecessor = Expr.BinOp (values, LstNth,
+                Expr.UnOp (NumToInt, predecessor)) in
+            let common = List.for_all (fun e -> Expr.Set.mem e fs)
+                [Expr.UnOp (IsInt, index); Expr.UnOp (IsInt, successor);
+                 ile (Expr.int 0) length;
+                 Expr.BinOp (Expr.num 0., FLessThan, successor);
+                 le (Expr.num 0.) index; le index (Expr.num 4294967295.);
+                 ile length (Expr.int 4294967295);
+                 le successor (Expr.num 4294967295.)]
+              && has_equal predecessor index
+              && has_equal (Expr.UnOp (NumToInt, predecessor)) count
+              && has_equal (Expr.UnOp (NumberToUtf16, predecessor))
+                   (Expr.UnOp (NumberToUtf16, index)) in
+            let aliases = alias Type.NumberType index, alias Type.ListType values,
+                alias Type.Utf16Type current in
+            let alias_frame = match aliases with
+              | [i], [v], [c] ->
+                  List.length (List.sort_uniq String.compare
+                    [i; v; c; index_name; current_name; values_name]) = 6
+                  && not (Expr.Set.mem cast_lower fs)
+                  && not (Expr.Set.mem next_length fs)
+                  && not (has_equal current nth_count)
+                  && not (has_equal current nth_predecessor)
+              | _ -> false in
+            let nth_frame = aliases = ([], [], [])
+              && Expr.Set.mem cast_lower fs && Expr.Set.mem next_length fs
+              && has_equal current nth_count && has_equal current nth_predecessor in
+            let hint = Expr.BinOp (index, ValueEqual, Expr.num 1.) in
+            if common && (alias_frame || nth_frame) && not (Expr.Set.mem hint fs)
+            then Some (Expr.Set.add hint fs) else None
+        | _ -> None)
+    | _ -> None
+
+let positive_trace_index_model fs gamma =
+  match positive_trace_index_witness_query fs gamma with
+  | None -> None
+  | Some query ->
+      let expressions fs = `List (List.map
+        (fun e -> `String (Fmt.str "%a" Expr.pp e)) (Expr.Set.elements fs)) in
+      with_native_smt_context
+        (fun () -> `Assoc [
+          ("operation",`String "positive-trace-index-complete-witness");
+          ("original_fs",expressions fs);
+          ("original_gamma",`String (Fmt.str "%a" pp_typenv gamma));
+          ("hinted_fs",expressions query);
+          ("added_candidate",expressions (Expr.Set.diff query fs)) ])
+        (fun () -> try run_sat ~caller_kind:"optional-positive-trace-index"
+          ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+          ~raw_unknown:true query gamma with SMT_unknown -> None)
 
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   let key = formula_key fs gamma in
@@ -2426,11 +4445,29 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   | None ->
       let () = L.verbose (fun m -> m "SAT check not found in cache") in
       let ret =
-        if numeric_unsat_precheck fs gamma then None
+        match nonempty_counter_model fs gamma with
+        | Some _ as witness -> witness
+        | None ->
+        if original_unsat_precheck fs gamma then None
+        else if numeric_unsat_precheck fs gamma then None
         else
-          match seeded_model fs gamma with
+          match natural_counter_model fs gamma with
           | Some _ as witness -> witness
-          | None -> exec_sat (with_checked_index_identities fs gamma) gamma
+          | None -> (match trimmed_counter_model fs gamma with
+            | Some _ as witness -> witness
+            | None -> (match seeded_model fs gamma with
+              | Some _ as witness -> witness
+              | None -> (match nonblank_counter_model fs gamma with
+                | Some _ as witness -> witness
+                | None -> (match neutral_collection_model fs gamma with
+                  | Some _ as witness -> witness
+                  | None -> (match positive_trace_index_model fs gamma with
+                    | Some _ as witness -> witness
+                    | None ->
+                      let complete_fs = with_checked_index_identities fs gamma in
+                      (match natural_gap_model complete_fs gamma with
+                       | Some _ as witness -> witness
+                       | None -> exec_sat complete_fs gamma))))))
       in
       let () =
         L.verbose (fun m ->
@@ -2541,6 +4578,11 @@ let lift_model
     | Utf16Type ->
         let+ bytes = Utf16.recover v in
         Literal.Utf16String (Utils.Utf16.of_canonical bytes)
+    | BooleanType -> (
+        match v with
+        | Atom "true" -> Some (Literal.Bool true)
+        | Atom "false" -> Some (Literal.Bool false)
+        | _ -> None)
     | _ -> None
   in
 
@@ -2566,4 +4608,11 @@ let lift_model
          in
          v |> Option.iter (fun v -> subst_update x (Expr.Lit v)))
 
-let () = init_solver ()
+(* Standalone preparation controls link the real verifier but must never start
+   SMT. Close the untouched solver before module initialization can spawn it;
+   existing terminal guards reject any later initialization or solver access.
+   Ordinary verifier startup retains the original eager initialization. *)
+let () =
+  if Sys.getenv_opt "GILLIAN_PREPARATION_CONTROLS_NO_SOLVER" = Some "1" then
+    shutdown_solver ()
+  else init_solver ()

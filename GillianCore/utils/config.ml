@@ -108,6 +108,14 @@ module Verification = struct
 
   let total = ref false
   let closed_entry = ref false
+  (* These entries are checked from emp under the full closed-entry rules.
+     Their results can only be used with no owned heap, including loop frames. *)
+  let closed_initializers = ref Containers.SS.empty
+
+  let with_closed_initializer f =
+    let previous = !closed_entry in
+    closed_entry := true;
+    Fun.protect ~finally:(fun () -> closed_entry := previous) f
 
   (* A checked invariant can hide heap locations in predicates or loop frames.
      Never regain fixed-name allocation within the same verification, even on

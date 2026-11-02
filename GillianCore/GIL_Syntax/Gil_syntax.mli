@@ -156,12 +156,14 @@ module UnOp : sig
     | Car  (** Head of a list *)
     | Cdr  (** Tail of a list *)
     | LstLen  (** List length *)
+    | LstAllUtf16
     | LstRev  (** List reverse *)
     | SetToList  (** From set to list *)
     | StrLen  (** String length *)
     | NumberToUtf16
     | Utf16ToNumber
     | Utf16Len  (** Mathematical code-unit length *)
+    | Utf16Trim  (** Exact leading/trailing ECMAScript whitespace removal *)
     | StrToBytes  (** Byte values as binary64 integers in [0,255] *)
     (* Integer vs Number *)
     | NumToInt  (** Number to Integer - actual cast *)
@@ -220,6 +222,8 @@ module BinOp : sig
     | M_atan2  (** Arctangent y/x *)
     | M_pow  (** Power *)
     | LstNth  (** Nth element of a string *)
+    | LstContains (** List membership by value identity *)
+    | KeyInsertIndex
     | LstRepeat
     (* [[a; b]] is the list that contains [b] times the element [a] *)
     | StrCat  (** String concatenation *)
@@ -244,6 +248,8 @@ module NOp : sig
 
   type t =
     | LstCat  (** List concatenation *)
+    | LstInsert
+    | Utf16Sub  (** Proof-only UTF-16 slice with mathematical Int bounds *)
     | SetUnion  (** Set union *)
     | SetInter  (** Set intersection *)
   [@@deriving yojson]
@@ -499,6 +505,9 @@ module Asrt : sig
   val definedness : fact:bool -> Expr.t -> atom
 
   val as_definedness : atom -> (bool * Expr.t) option
+
+  (** Structural identity ordering, including signed Number zeros. *)
+  val compare_atom : atom -> atom -> int
 
   (** Comparison of assertions *)
   val compare : atom -> atom -> int
@@ -880,11 +889,14 @@ module Spec : sig
 
   open Location
 
+  type verifier_scope_binding = { vsb_source : Expr.t; vsb_target : Expr.t }
+
   (** Single specification *)
   type st = {
     ss_pre : Asrt.t located;  (** Precondition *)
     ss_posts : Asrt.t located list;  (** Postcondition *)
     ss_variant : Expr.t option;  (** Variant *)
+    ss_verifier_scope : verifier_scope_binding option;
     ss_flag : Flag.t;  (** Return flag *)
     ss_to_verify : bool;  (** Should the spec be verified? *)
     ss_label : (string * string list) option;
@@ -904,6 +916,7 @@ module Spec : sig
   (** [s_init ~ss_label ss_pre ss_posts ss_flag ss_to_verify] creates a single
       specification with the given values *)
   val s_init :
+    ?ss_verifier_scope:verifier_scope_binding ->
     ?ss_label:string * string list ->
     Asrt.t located ->
     Asrt.t located list ->
@@ -929,6 +942,13 @@ module Spec : sig
 
   (** Return the list of parameters of a Spec *)
   val get_params : t -> string list
+
+  val map_verifier_scope : (Expr.t -> Expr.t) -> verifier_scope_binding -> verifier_scope_binding
+  val validate_verifier_scope : ?exact_target:bool -> st -> unit
+  val verifier_posts : st -> Asrt.t located list
+  val verifier_scope_source : verifier_scope_binding option -> string option
+  val require_verifier_scope_source : verifier_scope_binding option -> mem:(string -> bool) -> (unit, string) result
+  val verifier_scope_binding_to_yojson : verifier_scope_binding -> Yojson.Safe.t
 
   val pp_sspec : Format.formatter -> st -> unit
   val pp : Format.formatter -> t -> unit
@@ -1426,8 +1446,13 @@ module Visitors : sig
          ; visit_LocalTime : 'c -> Constant.t -> Constant.t
          ; visit_Logic : 'c -> 'f Cmd.t -> LCmd.t -> 'f Cmd.t
          ; visit_LstCat : 'c -> NOp.t -> NOp.t
+         ; visit_LstInsert : 'c -> NOp.t -> NOp.t
+         ; visit_Utf16Sub : 'c -> NOp.t -> NOp.t
          ; visit_LstLen : 'c -> UnOp.t -> UnOp.t
+         ; visit_LstAllUtf16 : 'c -> UnOp.t -> UnOp.t
          ; visit_LstNth : 'c -> BinOp.t -> BinOp.t
+         ; visit_LstContains : 'c -> BinOp.t -> BinOp.t
+         ; visit_KeyInsertIndex : 'c -> BinOp.t -> BinOp.t
          ; visit_LstRepeat : 'c -> BinOp.t -> BinOp.t
          ; visit_LstRev : 'c -> UnOp.t -> UnOp.t
          ; visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> Expr.t -> Expr.t
@@ -1495,6 +1520,7 @@ module Visitors : sig
          ; visit_NumberToUtf16 : 'c -> UnOp.t -> UnOp.t
          ; visit_Utf16ToNumber : 'c -> UnOp.t -> UnOp.t
          ; visit_Utf16Len : 'c -> UnOp.t -> UnOp.t
+         ; visit_Utf16Trim : 'c -> UnOp.t -> UnOp.t
          ; visit_StrToBytes : 'c -> UnOp.t -> UnOp.t
          ; visit_StrLess : 'c -> BinOp.t -> BinOp.t
          ; visit_NumToInt : 'c -> UnOp.t -> UnOp.t
@@ -1564,6 +1590,7 @@ module Visitors : sig
          ; visit_pred : 'c -> Pred.t -> Pred.t
          ; visit_proc : 'c -> ('d, 'f) Proc.t -> ('d, 'f) Proc.t
          ; visit_single_spec : 'c -> Spec.st -> Spec.st
+         ; visit_verifier_scope_binding : 'c -> Spec.verifier_scope_binding -> Spec.verifier_scope_binding
          ; visit_slcmd : 'c -> SLCmd.t -> SLCmd.t
          ; visit_spec : 'c -> Spec.t -> Spec.t
          ; visit_typ : 'c -> Type.t -> Type.t
@@ -1707,8 +1734,13 @@ module Visitors : sig
     method visit_LocalTime : 'c -> Constant.t -> Constant.t
     method visit_Logic : 'c -> 'f Cmd.t -> LCmd.t -> 'f Cmd.t
     method visit_LstCat : 'c -> NOp.t -> NOp.t
+    method visit_LstInsert : 'c -> NOp.t -> NOp.t
+    method visit_Utf16Sub : 'c -> NOp.t -> NOp.t
     method visit_LstLen : 'c -> UnOp.t -> UnOp.t
+    method visit_LstAllUtf16 : 'c -> UnOp.t -> UnOp.t
     method visit_LstNth : 'c -> BinOp.t -> BinOp.t
+    method visit_LstContains : 'c -> BinOp.t -> BinOp.t
+    method visit_KeyInsertIndex : 'c -> BinOp.t -> BinOp.t
     method visit_LstRepeat : 'c -> BinOp.t -> BinOp.t
     method visit_LstRev : 'c -> UnOp.t -> UnOp.t
     method visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> Expr.t -> Expr.t
@@ -1778,6 +1810,7 @@ module Visitors : sig
     method visit_NumberToUtf16 : 'c -> UnOp.t -> UnOp.t
     method visit_Utf16ToNumber : 'c -> UnOp.t -> UnOp.t
     method visit_Utf16Len : 'c -> UnOp.t -> UnOp.t
+    method visit_Utf16Trim : 'c -> UnOp.t -> UnOp.t
     method visit_StrToBytes : 'c -> UnOp.t -> UnOp.t
     method visit_StrLess : 'c -> BinOp.t -> BinOp.t
     method visit_IntToNum : 'c -> UnOp.t -> UnOp.t
@@ -1882,6 +1915,7 @@ module Visitors : sig
       ('a, 'e) Result.result
 
     method visit_single_spec : 'c -> Spec.st -> Spec.st
+    method visit_verifier_scope_binding : 'c -> Spec.verifier_scope_binding -> Spec.verifier_scope_binding
     method visit_slcmd : 'c -> SLCmd.t -> SLCmd.t
     method visit_spec : 'c -> Spec.t -> Spec.t
     method private visit_string : 'env. 'env -> string -> string
@@ -1976,8 +2010,13 @@ module Visitors : sig
          ; visit_LocalTime : 'c -> 'f
          ; visit_Logic : 'c -> LCmd.t -> 'f
          ; visit_LstCat : 'c -> 'f
+         ; visit_LstInsert : 'c -> 'f
+         ; visit_Utf16Sub : 'c -> 'f
          ; visit_LstLen : 'c -> 'f
+         ; visit_LstAllUtf16 : 'c -> 'f
          ; visit_LstNth : 'c -> 'f
+         ; visit_LstContains : 'c -> 'f
+         ; visit_KeyInsertIndex : 'c -> 'f
          ; visit_LstRepeat : 'c -> 'f
          ; visit_LstRev : 'c -> 'f
          ; visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> 'f
@@ -2053,6 +2092,7 @@ module Visitors : sig
          ; visit_NumberToUtf16 : 'c -> 'f
          ; visit_Utf16ToNumber : 'c -> 'f
          ; visit_Utf16Len : 'c -> 'f
+         ; visit_Utf16Trim : 'c -> 'f
          ; visit_StrToBytes : 'c -> 'f
          ; visit_StrLess : 'c -> 'f
          ; visit_IntToNum : 'c -> 'f
@@ -2118,6 +2158,7 @@ module Visitors : sig
          ; visit_pred : 'c -> Pred.t -> 'f
          ; visit_proc : 'c -> ('d, 'g) Proc.t -> 'f
          ; visit_single_spec : 'c -> Spec.st -> 'f
+         ; visit_verifier_scope_binding : 'c -> Spec.verifier_scope_binding -> 'f
          ; visit_slcmd : 'c -> SLCmd.t -> 'f
          ; visit_spec : 'c -> Spec.t -> 'f
          ; visit_typ : 'c -> Type.t -> 'f
@@ -2215,8 +2256,13 @@ module Visitors : sig
     method visit_LocalTime : 'c -> 'f
     method visit_Logic : 'c -> LCmd.t -> 'f
     method visit_LstCat : 'c -> 'f
+    method visit_LstInsert : 'c -> 'f
+    method visit_Utf16Sub : 'c -> 'f
     method visit_LstLen : 'c -> 'f
+    method visit_LstAllUtf16 : 'c -> 'f
     method visit_LstNth : 'c -> 'f
+    method visit_LstContains : 'c -> 'f
+    method visit_KeyInsertIndex : 'c -> 'f
     method visit_LstRepeat : 'c -> 'f
     method visit_LstRev : 'c -> 'f
     method visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> 'f
@@ -2292,6 +2338,7 @@ module Visitors : sig
     method visit_NumberToUtf16 : 'c -> 'f
     method visit_Utf16ToNumber : 'c -> 'f
     method visit_Utf16Len : 'c -> 'f
+    method visit_Utf16Trim : 'c -> 'f
     method visit_StrToBytes : 'c -> 'f
     method visit_StrLess : 'c -> 'f
     method visit_IntToNum : 'c -> 'f
@@ -2355,6 +2402,7 @@ module Visitors : sig
     method visit_pred : 'c -> Pred.t -> 'f
     method visit_proc : 'c -> ('d, 'g) Proc.t -> 'f
     method visit_single_spec : 'c -> Spec.st -> 'f
+    method visit_verifier_scope_binding : 'c -> Spec.verifier_scope_binding -> 'f
     method visit_slcmd : 'c -> SLCmd.t -> 'f
     method visit_spec : 'c -> Spec.t -> 'f
     method visit_typ : 'c -> Type.t -> 'f
@@ -2462,8 +2510,13 @@ module Visitors : sig
          ; visit_LocalTime : 'c -> unit
          ; visit_Logic : 'c -> LCmd.t -> unit
          ; visit_LstCat : 'c -> unit
+         ; visit_LstInsert : 'c -> unit
+         ; visit_Utf16Sub : 'c -> unit
          ; visit_LstLen : 'c -> unit
+         ; visit_LstAllUtf16 : 'c -> unit
          ; visit_LstNth : 'c -> unit
+         ; visit_LstContains : 'c -> unit
+         ; visit_KeyInsertIndex : 'c -> unit
          ; visit_LstRepeat : 'c -> unit
          ; visit_LstRev : 'c -> unit
          ; visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> unit
@@ -2531,6 +2584,7 @@ module Visitors : sig
          ; visit_NumberToUtf16 : 'c -> unit
          ; visit_Utf16ToNumber : 'c -> unit
          ; visit_Utf16Len : 'c -> unit
+         ; visit_Utf16Trim : 'c -> unit
          ; visit_StrToBytes : 'c -> unit
          ; visit_StrLess : 'c -> unit
          ; visit_IntToNum : 'c -> unit
@@ -2591,6 +2645,7 @@ module Visitors : sig
          ; visit_pred : 'c -> Pred.t -> unit
          ; visit_proc : 'c -> ('d, 'f) Proc.t -> unit
          ; visit_single_spec : 'c -> Spec.st -> unit
+         ; visit_verifier_scope_binding : 'c -> Spec.verifier_scope_binding -> unit
          ; visit_slcmd : 'c -> SLCmd.t -> unit
          ; visit_spec : 'c -> Spec.t -> unit
          ; visit_typ : 'c -> Type.t -> unit
@@ -2705,8 +2760,13 @@ module Visitors : sig
     method visit_LocalTime : 'c -> unit
     method visit_Logic : 'c -> LCmd.t -> unit
     method visit_LstCat : 'c -> unit
+    method visit_LstInsert : 'c -> unit
+    method visit_Utf16Sub : 'c -> unit
     method visit_LstLen : 'c -> unit
+    method visit_LstAllUtf16 : 'c -> unit
     method visit_LstNth : 'c -> unit
+    method visit_LstContains : 'c -> unit
+    method visit_KeyInsertIndex : 'c -> unit
     method visit_LstRepeat : 'c -> unit
     method visit_LstRev : 'c -> unit
     method visit_LstSub : 'c -> Expr.t -> Expr.t -> Expr.t -> unit
@@ -2774,6 +2834,7 @@ module Visitors : sig
     method visit_NumberToUtf16 : 'c -> unit
     method visit_Utf16ToNumber : 'c -> unit
     method visit_Utf16Len : 'c -> unit
+    method visit_Utf16Trim : 'c -> unit
     method visit_StrToBytes : 'c -> unit
     method visit_StrLess : 'c -> unit
     method visit_IntToNum : 'c -> unit
@@ -2873,6 +2934,7 @@ module Visitors : sig
       unit
 
     method visit_single_spec : 'c -> Spec.st -> unit
+    method visit_verifier_scope_binding : 'c -> Spec.verifier_scope_binding -> unit
     method visit_slcmd : 'c -> SLCmd.t -> unit
     method visit_spec : 'c -> Spec.t -> unit
     method private visit_string : 'env. 'env -> string -> unit
@@ -2908,4 +2970,111 @@ module Visitors : sig
         'a list * 'b list -> 'a list * 'b list -> 'a list * 'b list
     end
   end
+end
+
+(** Passive opt-in capture; source/runtime qualification remains separate. *)
+module Linked_program_capture : sig
+  (** Public syntax types must be named here. An inferred sibling-module
+      signature exposes internal Prog/Visitors types behind this interface. *)
+  module Codec : sig
+    exception Incomplete of string
+    val require : bool -> string -> unit
+    val fragment_bytes : int
+    val hex : string -> string
+    val unhex : string -> string
+    val inspect :
+      ?node_limit:int -> ?word_limit:int -> ?depth_limit:int ->
+      ?string_limit:int -> ?string_total:int -> 'a -> Obj.t list
+    val inspect_parent_v4 : 'a -> Obj.t list
+    val check_parent_customs_v4 : Obj.t list -> Obj.t list -> unit
+    val guard_plain : 'a -> unit
+    val guard_transport : 'a -> unit
+    val guard_transport_v3 : 'a -> unit
+    val guard_ast : ('visitor Visitors.iter -> 'a -> unit) -> 'a -> unit
+    val guard_ast_v3 : ('visitor Visitors.iter -> 'a -> unit) -> 'a -> unit
+    val tag : Yojson.Safe.t -> Yojson.Safe.t
+    val untag : Yojson.Safe.t -> Yojson.Safe.t
+    val equal : Yojson.Safe.t -> Yojson.Safe.t -> bool
+    val checked :
+      ?version:int -> ?guard:('a -> unit) -> to_json:('a -> Yojson.Safe.t) ->
+      of_json:(Yojson.Safe.t -> ('a, string) result) -> 'a -> Yojson.Safe.t
+  end
+  module Fragments : sig
+    type output = string -> string list -> Yojson.Safe.t -> unit
+    type input = string -> string list -> Yojson.Safe.t
+    val pred_to_yojson : Pred.t -> Yojson.Safe.t
+    val emit_pred : emit:output -> route:string list -> Pred.t -> unit
+    val take_pred : take:input -> route:string list -> Pred.t
+    val emit_spec : emit:output -> route:string list -> Spec.t -> unit
+    val take_spec : take:input -> route:string list -> Spec.t
+    val emit_optional_spec : emit:output -> route:string list -> Spec.t option -> unit
+    val take_optional_spec : take:input -> route:string list -> Spec.t option
+  end
+  module Writer : module type of Linked_capture_writer
+  val jstring : string -> Yojson.Safe.t
+  val string_of_json : Yojson.Safe.t -> (string, string) result
+  val jint : int -> Yojson.Safe.t
+  val int_of_json : Yojson.Safe.t -> (int, string) result
+  val jbool : bool -> Yojson.Safe.t
+  val bool_of_json : Yojson.Safe.t -> (bool, string) result
+  val option : ('a -> Yojson.Safe.t) -> 'a option -> Yojson.Safe.t
+  val option_of :
+    (Yojson.Safe.t -> ('a, string) result) ->
+    Yojson.Safe.t -> ('a option, string) result
+  val jlist : ('a -> Yojson.Safe.t) -> 'a list -> Yojson.Safe.t
+  val list_of :
+    (Yojson.Safe.t -> ('a, string) result) ->
+    Yojson.Safe.t -> ('a list, string) result
+  val pair :
+    ('a -> Yojson.Safe.t) -> ('b -> Yojson.Safe.t) ->
+    'a * 'b -> Yojson.Safe.t
+  val pair_of :
+    (Yojson.Safe.t -> ('a, string) result) ->
+    (Yojson.Safe.t -> ('b, string) result) ->
+    Yojson.Safe.t -> ('a * 'b, string) result
+  val checked :
+    ?version:int -> ?guard:('a -> unit) -> ('a -> Yojson.Safe.t) ->
+    (Yojson.Safe.t -> ('a, string) result) -> 'a -> Yojson.Safe.t
+  val ast :
+    ?version:int -> ('visitor Visitors.iter -> 'a -> unit) -> ('a -> Yojson.Safe.t) ->
+    (Yojson.Safe.t -> ('a, string) result) -> 'a -> Yojson.Safe.t
+  val proc_fields : string list
+  type frame = {
+    phase : string;
+    seq : int;
+    kind : string;
+    route : string list;
+    payload : Yojson.Safe.t;
+  }
+  val frame_json : ?version:int -> frame -> Yojson.Safe.t
+  val frame_of_json : ?version:int -> Yojson.Safe.t -> frame
+  module V5_route : sig
+    type encoder
+    type decoder
+    val encoder : phase:string -> encoder
+    val decoder : phase:string -> decoder
+    val encode : encoder -> frame -> Yojson.Safe.t
+    val decode : decoder -> Yojson.Safe.t -> frame
+  end
+  val tables : string list
+  val bounded_length : int -> 'a list -> int
+  val inventory : (string, 'a) Hashtbl.t -> (string * 'a list) list
+  val iter_program :
+    ?version:int -> annot_to_json:('a -> Yojson.Safe.t) ->
+    annot_of_json:(Yojson.Safe.t -> ('a, string) result) ->
+    phase:string -> emit:(frame -> unit) -> ('a, int) Prog.t -> unit
+  val validate_frames : ?version:int -> frame list -> unit
+  type session = {
+    writer : Writer.t;
+    version : int;
+    mutable next : int;
+    mutable counts : int list;
+  }
+  val operation : (unit -> 'a) -> 'a
+  val version_of_policy : string option -> int
+  val with_session : (session option -> 'a) -> 'a
+  val capture :
+    session option -> annot_to_json:('a -> Yojson.Safe.t) ->
+    annot_of_json:(Yojson.Safe.t -> ('a, string) result) ->
+    phase:string -> ('a, int) Prog.t -> unit
 end
