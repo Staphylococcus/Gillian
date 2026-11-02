@@ -28,6 +28,7 @@ type st = {
 type t = {
   name : string;  (** Procedure/spec name *)
   params : string list;  (** Procedure/spec parameters *)
+  raw_args : string list option;  (** Complete checked actual vector; formals unchanged *)
   sspecs : st list;  (** List of single specifications *)
   normalised : bool;  (** If the spec is already normalised *)
   incomplete : bool;  (** If the spec is incomplete *)
@@ -52,7 +53,7 @@ let init
     (normalised : bool)
     (incomplete : bool)
     (to_verify : bool) : t =
-  { name; params; sspecs; normalised; incomplete; to_verify }
+  { name; params; raw_args = None; sspecs; normalised; incomplete; to_verify }
 
 let extend (spec : t) (sspecs : st list) : t =
   { spec with sspecs = sspecs @ spec.sspecs }
@@ -82,9 +83,11 @@ let pp fmt spec =
     | true -> Fmt.string fmt "incomplete "
     | false -> ()
   in
-  Fmt.pf fmt "@[<hov 2>@[<h>%a spec %s(%a)@]@\n%a@]" pp_incomplete
+  Fmt.pf fmt "@[<hov 2>@[<h>%a spec %s(%a)%a@]@\n%a@]" pp_incomplete
     spec.incomplete spec.name
     (Fmt.list ~sep:Fmt.comma Fmt.string)
     spec.params
+    (Fmt.option (fun fmt names -> Fmt.pf fmt " raw_args(%a)"
+      Fmt.(list ~sep:comma Dump.string) names)) spec.raw_args
     (Fmt.list ~sep:(Fmt.any "@\n@\n") pp_sspec)
     spec.sspecs

@@ -622,6 +622,41 @@ let scope_defaults_and_rejections () =
     proc_body=[|Annot.Basic.make(),None,Cmd.ReturnNormal|]} in
   let macros=Hashtbl.create 1 in
   Proc.validate_raw_args ~macros p;
+  (* A legacy only-spec may not replace a checked body's input interface,
+     either while creating tests or while building the caller matching plan. *)
+  let simple_case={case with ss_pre=([Asrt.Emp],None);ss_posts=[([Asrt.Emp],None)];
+    ss_verifier_scope=None} in
+  let checked={raw with spec_sspecs=[simple_case]} in
+  let unchecked={checked with spec_params=["legacy"];spec_raw_args=None;
+    spec_to_verify=false;spec_sspecs=[{simple_case with ss_to_verify=false}]} in
+  let empty ()=Hashtbl.create 1 in
+  let procs=empty() and only_specs=empty() in
+  Hashtbl.add procs "scopefn" {p with proc_spec=Some checked};
+  Hashtbl.add only_specs "scopefn" unchecked;
+  let program=Prog.make ~imports:[] ~lemmas:(empty()) ~preds:(empty())
+    ~funcs:(empty()) ~datatypes:(empty()) ~only_specs ~procs
+    ~macros:(empty()) ~bi_specs:(empty()) ~proc_names:["scopefn"]
+    ~predecessors:(empty()) () in
+  check(List.length(Prog.get_specs program)=2)"ordinary duplicate semantics unchanged";
+  check(Prog.get_specs ~prefer_procedure_specs:true program=[checked])
+    "body contract is unique total proof authority";
+  Hashtbl.replace only_specs "fallback" {unchecked with spec_name="fallback"};
+  check(List.length(Prog.get_specs ~prefer_procedure_specs:true program)=2)
+    "unattached fallback retained";
+  Hashtbl.remove only_specs "fallback";
+  let previous= !Gillian.Utils.Config.Verification.total in
+  Fun.protect ~finally:(fun()->Gillian.Utils.Config.Verification.total:=previous)
+    (fun()->Gillian.Utils.Config.Verification.total:=true;
+      let planned=Engine.MP.init_prog program in
+      check((Hashtbl.find planned.specs "scopefn").data=checked)
+        "summary plan uses the same checked body contract");
+  let unchecked_body={checked with spec_to_verify=false} in
+  Hashtbl.replace procs "scopefn" {p with proc_spec=Some unchecked_body};
+  check(Prog.get_specs ~prefer_procedure_specs:true program=[unchecked_body])
+    "unchecked body not replaced or upgraded by fallback";
+  rejects(fun()->ignore(Engine.Totality.spec {p with proc_spec=Some unchecked_body}));
+  rejects(fun()->ignore(Engine.Totality.spec {p with proc_spec=Some {checked with spec_incomplete=true}}));
+  rejects(fun()->ignore(Engine.Totality.spec {p with proc_params=["other"];proc_spec=Some checked}));
   let reject_cmd cmd=rejects(fun()->Proc.validate_raw_args ~macros
     {p with proc_body=[|Annot.Basic.make(),None,cmd|]}) in
   reject_cmd(Cmd.Assignment("raw",Expr.Lit Literal.Undefined));

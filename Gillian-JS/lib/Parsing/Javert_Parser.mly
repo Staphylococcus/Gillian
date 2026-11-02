@@ -198,6 +198,7 @@ let normalised_lvar_r = Str.regexp "##NORMALISED_LVAR"
 (* Procedure specification keywords *)
 %token AXIOMATIC
 %token INCOMPLETE
+%token RAW_ARGS
 %token SPEC
 %token BISPEC
 %token LEMMA
@@ -750,8 +751,17 @@ spec_head_target:
   spec_name = VAR; LBRACE; spec_params = separated_list(COMMA, VAR); RBRACE
   { (spec_name, spec_params) }
 
+raw_argument_name:
+  | name = VAR { name }
+  | name = STRING { name }
+
+raw_arguments_target:
+  RAW_ARGS; LBRACE; names = separated_list(COMMA, raw_argument_name); RBRACE
+  { names }
+
 spec_target:
   incomplete = option(INCOMPLETE); SPEC; spec_head = spec_head_target;
+  raw_args = option(raw_arguments_target);
   proc_specs = separated_nonempty_list(SCOLON, pre_post_target)
   { let (name, params) = spec_head in
     let incomplete = (incomplete <> None) in
@@ -759,6 +769,7 @@ spec_target:
     Spec.{
       name = name;
       params = params;
+      raw_args;
       sspecs = proc_specs;
       normalised = is_normalised;
       incomplete;
@@ -881,7 +892,7 @@ only_spec_target:
   { let (name, params) = head in
     let normalised = !Config.previously_normalised in
     let incomplete = (incomplete <> None) in
-    Spec.{ name; params; sspecs; normalised; incomplete; to_verify = false } }
+    Spec.{ name; params; raw_args = None; sspecs; normalised; incomplete; to_verify = false } }
 
 
 /* BI ABDUCTION SPECIFICATIONS */

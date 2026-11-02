@@ -89,11 +89,22 @@ let get_preds (prog : ('a, 'b) t) : Pred.t list =
 let get_ospecs (prog : ('a, 'b) t) : Spec.t list =
   Hashtbl.fold (fun _ spec ac -> spec :: ac) prog.only_specs []
 
-let get_specs (prog : ('a, 'b) t) : Spec.t list =
+let get_specs ?(prefer_procedure_specs = false) (prog : ('a, 'b) t) : Spec.t list =
+  (* A total body proof and its summary must use the same attached contract.
+     Legacy axiomatic fallbacks remain available only without a body contract;
+     choosing an unchecked body here never grants it totality admission. *)
+  let fallback = get_ospecs prog in
+  let fallback =
+    if not prefer_procedure_specs then fallback
+    else List.filter (fun (spec : Spec.t) ->
+      match Hashtbl.find_opt prog.procs spec.spec_name with
+      | Some proc -> Option.is_none proc.proc_spec
+      | None -> true) fallback
+  in
   Hashtbl.fold
     (fun _ (proc : ('a, 'b) Proc.t) ac ->
       Option.fold ~some:(fun spec -> spec :: ac) ~none:ac proc.proc_spec)
-    prog.procs (get_ospecs prog)
+    prog.procs fallback
 
 let get_procs ?(proc_names : string list option) (prog : ('a, 'b) t) :
     ('a, 'b) Proc.t list =

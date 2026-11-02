@@ -627,6 +627,7 @@ let translate_only_specs cc_tbl old_fun_tbl fun_tbl vis_tbl js_only_specs =
           name;
           params =
             [ JS2JSIL_Helpers.var_scope; JS2JSIL_Helpers.var_this ] @ params;
+          raw_args = None;
           sspecs;
           normalised = false;
           incomplete = false;

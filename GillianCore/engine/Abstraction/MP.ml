@@ -1006,7 +1006,8 @@ let init_preds (preds : (string, Pred.t) Hashtbl.t) :
 let init_prog ?preds_tbl (prog : ('a, int) Prog.t) : 'a prog =
   let res =
     let open Syntaxes.Result in
-    let all_specs : Spec.t list = Prog.get_specs prog in
+    let all_specs : Spec.t list =
+      Prog.get_specs ~prefer_procedure_specs:!Config.Verification.total prog in
     let lemmas : Lemma.t list = Prog.get_lemmas prog in
     let* preds =
       match preds_tbl with

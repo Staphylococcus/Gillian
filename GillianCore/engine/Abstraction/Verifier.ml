@@ -1070,7 +1070,7 @@ struct
         let specs_to_verify =
           List.filter
             (fun (spec : Spec.t) -> SS.mem spec.spec_name pnames_to_verify)
-            (Prog.get_specs prog)
+            (Prog.get_specs ~prefer_procedure_specs:!Config.Verification.total prog)
         in
 
         (* STEP 2: Convert specs to symbolic tests *)
@@ -1133,7 +1133,7 @@ struct
                  -------------------------------------------------------------------------@]"
               )
               Fmt.(list ~sep:(any "@\n") Spec.pp)
-              (Prog.get_specs prog)
+              (Prog.get_specs ~prefer_procedure_specs:!Config.Verification.total prog)
               Fmt.(list ~sep:(any "@\n") Lemma.pp)
               (Prog.get_lemmas prog));
 
@@ -1448,7 +1448,7 @@ struct
           preds
           (Hashtbl.create Config.medium_tbl_size)
       in
-      let specs = Prog.get_specs prog in
+      let specs = Prog.get_specs ~prefer_procedure_specs:!Config.Verification.total prog in
       let tests =
         specs
         |> List.filter_map (fun (spec : Spec.t) ->

@@ -1190,7 +1190,7 @@ module Prog : sig
   val get_ospecs : ('a, 'b) t -> Spec.t list
 
   (** Get all specs *)
-  val get_specs : ('a, 'b) t -> Spec.t list
+  val get_specs : ?prefer_procedure_specs:bool -> ('a, 'b) t -> Spec.t list
 
   (** Get all procedures *)
   val get_procs : ?proc_names:string list -> ('a, 'b) t -> ('a, 'b) Proc.t list

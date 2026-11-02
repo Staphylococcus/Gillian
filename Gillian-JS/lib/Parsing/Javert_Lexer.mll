@@ -141,6 +141,7 @@
       "lemma",        Javert_Parser.LEMMA;
       "variant",      Javert_Parser.VARIANT;
         "verify_scope", Javert_Parser.VERIFY_SCOPE;
+      "raw_args",     Javert_Parser.RAW_ARGS;
       "spec",         Javert_Parser.SPEC;
       "bispec",       Javert_Parser.BISPEC;
       "normal",       Javert_Parser.NORMAL;

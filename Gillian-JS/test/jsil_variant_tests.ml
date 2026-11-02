@@ -2,8 +2,8 @@ open Gillian.Gil_syntax
 module Spec = Jsil_syntax.Spec
 module Lower = Js2jsil_lib.JSIL2GIL
 
-let parse ?(body = "ret := n; return") cases =
-  let text = "spec count(n)\n" ^ cases ^ "\nproc count(n) { " ^ body ^ " };" in
+let parse ?(body = "ret := n; return") ?(raw = "") cases =
+  let text = "spec count(n)" ^ raw ^ "\n" ^ cases ^ "\nproc count(n) { " ^ body ^ " };" in
   let file = Filename.temp_file "jsil-variant-" ".jsil" in
   let prog =
     Fun.protect
@@ -309,11 +309,41 @@ let scope_generated_once () =
   Alcotest.(check bool) "only-spec/default disabled" true (off = None);
   Alcotest.(check bool) "main unchanged" true (main = None)
 
+let raw_argument_metadata () =
+  let cases = "[[ (n == #n) ]] [[ (ret == #n) ]] variant(n) normal" in
+  let original = parse ~raw:" raw_args(n,raw_item)" cases in
+  let gil = Lower.jsil2gil_spec original in
+  Alcotest.(check bool) "formal prefix and full raw vector preserved" true
+    (gil.spec_params = ["n"] && gil.spec_raw_args = Some ["n"; "raw_item"]);
+  Gillian.Gil_syntax.Spec.validate_raw_args gil;
+  let quoted = parse ~raw:" raw_args(n,\"variant\")" cases in
+  let printed = Format.asprintf "%a" Spec.pp quoted in
+  let file = Filename.temp_file "jsil-raw-" ".jsil" in
+  Fun.protect ~finally:(fun () -> Sys.remove file) (fun () ->
+    let out = open_out file in
+    output_string out (printed ^ "\nproc count(n) { ret := n; return };");
+    close_out out;
+    let prog = Parsing.parse_jsil_eprog_from_file file in
+    let recovered = Option.get (Option.get (Jsil_syntax.EProg.get_proc prog "count")).spec in
+    Alcotest.(check bool) "quoted keyword roundtrip/lowering" true
+      (recovered.raw_args = quoted.raw_args &&
+       (Lower.jsil2gil_spec recovered).spec_raw_args = Some ["n"; "variant"]));
+  Alcotest.(check bool) "legacy metadata absent" true
+    ((Lower.jsil2gil_spec (parse cases)).spec_raw_args = None);
+  List.iter (fun raw ->
+    let rejected = try
+      Gillian.Gil_syntax.Spec.validate_raw_args (Lower.jsil2gil_spec (parse ~raw cases)); false
+      with Invalid_argument _ -> true in
+    Alcotest.(check bool) ("invalid raw declaration rejected: " ^ raw) true rejected)
+    [" raw_args(raw_item,n)"; " raw_args(n,n)"; " raw_args(n,ret)";
+     " raw_args(n,\"a,b\")"; " raw_args()"]
+
 let () =
   Alcotest.run "JSIL procedure variants"
     [
       ( "frontend",
         [
+          Alcotest.test_case "raw argument metadata" `Quick raw_argument_metadata;
           Alcotest.test_case "scope metadata roundtrip/default" `Quick scope_roundtrip;
           Alcotest.test_case "one generated public scope witness" `Quick scope_generated_once;
           Alcotest.test_case "exact integer loop length" `Quick integer_loop_length;

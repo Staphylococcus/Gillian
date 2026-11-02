@@ -186,7 +186,7 @@ let jsil2gil_spec (spec : Spec.t) : GSpec.t =
   {
     spec_name = Utf16.canonical spec.name;
     spec_params = spec.params;
-    spec_raw_args = None;
+    spec_raw_args = spec.raw_args;
     spec_sspecs = List.map jsil2gil_sspec spec.sspecs;
     spec_normalised = spec.normalised;
     spec_incomplete = spec.incomplete;
