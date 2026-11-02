@@ -31,7 +31,7 @@ proc Array_call () {
 proc Array_construct (xsc, vthis) {
             (* Default array construction *)
             array := "create_default_object" ($larr_proto, "Array", true);
-            [array, "length"] := {{ "d", 0, true, false, true }};
+            [array, "length"] := {{ "d", 0, true, false, false }};
 
             (* All runtime arguments *)
             arguments := args;
@@ -49,8 +49,8 @@ proc Array_construct (xsc, vthis) {
   check:    len_32 := "i__toUint32" (len) with elab;
             goto [len = len_32] set thrw;
 
-  set:      PHI(prop_a: prop_num, prop_name; enum: true, false);
-            ret_def_a := "a__defineOwnProperty" (array, prop_a, {{ "d", len, true, enum, true }}, true) with elab;
+  set:      PHI(prop_a: prop_num, prop_name; enum: true, false; configurable: true, false);
+            ret_def_a := "a__defineOwnProperty" (array, prop_a, {{ "d", len, true, enum, configurable }}, true) with elab;
             goto rlab;
 
             (* Form 4(b): new Array([item1 [, item2 [, ...]]] *)
