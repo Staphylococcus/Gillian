@@ -2598,8 +2598,10 @@ let optional_timeout cap =
   let configured = int_of_string (List.assoc "timeout" z3_config) in
   string_of_int (if configured = 0 then cap else min cap configured)
 
-(* A strict bounded natural counter pair may use one optional complete-query
-   witness: propose 0/2 for an explicit (lower + 1) < upper, otherwise 0/1.
+(* A bounded natural counter pair may use one optional complete-query witness:
+   preserve 0/2 for explicit (lower + 1) < upper, otherwise 0/1, whenever the
+   original weak lower bound is present. A strict-only 0 < lower instead tries
+   1/3 or 1/2, respectively; these are guesses, never added source premises.
    Every original assertion/type remains present. Only a native validated SAT
    model decides; failed hints keep the unchanged path. *)
 let nonempty_counter_model fs gamma =
@@ -2615,7 +2617,7 @@ let nonempty_counter_model fs gamma =
     | Expr.BinOp (LVar x, FLessThanEqual, Lit (Num bound)) when x = name ->
         bound >= 0. && bound <= 9007199254740991.
     | _ -> false) fs in
-  let ordered = List.filter_map (function
+  let ordered_for natural = List.filter_map (function
     | Expr.BinOp (LVar lower, FLessThan, LVar upper)
       when lower <> upper && SS.mem lower numbers && SS.mem upper numbers
         && natural lower
@@ -2623,6 +2625,12 @@ let nonempty_counter_model fs gamma =
         && bounded upper ->
           Some (lower, upper)
     | _ -> None) (Expr.Set.elements fs) in
+  let ordered = ordered_for natural in
+  let ordered = if ordered <> [] then ordered else ordered_for (fun name ->
+    Expr.Set.mem (Expr.UnOp (IsInt, Expr.LVar name)) fs
+    && Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThan, Expr.LVar name)) fs
+    && not (Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThanEqual,
+      Expr.LVar name)) fs)) in
   if not !Config.Verification.total || !Config.under_approximation
      || SS.cardinal numbers < 2 then None else
   match ordered with
@@ -2632,9 +2640,13 @@ let nonempty_counter_model fs gamma =
         if Expr.Set.mem (Expr.BinOp
           (Expr.BinOp (Expr.LVar lower, FPlus, Expr.num 1.), FLessThan,
            Expr.LVar upper)) fs then 2. else 1. in
+      let lower_value, upper_value =
+        if Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThanEqual,
+          Expr.LVar lower)) fs then 0., upper_value
+        else 1., upper_value +. 1. in
       let query = List.fold_left (fun query (name, value) -> Expr.Set.add
         (Expr.BinOp (Expr.LVar name, ValueEqual, Expr.num value)) query)
-        fs [lower, 0.; upper, upper_value] in
+        fs [lower, lower_value; upper, upper_value] in
       if Expr.Set.equal query fs then None else
       try run_sat ~caller_kind:"optional-nonempty-counter" ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
           ~raw_unknown:true query gamma

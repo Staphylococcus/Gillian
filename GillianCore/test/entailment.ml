@@ -17505,3 +17505,204 @@ let tests = tests @
         Alcotest.test_case "positive trace smaller current NaN infinity whole contradictions" `Quick
           (with_total positive_trace_current_frame_nonfinite)]
    | _ -> [])
+
+(* Exact current query1098: all20 atoms/Gamma23, including its real ALoc.
+   Native validation covers the complete model; lifting below checks only the
+   two Number roles, without inventing Object/List contents. *)
+let strict_counter_fixture label =
+  let name x = if label = "saved" then x else if label = "collision" then
+      if x = "#pcIndex" then "#z_nonempty_counter" else if x = "#nodeN" then "#a_nonempty_counter"
+      else x ^ "_strict_collision" else x ^ "_strict_counter_" ^ label in
+  let rename = object inherit [_] Visitors.endo
+    method! visit_LVar () _ x = if x = "#loc_372" then Expr.ALoc x else Expr.LVar (name x)
+  end in
+  let one text = let parsed = parse_gil_set [text] in
+    Alcotest.(check int) "strict counter one genuine AST atom" 1 (Expr.Set.cardinal parsed);
+    rename#visit_expr () (Expr.Set.choose parsed) in
+  let fs = Expr.Set.of_list (List.map one [
+    "(! (#nodeB == #loc_372))"; "(! (#loc_372 == #nodeB))";
+    "(is_int #nodeN)"; "(is_int #pcIndex)";
+    "(0i i<= (l-len #lvar_1364))"; "(0i i<= (l-len #lvar_1365))";
+    "(0i i<= (l-len #lvar_1666))"; "(0i i<= (l-len #nodeValues))";
+    "(0i i<= (l-len #pcPrefix))"; "(0i i<= (l-len #pcSuffix))";
+    "(0i i<= (as_int #nodeN))";
+    "(0i i<= ((as_int #nodeN) i+ (-1i i* (as_int #pcIndex))))";
+    "(0. < #pcIndex)"; "(0. <= #nodeN)"; "(#nodeN == #nodeN)";
+    "(#nodeN <= 4294967295.)"; "(#pcIndex == #pcIndex)";
+    "(#pcIndex < #nodeN)"; "(#pcIndex <= 4294967295.)";
+    "((u16-len #pcCurrent) i<= 9007199254740991i)"]) in
+  let gamma = Hashtbl.create 23 in
+  List.iter (fun (x,t) -> Hashtbl.add gamma (name x) t)
+    ["#nodeKeys",Type.SetType; "#lvar_1666",Type.ListType; "#pcPrefix",Type.ListType;
+     "#pcOutputKeys",Type.SetType; "#pcIndex",Type.NumberType; "#nodeMax",Type.NumberType;
+     "#lvar_1364",Type.ListType; "#nodeSafe",Type.NumberType; "#nodeMin",Type.NumberType;
+     "#nodeB",Type.ObjectType; "#pcSuffix",Type.ListType; "#nodeN",Type.NumberType;
+     "#lvar_1667",Type.SetType; "#pcBeforeKeys",Type.SetType; "#pcAfterKeys",Type.SetType;
+     "#nodeEps",Type.NumberType; "#pcCurrent",Type.Utf16Type; "#lvar_1365",Type.ListType;
+     "#lvar_1363",Type.SetType; "#nodeValues",Type.ListType; "#lvar_1665",Type.Utf16Type;
+     "#lvar_1362",Type.SetType; "#lvar_1361",Type.SetType];
+  Alcotest.(check int) "complete sampled current FS20" 20 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "complete sampled current Gamma23" 23 (Hashtbl.length gamma);
+  Alcotest.(check bool) "actual ALoc never becomes an untyped LVar" true
+    (Expr.Set.exists (fun e -> Utils.Containers.SS.mem "#loc_372" (Expr.alocs e)) fs
+     && not (Expr.Set.exists (fun e -> Utils.Containers.SS.mem "#loc_372" (Expr.lvars e)) fs));
+  fs,gamma,Expr.LVar (name "#pcIndex"),Expr.LVar (name "#nodeN"),one
+
+let strict_counter_pins fs lower upper a b = fs
+  |> Expr.Set.add (bin ValueEqual lower (Expr.num a))
+  |> Expr.Set.add (bin ValueEqual upper (Expr.num b))
+
+let strict_counter_endpoint label before contexts caller expected gamma status =
+  let printed = zero_decline_compact (typed_alias_core_expected_fs expected) in
+  let selected = List.filter (fun c -> pending_context_field "caller" c = `String caller
+    && zero_decline_compact (pending_context_field "original_fs" c |> typed_lookup_alias_text) = printed) contexts in
+  Alcotest.(check int) (label ^ " one exact complete-source endpoint") 1 (List.length selected);
+  let context = List.hd selected in
+  typed_alias_core_check_gamma label (nonblank_counter_types gamma) context;
+  let optional = caller = "optional-nonempty-counter" in
+  List.iter (fun (key,value) -> Alcotest.(check bool) (label ^ " policy " ^ key) true
+    (pending_context_field key context = value))
+    ["raw_unknown",`Bool optional; "timeout_ms",`String (if optional then Smt.optional_timeout 1000 else "30000");
+     "phase_selection",`Int 3];
+  let query = pending_context_field "query" context |> typed_lookup_alias_text in
+  let rows = symbolic_prefix_new_rows before |> List.filter (fun row -> smt_result_field "query" row = query) in
+  Alcotest.(check int) (label ^ " one actual joined native result") 1 (List.length rows);
+  Alcotest.(check string) (label ^ " actual native status") status (smt_result_field "result" (List.hd rows));
+  context
+
+let strict_counter_values label model gamma lower upper wanted =
+  Printf.printf "STRICT_COUNTER_NATIVE_MODEL[%s]=%s\n%!" label (Fmt.str "%a" Smt.pp_model model);
+  let values = Hashtbl.create 2 in
+  Smt.lift_model model gamma (Hashtbl.add values) (Expr.Set.of_list [lower;upper]);
+  let value = function
+    | Expr.LVar name -> (match Hashtbl.find_opt values name with
+      | Some (Expr.Lit (Num n)) -> n | _ -> Alcotest.fail "missing actual counter Number")
+    | _ -> Alcotest.fail "counter role is not an original LVar" in
+  let a,b = value lower,value upper in
+  Alcotest.(check bool) (label ^ " actual finite integral ordered Number roles") true
+    (Float.is_finite a && Float.is_finite b && floor a = a && floor b = b
+     && 0. <= a && a < b && b <= 9007199254740991.);
+  Option.iter (fun (x,y) -> List.iter (fun (actual,expected) ->
+    Alcotest.(check int64) (label ^ " exact actual binary64 role")
+      (Int64.bits_of_float expected) (Int64.bits_of_float actual)) [a,x;b,y]) wanted
+
+let strict_counter_run ?hint ?(required=false) ?wanted label fs gamma lower upper final =
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+  finite_number_bound_complete label before contexts final;
+  List.iter (fun c -> Alcotest.(check bool) (label ^ " full native model validation") true
+    (pending_context_field "model_validate" (pending_context_field "initial_options" c) = `String "true")) contexts;
+  (match hint with
+   | Some (a,b,status) ->
+       let c = strict_counter_endpoint label before contexts "optional-nonempty-counter"
+         (strict_counter_pins fs lower upper a b) gamma status in
+       if List.exists (fun e -> Utils.Containers.SS.mem "#loc_372" (Expr.alocs e)) original then (
+         let encoded = pending_context_field "encoded_assertions" c in
+         Alcotest.(check bool) "actual ALoc is declared as Int in the full query" true
+           (match encoded with `List xs -> List.mem (`String "(declare-const $$loc_372 Int)") xs | _ -> false))
+   | None -> Alcotest.(check bool) (label ^ " ineligible guard emits no counter witness") true
+       (not (List.exists (fun c -> pending_context_field "caller" c = `String "optional-nonempty-counter") contexts)));
+  if required then ignore (strict_counter_endpoint label before contexts "required-complete" fs gamma final);
+  Alcotest.(check bool) (label ^ " actual complete model status") (final = "sat") (Option.is_some model);
+  Option.iter (fun model -> strict_counter_values label model gamma lower upper wanted) model;
+  nonblank_counter_retained label fs gamma original types;
+  model
+
+let strict_counter_original_cache () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,lower,upper,_ = strict_counter_fixture "saved" in
+  ignore (strict_counter_run ~hint:(1.,2.,"sat") ~wanted:(1.,2.) "strict-saved20" fs gamma lower upper "sat");
+  let log = nonblank_counter_read "file.log" and files = List.sort String.compare (nonblank_counter_files ())
+  and contexts = Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare in
+  let model = Smt.check_sat fs gamma in
+  Alcotest.(check bool) "strict complete-key cache emits no new endpoint" true
+    (log = nonblank_counter_read "file.log" && files = List.sort String.compare (nonblank_counter_files ())
+     && contexts = (Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare));
+  strict_counter_values "strict-cached" (Option.get model) gamma lower upper (Some (1.,2.));
+  let changed = Hashtbl.copy gamma in Hashtbl.add changed "#strict_counter_unused" Type.BooleanType;
+  ignore (strict_counter_run ~hint:(1.,2.,"sat") ~wanted:(1.,2.) "strict-unused-Gamma-cache-miss"
+    fs changed lower upper "sat"))
+
+let strict_counter_renamed_span () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun label -> let fs,gamma,lower,upper,_ = strict_counter_fixture label in
+    ignore (strict_counter_run ~hint:(1.,2.,"sat") ~wanted:(1.,2.) label fs gamma lower upper "sat"))
+    ["alpha";"collision"];
+  let fs,gamma,lower,upper,one = strict_counter_fixture "span" in
+  ignore (strict_counter_run ~hint:(1.,3.,"sat") ~wanted:(1.,3.) "strict-successor-span"
+    (Expr.Set.add (one "((#pcIndex + 1.) < #nodeN)") fs) gamma lower upper "sat"))
+
+let strict_counter_guards_weak () = with_nonblank_counter_trace (fun () ->
+  (* Every encoded guard fixture is well typed. Int-domain controls below use
+     integer operators, never malformed IsInt/Number Gamma as a fake decline. *)
+  List.iter (fun guard ->
+    let a = Expr.LVar ("#strict_guard_" ^ guard ^ "_lower")
+    and b = Expr.LVar ("#strict_guard_" ^ guard ^ "_upper") in
+    let gamma = Hashtbl.create 3 in
+    List.iter (function Expr.LVar n -> Hashtbl.add gamma n Type.NumberType | _ -> assert false) [a;b];
+    let integer = Expr.UnOp (IsInt,a) and strict = bin FLessThan (Expr.num 0.) a in
+    let bound = bin FLessThanEqual b (Expr.num 10.) in
+    let fs = strict_counter_pins (Expr.Set.of_list [integer; Expr.UnOp (IsInt,b);strict;
+      bin FLessThan a b; bound]) a b 5. 6. in
+    let fs = match guard with
+      | "missing-integrality" -> Expr.Set.remove integer fs
+      | "missing-positive" -> Expr.Set.remove strict fs
+      | "missing-bound" -> Expr.Set.remove bound fs
+      | "ambiguous" -> let c = Expr.LVar "#strict_guard_second_upper" in
+          Hashtbl.add gamma "#strict_guard_second_upper" Type.NumberType;
+          Expr.Set.union fs (Expr.Set.of_list [Expr.UnOp (IsInt,c);bin FLessThan a c;
+            bin FLessThanEqual c (Expr.num 10.);bin ValueEqual c (Expr.num 7.)])
+      | _ -> assert false in
+    ignore (strict_counter_run ~required:true ~wanted:(5.,6.) guard fs gamma a b "sat"))
+    ["missing-integrality";"missing-positive";"missing-bound";"ambiguous"];
+  List.iter (fun span ->
+    let fs,gamma,lower,upper,one = strict_counter_fixture (if span then "both-span" else "both") in
+    let fs = Expr.Set.add (one "(0. <= #pcIndex)") fs in
+    let fs = if span then Expr.Set.add (one "((#pcIndex + 1.) < #nodeN)") fs else fs in
+    ignore (strict_counter_run ~hint:(0.,(if span then 2. else 1.),"unsat") ~required:true
+      "both-bounds-retains-old-zero-witness" fs gamma lower upper "sat")) [false;true];
+  let a = Expr.LVar "#weak_priority_lower" and b = Expr.LVar "#weak_priority_upper"
+  and c = Expr.LVar "#strict_other_lower" and d = Expr.LVar "#strict_other_upper" in
+  let gamma = Hashtbl.create 4 in
+  List.iter (function Expr.LVar n -> Hashtbl.add gamma n Type.NumberType | _ -> assert false) [a;b;c;d];
+  let fs = Expr.Set.of_list [Expr.UnOp (IsInt,a);Expr.UnOp (IsInt,b);Expr.UnOp (IsInt,c);Expr.UnOp (IsInt,d);
+    bin FLessThanEqual (Expr.num 0.) a;bin FLessThan a b;bin FLessThanEqual b (Expr.num 10.);
+    bin FLessThan (Expr.num 0.) c;bin FLessThan c d;bin FLessThanEqual d (Expr.num 10.)] in
+  ignore (strict_counter_run ~hint:(0.,1.,"sat") ~wanted:(0.,1.)
+    "old-weak-pair-priority-over-another-strict-pair" fs gamma a b "sat");
+  let a = Expr.LVar "#strict_integer_lower" and b = Expr.LVar "#strict_integer_upper" in
+  let gamma = Hashtbl.create 2 in
+  Hashtbl.add gamma "#strict_integer_lower" Type.IntType; Hashtbl.add gamma "#strict_integer_upper" Type.IntType;
+  let fs = Expr.Set.of_list [bin ILessThan (Expr.int 0) a;bin ILessThan a b;
+    bin ILessThanEqual b (Expr.int 10);bin Equal a (Expr.int 1);bin Equal b (Expr.int 2)] in
+  let before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+  finite_number_bound_complete "genuine-Int-not-Number" before contexts "sat";
+  ignore (strict_counter_endpoint "genuine-Int-not-Number" before contexts "required-complete" fs gamma "sat");
+  Alcotest.(check bool) "genuine Int-domain pair never enters FP witness" true
+    (Option.is_some model && not (List.exists (fun c -> pending_context_field "caller" c = `String "optional-nonempty-counter") contexts)))
+
+let strict_counter_fallback_contradiction () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,lower,upper,_ = strict_counter_fixture "conflict" in
+  ignore (strict_counter_run ~hint:(1.,2.,"unsat") ~required:true ~wanted:(2.,3.) "strict-hint-conflict"
+    (strict_counter_pins fs lower upper 2. 3.) gamma lower upper "sat");
+  let fs,gamma,lower,upper,_ = strict_counter_fixture "contradiction" in
+  let fs = Expr.Set.add (bin ValueEqual upper (Expr.num 1.)) fs in
+  ignore (strict_counter_run ~hint:(1.,2.,"unsat") "strict-whole-contradiction" fs gamma lower upper "unsat");
+  let before = nonblank_counter_rows () and caller = "control-strict-counter-complete-contradiction" in
+  let rejected,contexts = pending_context_capture (fun () -> Option.is_none (Smt.exec_sat ~caller_kind:caller fs gamma)) in
+  Alcotest.(check bool) "distinct complete unhinted original is actually UNSAT" true rejected;
+  finite_number_bound_complete "strict-complete-contradiction" before contexts "unsat";
+  ignore (strict_counter_endpoint "strict-complete-contradiction" before contexts caller fs gamma "unsat"))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None ->
+       [Alcotest.test_case "strict natural counter exact current20 Gamma23 full model and cache" `Quick
+          (with_total strict_counter_original_cache);
+        Alcotest.test_case "strict natural counter renamed colliding and successor-span models" `Quick
+          (with_total strict_counter_renamed_span);
+        Alcotest.test_case "strict natural counter guard types ambiguity and old weak witnesses" `Quick
+          (with_total strict_counter_guards_weak);
+        Alcotest.test_case "strict natural counter conflicting hint fallback and whole contradiction" `Quick
+          (with_total strict_counter_fallback_contradiction)]
+   | _ -> [])
