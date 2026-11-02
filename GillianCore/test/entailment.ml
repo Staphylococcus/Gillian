@@ -18871,12 +18871,19 @@ let expanded_nonblank_filter_native () = with_nonblank_counter_trace (fun () ->
   let ambiguous=Expr.Set.of_list [Expr.UnOp (IsInt,lower);Expr.UnOp (IsInt,upper);
     Expr.UnOp (IsInt,position);bin FLessThan (Expr.num 0.) lower;
     bin FLessThan lower upper;bin FLessThanEqual upper (Expr.num 10.);
+    bin FLessThanEqual lower (Expr.num 10.);
+    bin FLessThanEqual position (Expr.num 10.);
     bin FLessThanEqual (Expr.num 0.) position;bin FLessThanEqual position lower;
     bin ValueEqual position (Expr.num 0.);
     not_ (bin Equal (Expr.UnOp (Utf16Trim,head)) (nonblank_utf16 ""));
     not_ (bin Equal (Expr.UnOp (Utf16Trim,other)) (nonblank_utf16 ""));
     bin ValueEqual other (nonblank_utf16 "a");
     bin ValueEqual head (nonblank_utf16 "a")] in
+  (* The one-guard counterpart must be eligible, making the two-head decline
+     causal rather than an accidental failure of another structural guard. *)
+  let one = Expr.Set.remove
+    (not_ (bin Equal (Expr.UnOp (Utf16Trim,other)) (nonblank_utf16 ""))) ambiguous in
+  strict_nonblank_filter_check "saved" one gamma "a" "sat";
   let before=nonblank_counter_rows () in
   ignore (strict_counter_run ~hint:(1.,2.,"sat") ~wanted:(1.,2.)
     "distinct trimmed heads decline strict mode" ambiguous gamma
