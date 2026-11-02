@@ -865,7 +865,7 @@ let unfold_specs
 
   Hashtbl.iter
     (fun name (spec : Spec.t) ->
-      let spec' = unfold_spec ~emit_provenance:(emit_provenance name) preds rec_info spec in
+      let spec' = unfold_spec ~emit_provenance:(emit_provenance spec.spec_name) preds rec_info spec in
       Hashtbl.replace copy_specs name spec')
     specs;
 
