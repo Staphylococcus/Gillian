@@ -18459,3 +18459,200 @@ let tests = tests @
 let tests = tests @
   [Alcotest.test_case "finite difference strict order native controls" `Quick
      (with_total finite_difference_strict_order_controls)]
+
+(* Complete submitted q800 FS/Gamma. Its one rounded max-safe print is
+   restored from native bits433fffffffffffff and checked by the encoding hash. *)
+let wrapped_filter_counter_fixture label =
+  let fs = parse_gil_set [
+    "(! (#lvar_1430 v== -0.))";
+    "(! ((num_to_int #n) == 0.))";
+    "(is_int #lvar_1429)";
+    "(is_int #lvar_1430)";
+    "(is_int #n)";
+    "(is_int (num_to_int #n))";
+    "(is_int (#lvar_1429 + 1.))";
+    "(is_int ((num_to_int #n) - #lvar_1429))";
+    "(is_int ((num_to_int #n) - (#lvar_1429 + 1.)))";
+    "(0i i<= (l-len #loopChosen))";
+    "(0i i<= (l-len #loopLocals))";
+    "(0i i<= (l-len #loopPrefix))";
+    "(0i i<= (l-len #loopSuffix))";
+    "(0i i<= (as_int (#n - 0.)))";
+    "(0i i<= (as_int (#n - #lvar_1429)))";
+    "(0. <= #lvar_1429)";
+    "(0. <= #lvar_1430)";
+    "(0. <= #n)";
+    "(0. <= (num_to_int #n))";
+    "(0. <= (#lvar_1429 + 1.))";
+    "(0. <= ((num_to_int #n) - #lvar_1429))";
+    "(0. <= ((num_to_int #n) - (#lvar_1429 + 1.)))";
+    "(#lvar_1429 < (num_to_int #n))";
+    "(#lvar_1429 <= 4294967294.)";
+    "(#lvar_1429 <= 4294967295.)";
+    "(#lvar_1429 <= #n)";
+    "(#lvar_1430 <= 4294967295.)";
+    "(#lvar_1430 <= #lvar_1429)";
+    "(#n <= 4294967295.)";
+    "((num_to_int #n) == #n)";
+    "((num_to_int #n) <= 4294967295.)";
+    "((num_to_int #n) <= 9007199254740991.)";
+    "((l-len #loopSuffix) i<= 4294967295i)";
+    "((as_int #lvar_1429) == (l-len #loopPrefix))";
+    "((as_int #lvar_1430) == (l-len #loopChosen))";
+    "((as_int #n) == ((l-len #loopPrefix) i+ (l-len #loopSuffix)))";
+    "((as_int (#lvar_1429 + 1.)) == (1i i+ (as_int #lvar_1429)))";
+    "((#lvar_1429 + 1.) <= 4294967295.)";
+    "((#lvar_1429 + 1.) <= (num_to_int #n))";
+    "(((l-len #loopPrefix) i+ (l-len #loopSuffix)) i<= 4294967295i)";
+    "(-u- (#lvar_1425, #lvar_1426) == -u- (#dhPrefixKeys, #dhSuffixKeys))";
+    "(-u- (#lvar_1425, #lvar_1426) == -u- (#lvar_1492, #lvar_1493))";
+  ] in
+  let gamma = Hashtbl.create 14 in
+  List.iter (fun (name,typ) -> Hashtbl.add gamma name typ) [
+    "#lvar_1492",Type.SetType;
+    "#lvar_1426",Type.SetType;
+    "#lvar_1429",Type.NumberType;
+    "#loopPrefix",Type.ListType;
+    "#lvar_1425",Type.SetType;
+    "#dhPrefixKeys",Type.SetType;
+    "#n",Type.NumberType;
+    "#loopOutKeys",Type.SetType;
+    "#lvar_1493",Type.SetType;
+    "#loopSuffix",Type.ListType;
+    "#loopLocals",Type.ListType;
+    "#dhSuffixKeys",Type.SetType;
+    "#lvar_1430",Type.NumberType;
+    "#loopChosen",Type.ListType;
+  ];
+  Alcotest.(check int) "complete q800 atoms" 42 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "complete q800 Gamma" 14 (Hashtbl.length gamma);
+  if label = "saved" then fs,gamma,Expr.LVar "#lvar_1429",Expr.LVar "#n"
+  else
+    let name n = if n = "#n" then "#a_wrapped_upper_" ^ label
+      else if n = "#lvar_1429" then "#z_wrapped_lower_" ^ label
+      else n ^ "_wrapped_" ^ label in
+    let rename = object inherit [_] Visitors.endo
+      method! visit_LVar () _ n = Expr.LVar (name n) end in
+    let renamed = Expr.Set.fold (fun e acc -> Expr.Set.add (rename#visit_expr () e) acc) fs Expr.Set.empty in
+    let types = Hashtbl.create 14 in
+    Hashtbl.iter (fun n typ -> Hashtbl.add types (name n) typ) gamma;
+    renamed,types,Expr.LVar (name "#lvar_1429"),Expr.LVar (name "#n")
+
+let wrapped_filter_counter_original () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,lower,upper = wrapped_filter_counter_fixture "saved" in
+  let original=Expr.Set.elements fs and types=nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+  finite_number_bound_complete "wrapped-q800" before contexts "sat";
+  let hinted = strict_counter_pins fs lower upper 0. 1. in
+  let c = strict_counter_endpoint "wrapped-q800" before contexts "optional-nonempty-counter"
+    hinted gamma "sat" in
+  let encoded = match pending_context_field "encoded_assertions" c with
+    | `List xs -> List.map typed_lookup_alias_text xs
+    | _ -> Alcotest.fail "encoded assertions are not a native list" in
+  let pins = [
+    "(assert(=(Num $$lvar_1429)(Num((_ to_fp 11 53)#x0000000000000000))))";
+    "(assert(=(Num $$n)(Num((_ to_fp 11 53)#x3ff0000000000000))))"] in
+  List.iter (fun pin -> Alcotest.(check int) "one literal hint only" 1
+    (List.length (List.filter (String.equal pin) encoded))) pins;
+  let base = List.filter (fun x -> not (List.mem x pins)) encoded |> List.sort String.compare in
+  Alcotest.(check int) "all original native encodings retained" 55 (List.length base);
+  Alcotest.(check string) "exact pending query native encoding"
+    "931dbbc3ce2615ac983e378e9b69ea87" (Digest.to_hex (Digest.string (String.concat "\n" base)));
+  let model = match model with Some m -> m | None -> Alcotest.fail "missing native full model" in
+  strict_counter_values "wrapped-q800" model gamma lower upper (Some (0.,1.));
+  primary_check_lift "wrapped output zero" model gamma ["#lvar_1430",Literal.Num 0.];
+  let old = nonblank_counter_rows () in
+  let cached = Smt.check_sat fs gamma in
+  Alcotest.(check bool) "full query cache emits no new endpoint" true
+    (old = nonblank_counter_rows () && Option.is_some cached);
+  strict_counter_values "wrapped-cached" (Option.get cached) gamma lower upper (Some (0.,1.));
+  nonblank_counter_retained "wrapped-q800" fs gamma original types)
+
+let wrapped_filter_counter_names () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun label ->
+    let fs,gamma,lower,upper = wrapped_filter_counter_fixture label in
+    ignore (strict_counter_run ~hint:(0.,1.,"sat") ~wanted:(0.,1.) label
+      fs gamma lower upper "sat")) ["alpha";"collision"];
+  let fs,gamma,lower,upper = wrapped_filter_counter_fixture "reverse" in
+  let cast = Expr.UnOp (ToIntOp,upper) in
+  let fs = fs |> Expr.Set.remove (bin Equal cast upper)
+    |> Expr.Set.add (bin Equal upper cast) in
+  ignore (strict_counter_run ~hint:(0.,1.,"sat") ~wanted:(0.,1.)
+    "reverse retained alias" fs gamma lower upper "sat"))
+
+let wrapped_filter_counter_fallback () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,a,b,final) ->
+    let fs,gamma,lower,upper = wrapped_filter_counter_fixture label in
+    let fs = strict_counter_pins fs lower upper a b in
+    ignore (strict_counter_run ~hint:(0.,1.,"unsat")
+      ?wanted:(if final="sat" then Some (a,b) else None)
+      label fs gamma lower upper final);
+    (* Failed guesses cannot reject a reachable larger state. Check the
+       unchanged original directly, independently of the optional witness. *)
+    let caller = "control-wrapped-" ^ label in
+    let before = nonblank_counter_rows () in
+    let model,contexts = pending_context_capture (fun () -> Smt.exec_sat ~caller_kind:caller fs gamma) in
+    finite_number_bound_complete label before contexts final;
+    ignore (strict_counter_endpoint label before contexts caller fs gamma final);
+    Alcotest.(check bool) "distinct original full native verdict" (final="sat") (Option.is_some model);
+    Option.iter (fun m -> strict_counter_values label m gamma lower upper (Some (a,b))) model)
+    ["larger-fallback",2.,3.,"sat";"signed-zero-fallback",-.0.,1.,"sat";
+     "whole-contradiction",2.,1.,"unsat"])
+
+let wrapped_filter_counter_guards () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,lower,upper = wrapped_filter_counter_fixture "guards" in
+  let decline label facts types =
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " recognizer declines without a solver call") true
+      (Option.is_none (Smt.nonempty_counter_model facts types)
+       && before = nonblank_counter_rows ()) in
+  List.iter (fun (label,atom) -> decline label (Expr.Set.remove atom fs) gamma)
+    ["missing cast alias",bin Equal (Expr.UnOp (ToIntOp,upper)) upper;
+     "missing lower integrality",Expr.UnOp (IsInt,lower);
+     "missing lower sign",bin FLessThanEqual (Expr.num 0.) lower;
+     "missing upper integrality",Expr.UnOp (IsInt,upper);
+     "missing upper bound",bin FLessThanEqual upper (Expr.num 4294967295.)];
+  let upper_name = match upper with Expr.LVar n -> n | _ -> assert false in
+  let missing = Hashtbl.copy gamma in Hashtbl.remove missing upper_name;
+  decline "absent original Number type" fs missing;
+  let wrong = Hashtbl.copy gamma in Hashtbl.replace wrong upper_name Type.IntType;
+  decline "wrong original Number type (recognizer only)" fs wrong;
+  let extra = Expr.LVar "#wrapped_other_upper" in
+  let types = Hashtbl.copy gamma in Hashtbl.add types "#wrapped_other_upper" Type.NumberType;
+  let fs = Expr.Set.union fs (Expr.Set.of_list [Expr.UnOp (IsInt,extra);
+    bin FLessThanEqual extra (Expr.num 10.);bin FLessThan lower (Expr.UnOp (ToIntOp,extra));
+    bin Equal (Expr.UnOp (ToIntOp,extra)) extra]) in
+  decline "two wrapped pairs stay ambiguous" fs types;
+  let a=Expr.LVar "#wrapped_direct_a" and b=Expr.LVar "#wrapped_direct_b"
+  and c=Expr.LVar "#wrapped_direct_c" and d=Expr.LVar "#wrapped_direct_d" in
+  let gamma=Hashtbl.create 4 in
+  List.iter (function Expr.LVar n -> Hashtbl.add gamma n Type.NumberType | _ -> assert false) [a;b;c;d];
+  let natural x = [Expr.UnOp (IsInt,x);bin FLessThanEqual (Expr.num 0.) x;
+    bin FLessThanEqual x (Expr.num 10.)] in
+  let base = Expr.Set.of_list (List.concat_map natural [a;b;c;d] @
+    [bin Equal (Expr.UnOp (ToIntOp,d)) d;bin FLessThan a (Expr.UnOp (ToIntOp,d))]) in
+  decline "old direct ambiguity cannot be replaced by a unique wrapped pair"
+    (Expr.Set.union base (Expr.Set.of_list [bin FLessThan a b;bin FLessThan a c])) gamma;
+  (* Old strict direct recognition still wins over a new weak wrapped pair. *)
+  let fs = Expr.Set.of_list [Expr.UnOp (IsInt,a);Expr.UnOp (IsInt,b);
+    bin FLessThan (Expr.num 0.) a;bin FLessThan a b;bin FLessThanEqual b (Expr.num 10.);
+    Expr.UnOp (IsInt,c);Expr.UnOp (IsInt,d);bin FLessThanEqual (Expr.num 0.) c;
+    bin FLessThanEqual d (Expr.num 10.);bin FLessThan c (Expr.UnOp (ToIntOp,d));
+    bin Equal (Expr.UnOp (ToIntOp,d)) d;
+    bin ValueEqual c (Expr.num 5.);bin ValueEqual d (Expr.num 6.)] in
+  ignore (strict_counter_run ~hint:(1.,2.,"sat") ~wanted:(1.,2.)
+    "old strict direct priority over wrapped weak" fs gamma a b "sat"))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None ->
+       [Alcotest.test_case "wrapped filter counter exact native query model and cache" `Quick
+          (with_total wrapped_filter_counter_original);
+        Alcotest.test_case "wrapped filter counter renamed and reversed alias native models" `Quick
+          (with_total wrapped_filter_counter_names);
+        Alcotest.test_case "wrapped filter counter failed hints full fallback and contradiction" `Quick
+          (with_total wrapped_filter_counter_fallback);
+        Alcotest.test_case "wrapped filter counter eligibility ambiguity and old priority" `Quick
+          (with_total wrapped_filter_counter_guards)]
+   | _ -> [])

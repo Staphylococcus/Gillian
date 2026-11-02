@@ -2651,12 +2651,29 @@ let nonempty_counter_model fs gamma =
         && bounded upper ->
           Some (lower, upper)
     | _ -> None) (Expr.Set.elements fs) in
-  let ordered = ordered_for natural in
-  let ordered = if ordered <> [] then ordered else ordered_for (fun name ->
+  let strict_natural name =
     Expr.Set.mem (Expr.UnOp (IsInt, Expr.LVar name)) fs
     && Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThan, Expr.LVar name)) fs
     && not (Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThanEqual,
-      Expr.LVar name)) fs)) in
+      Expr.LVar name)) fs) in
+  let ordered = ordered_for natural in
+  let ordered = if ordered <> [] then ordered else ordered_for strict_natural in
+  (* Keep every old direct-pair priority, including ambiguous declines. Only
+     then recognize the observed ToInteger upper with its retained equality.
+     This selects a full-query model guess; no cast or premise is removed. *)
+  let wrapped_for natural = List.filter_map (function
+    | Expr.BinOp (LVar lower, FLessThan, (UnOp (ToIntOp, LVar upper) as cast))
+      when lower <> upper && SS.mem lower numbers && SS.mem upper numbers
+        && natural lower
+        && Expr.Set.mem (Expr.UnOp (IsInt, Expr.LVar upper)) fs
+        && bounded upper
+        && (Expr.Set.mem (Expr.BinOp (cast, Equal, Expr.LVar upper)) fs
+            || Expr.Set.mem (Expr.BinOp (Expr.LVar upper, Equal, cast)) fs) ->
+          Some (lower, upper)
+    | _ -> None) (Expr.Set.elements fs) in
+  let ordered = if ordered <> [] then ordered else
+    let weak = wrapped_for natural in
+    if weak <> [] then weak else wrapped_for strict_natural in
   if not !Config.Verification.total || !Config.under_approximation
      || SS.cardinal numbers < 2 then None else
   match ordered with
