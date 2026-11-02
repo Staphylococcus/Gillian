@@ -17558,7 +17558,8 @@ let strict_counter_endpoint label before contexts caller expected gamma status =
   Alcotest.(check int) (label ^ " one exact complete-source endpoint") 1 (List.length selected);
   let context = List.hd selected in
   typed_alias_core_check_gamma label (nonblank_counter_types gamma) context;
-  let optional = caller = "optional-nonempty-counter" in
+  let optional = List.mem caller ["optional-nonempty-counter";
+    "optional-nonblank-counter";"optional-nonblank-whitespace-counter"] in
   List.iter (fun (key,value) -> Alcotest.(check bool) (label ^ " policy " ^ key) true
     (pending_context_field key context = value))
     ["raw_unknown",`Bool optional; "timeout_ms",`String (if optional then Smt.optional_timeout 1000 else "30000");
