@@ -18899,3 +18899,81 @@ let tests = tests @
        "strict nonblank opened-prefix full model, passive head and ambiguity" `Quick
        (with_total expanded_nonblank_filter_native)]
    | _ -> [])
+
+
+(* The reached invariant has a weak-zero counter and fresh Number binders.
+   The unchanged complete head witness must precede the counter-only guess. *)
+let weak_nonblank_precedence_native () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma = nonblank_counter_fixture () in
+  Hashtbl.add gamma "#fresh_k" Type.NumberType;
+  Hashtbl.add gamma "#fresh_to" Type.NumberType;
+  let fs = Expr.Set.union fs (parse_gil_set [
+    "(is_int #fresh_k)"; "(#fresh_k <= #n)";
+    "(! (#fresh_to v== -0.))"
+  ]) in
+  let before = nonblank_counter_rows () and atoms = Expr.Set.elements fs
+  and types = nonblank_counter_types gamma in
+  let model,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+  finite_number_bound_complete "weak-nonblank-first" before contexts "sat";
+  ignore (strict_counter_endpoint "weak-nonblank-first" before contexts
+    "optional-nonblank-counter" (nonblank_counter_pins fs 0. 1. 0. "a") gamma "sat");
+  Alcotest.(check int) "only the complete head witness is dispatched" 1
+    (List.length (List.filter (fun row -> not (List.mem row before))
+      (nonblank_counter_rows ())));
+  let model = match model with Some m -> m | None -> Alcotest.fail "missing full model" in
+  nonblank_counter_model_values "weak-nonblank-first" model gamma 0. 1. 0. "a";
+  let closed = nonblank_counter_rows () in
+  ignore (Smt.check_sat fs gamma);
+  Alcotest.(check bool) "complete model cache emits no second query" true
+    (closed = nonblank_counter_rows ());
+  nonblank_counter_retained "weak-nonblank-first" fs gamma atoms types)
+
+let weak_nonblank_precedence_fallback () = with_nonblank_counter_trace (fun () ->
+  let original,gamma = nonblank_counter_fixture () in
+  let guard = not_ (bin Equal (Expr.UnOp (Utf16Trim,Expr.LVar "#dhHead"))
+    (nonblank_utf16 "")) in
+  let check label fs rejected_heads =
+    let before = nonblank_counter_rows () and atoms = Expr.Set.elements fs
+    and types = nonblank_counter_types gamma in
+    let model,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+    finite_number_bound_complete label before contexts "sat";
+    Alcotest.(check bool) (label ^ " actual full-state fallback model") true
+      (Option.is_some model);
+    let fresh = List.filter (fun row -> not (List.mem row before))
+      (nonblank_counter_rows ()) in
+    if rejected_heads then (
+      ignore (strict_counter_endpoint label before contexts "optional-nonblank-counter"
+        (nonblank_counter_pins fs 0. 1. 0. "a") gamma "unsat");
+      ignore (strict_counter_endpoint label before contexts "optional-nonblank-whitespace-counter"
+        (nonblank_counter_pins fs 0. 1. 0. " a") gamma "unsat");
+      Alcotest.(check int) "two full hinted rejections followed by native SAT" 3
+        (List.length fresh);
+      let lifted = Hashtbl.create 1 in
+      Smt.lift_model (Option.get model) gamma (Hashtbl.add lifted)
+        (Expr.Set.singleton (Expr.LVar "#dhHead"));
+      let head = Hashtbl.find lifted "#dhHead" in
+      Alcotest.(check bool) "fallback does not fabricate either rejected head" true
+        (head <> nonblank_utf16 "a" && head <> nonblank_utf16 " a")
+    ) else Alcotest.(check bool) "missing trim guard never dispatches head hints" true
+      (List.for_all (fun row -> not (List.mem (smt_result_field "caller" row)
+        ["optional-nonblank-counter";"optional-nonblank-whitespace-counter"])) fresh);
+    let counter_pins = List.fold_left (fun acc (name,value) -> Expr.Set.add
+      (bin ValueEqual (Expr.LVar name) (Expr.num value)) acc)
+      fs ["#k",0.;"#n",1.] in
+    ignore (strict_counter_endpoint label before contexts "optional-nonempty-counter"
+      counter_pins gamma "sat");
+    nonblank_counter_retained label fs gamma atoms types in
+  check "missing-trim-guard" (Expr.Set.remove guard original) false;
+  let fs = List.fold_left (fun fs value -> Expr.Set.add
+    (not_ (bin ValueEqual (Expr.LVar "#dhHead") (nonblank_utf16 value))) fs)
+    original ["a";" a"] in
+  check "both-head-hints-rejected" fs true)
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None -> [
+       Alcotest.test_case "weak nonblank complete head witness precedes counter-only guess" `Quick
+         (with_total weak_nonblank_precedence_native);
+       Alcotest.test_case "weak nonblank missing guard and rejected hints retain native fallback" `Quick
+         (with_total weak_nonblank_precedence_fallback)]
+   | _ -> [])

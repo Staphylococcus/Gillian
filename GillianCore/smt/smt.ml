@@ -4547,10 +4547,15 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   | None ->
       let () = L.verbose (fun m -> m "SAT check not found in cache") in
       let ret =
-        (* A strict-positive nonblank state was not eligible for the old head
-           witness. Try its complete, validated head/counter model first;
-           failed hints retain every existing attempt and required fallback. *)
+        (* Both strict-positive and weak-zero nonblank states need a concrete
+           head as well as counters. Try each existing complete head witness
+           before the less constrained counter-only guess. All eligibility,
+           budgets and full-query validation stay unchanged; failed guesses
+           still reach every remaining attempt and required fallback. *)
         match nonblank_counter_model ~strict_only:true fs gamma with
+        | Some _ as witness -> witness
+        | None ->
+        match nonblank_counter_model fs gamma with
         | Some _ as witness -> witness
         | None ->
         match nonempty_counter_model fs gamma with
@@ -4565,9 +4570,7 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
             | Some _ as witness -> witness
             | None -> (match seeded_model fs gamma with
               | Some _ as witness -> witness
-              | None -> (match nonblank_counter_model fs gamma with
-                | Some _ as witness -> witness
-                | None -> (match neutral_collection_model fs gamma with
+              | None -> (match neutral_collection_model fs gamma with
                   | Some _ as witness -> witness
                   | None -> (match positive_trace_index_model fs gamma with
                     | Some _ as witness -> witness
@@ -4575,7 +4578,7 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
                       let complete_fs = with_checked_index_identities fs gamma in
                       (match natural_gap_model complete_fs gamma with
                        | Some _ as witness -> witness
-                       | None -> exec_sat complete_fs gamma))))))
+                       | None -> exec_sat complete_fs gamma)))))
       in
       let () =
         L.verbose (fun m ->
