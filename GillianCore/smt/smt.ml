@@ -2974,7 +2974,30 @@ let seeded_model fs gamma =
         vars fs
     in
     let try_seed query =
-      try
+      (* Reject only new finite Number guesses contradicted by an original
+         direct literal constraint. This is candidate pruning, never an UNSAT
+         decision about fs. Numeric comparison deliberately identifies +/-0;
+         unsupported expressions and nonfinite literals remain unanalysed. *)
+      let violates left (op : BinOp.t) right = match op with
+        | FLessThan -> not (left < right)
+        | FLessThanEqual -> not (left <= right)
+        | Equal | ValueEqual -> left <> right
+        | _ -> false in
+      let conflicting = Expr.Set.exists (function
+        | Expr.BinOp (LVar name, (Equal | ValueEqual), Lit (Num value))
+        | Expr.BinOp (Lit (Num value), (Equal | ValueEqual), LVar name)
+          when Hashtbl.find_opt gamma name = Some Type.NumberType
+            && Float.is_finite value ->
+            Expr.Set.exists (function
+              | Expr.BinOp (LVar x, op, Lit (Num bound))
+                when x = name && Float.is_finite bound ->
+                  violates value op bound
+              | Expr.BinOp (Lit (Num bound), op, LVar x)
+                when x = name && Float.is_finite bound ->
+                  violates bound op value
+              | _ -> false) fs
+        | _ -> false) (Expr.Set.diff query fs) in
+      if conflicting then None else try
         run_sat ~caller_kind:"optional-seeded-model" ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
           ~raw_unknown:true query gamma
       with SMT_unknown -> None

@@ -17776,3 +17776,142 @@ let tests = tests @
         Alcotest.test_case "bound-derived counter causal rejection fallback and unsafe successor" `Quick
           (with_total bounded_counter_rejections)]
    | _ -> [])
+
+(* Two independent Number roles and retained UTF16 lengths exercise the same
+   generic seed route as the concat invariant. Native validation covers the
+   entire frame; concrete replay below covers its Number atoms only. *)
+let compatible_seed_fixture label =
+  let role x = Expr.LVar ("#compatible_seed_" ^ label ^ "_" ^ x) in
+  let n = role "n" and i = role "i" and s = role "s" and t = role "t"
+  and values = role "values" and frame = role "frame" in
+  let gamma = Hashtbl.create 6 in
+  List.iter (fun (x,typ) -> match x with
+    | Expr.LVar name -> Hashtbl.add gamma name typ | _ -> assert false)
+    [n,Type.NumberType;i,Type.NumberType;s,Type.Utf16Type;t,Type.Utf16Type;
+     values,Type.ListType;frame,Type.BooleanType];
+  let fs = Expr.Set.of_list [Expr.UnOp (IsInt,n);
+    bin FLessThanEqual (Expr.num (-7.)) n;bin FLessThanEqual n (Expr.num 7.);
+    bin Equal i (Expr.num 0.);
+    bin ILessThanEqual (Expr.UnOp (Utf16Len,s)) (Expr.int 8);
+    bin ILessThanEqual (Expr.UnOp (Utf16Len,t)) (Expr.int 8);
+    bin ILessThanEqual (Expr.int 0) (Expr.UnOp (LstLen,values));
+    bin Equal frame (Expr.Lit (Literal.Bool true))] in
+  fs,gamma,n,i,s,t
+
+let compatible_seed_query fs n i s t =
+  let empty = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical "")) in
+  List.fold_left (fun fs (x,value) -> Expr.Set.add (bin Equal x value) fs)
+    fs [n,Expr.num 0.;i,Expr.num 0.;s,empty;t,empty]
+
+let compatible_seed_values label fs gamma model n i bits =
+  Printf.printf "COMPATIBLE_SEED_NATIVE_MODEL[%s]=%s\n%!" label (Fmt.str "%a" Smt.pp_model model);
+  let values = Hashtbl.create 2 in
+  Smt.lift_model model gamma (Hashtbl.add values) (Expr.Set.of_list [n;i]);
+  let value = function
+    | Expr.LVar name -> (match Hashtbl.find_opt values name with
+        | Some (Expr.Lit (Num actual)) when Float.is_finite actual -> actual
+        | _ -> Alcotest.fail (label ^ " missing finite actual Number"))
+    | _ -> assert false in
+  let actual_n = value n and actual_i = value i in
+  Alcotest.(check bool) (label ^ " actual independent counter stays numeric zero") true (actual_i = 0.);
+  Option.iter (fun expected -> Alcotest.(check int64) (label ^ " actual signed-zero identity")
+    (Int64.bits_of_float expected) (Int64.bits_of_float actual_n)) bits;
+  let names = Utils.Containers.SS.union (Expr.lvars n) (Expr.lvars i) in
+  Expr.Set.iter (fun atom ->
+    let used = Expr.lvars atom in
+    if not (Utils.Containers.SS.is_empty used) && Utils.Containers.SS.subset used names then (
+      let concrete = Expr.subst_expr_for_expr ~to_subst:n ~subst_with:(Expr.num actual_n) atom
+        |> Expr.subst_expr_for_expr ~to_subst:i ~subst_with:(Expr.num actual_i) in
+      Alcotest.(check bool) (label ^ " every retained Number atom concretely replayed") true
+        (slice_bound_truth concrete))) fs;
+  actual_n
+
+let compatible_seed_run ?(seed = Some "sat") ?(final = "sat") ?bits label fs gamma n i s t =
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () and full = "control-compatible-seed-full-contradiction" in
+  let model,contexts = pending_context_capture (fun () ->
+    let model = Smt.check_sat fs gamma in
+    if final = "unsat" then (
+      Alcotest.(check bool) (label ^ " original contradiction rejected") true (Option.is_none model);
+      Alcotest.(check bool) (label ^ " distinct unhinted full-frame native UNSAT") true
+        (Option.is_none (Smt.exec_sat ~caller_kind:full fs gamma)));
+    model) in
+  finite_number_bound_complete label before contexts final;
+  List.iter (fun context -> Alcotest.(check bool) (label ^ " actual full model validation") true
+    (pending_context_field "model_validate" (pending_context_field "initial_options" context)
+     = `String "true")) contexts;
+  (match seed with
+   | None -> Alcotest.(check bool) (label ^ " incompatible literal seed has no native endpoint") true
+       (not (List.exists (fun c -> pending_context_field "caller" c = `String "optional-seeded-model") contexts))
+   | Some status ->
+       let expected = compatible_seed_query fs n i s t in
+       ignore (zero_inclusive_list_context label contexts "optional-seeded-model" expected gamma);
+       ignore (nonblank_counter_observe label before "optional-seeded-model" status expected gamma));
+  if final = "unsat" || seed <> Some "sat" then (
+    let caller = if final = "unsat" then full else "required-complete" in
+    ignore (zero_inclusive_list_context label contexts caller fs gamma);
+    ignore (nonblank_counter_observe label before caller final fs gamma));
+  Alcotest.(check bool) (label ^ " complete-query returned model status") (final = "sat") (Option.is_some model);
+  Option.iter (fun model ->
+    let actual = compatible_seed_values label fs gamma model n i bits in
+    if seed = Some "sat" then Alcotest.(check bool)
+      (label ^ " actual compatible seed model is numeric zero") true (actual = 0.)) model;
+  nonblank_counter_retained label fs gamma original types;
+  model
+
+let compatible_seed_zero_cache () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,n,i,s,t = compatible_seed_fixture "cache" in
+  let fs = Expr.Set.add (bin FLessThanEqual (Expr.num 0.) n) fs in
+  ignore (compatible_seed_run "compatible-zero-first" fs gamma n i s t);
+  let log = nonblank_counter_read "file.log" and dumps = List.sort String.compare (nonblank_counter_files ())
+  and contexts = Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare in
+  let cached = Smt.check_sat fs gamma in
+  Alcotest.(check bool) "compatible seed original-key cache emits no endpoint" true
+    (log = nonblank_counter_read "file.log" && dumps = List.sort String.compare (nonblank_counter_files ())
+     && contexts = (Array.to_list (Sys.readdir (pending_context_directory ())) |> List.sort String.compare));
+  Alcotest.(check bool) "compatible cache returns an actual numeric-zero model" true
+    (compatible_seed_values "compatible-cache" fs gamma (Option.get cached) n i None = 0.);
+  let changed = Hashtbl.copy gamma in Hashtbl.add changed "#compatible_seed_unused" Type.BooleanType;
+  ignore (compatible_seed_run "compatible-unused-Gamma-cache-miss" fs changed n i s t))
+
+let compatible_seed_literal_bounds () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,make) ->
+    let fs,gamma,n,i,s,t = compatible_seed_fixture label in
+    ignore (compatible_seed_run ~seed:None label (Expr.Set.add (make n) fs) gamma n i s t))
+    ["strict_lower",(fun n -> bin FLessThan (Expr.num 2.) n);
+     "weak_lower",(fun n -> bin FLessThanEqual (Expr.num 2.) n);
+     "strict_upper",(fun n -> bin FLessThan n (Expr.num (-2.)));
+     "weak_upper",(fun n -> bin FLessThanEqual n (Expr.num (-2.)));
+     "right_literal_equality",(fun n -> bin Equal n (Expr.num 3.));
+     "left_literal_equality",(fun n -> bin ValueEqual (Expr.num 3.) n)])
+
+let compatible_seed_contradiction_fallback () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,n,i,s,t = compatible_seed_fixture "contradiction" in
+  let impossible = fs |> Expr.Set.add (bin FLessThan (Expr.num 2.) n)
+    |> Expr.Set.add (bin FLessThanEqual n (Expr.num 2.)) in
+  ignore (compatible_seed_run ~seed:None ~final:"unsat" "original-whole-contradiction"
+    impossible gamma n i s t);
+  let fs,gamma,n,i,s,t = compatible_seed_fixture "unsupported" in
+  let fs = Expr.Set.add (bin FLessThan (Expr.num 2.) (bin FPlus n (Expr.num 1.))) fs in
+  ignore (compatible_seed_run ~seed:(Some "unsat") "unsupported-expression-keeps-real-attempt-and-fallback"
+    fs gamma n i s t))
+
+let compatible_seed_signed_zeros () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,n,i,s,t = compatible_seed_fixture "signed_zero" in
+  List.iter (fun (label,zero) ->
+    ignore (compatible_seed_run ~bits:zero label
+      (Expr.Set.add (bin ValueEqual n (Expr.num zero)) fs) gamma n i s t))
+    ["compatible-positive-zero",0.;"compatible-negative-zero",-.0.])
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None ->
+       [Alcotest.test_case "compatible literal seeds zero priority full model and cache" `Quick
+          (with_total compatible_seed_zero_cache);
+        Alcotest.test_case "compatible literal seeds direct bounds and equalities both orders" `Quick
+          (with_total compatible_seed_literal_bounds);
+        Alcotest.test_case "compatible literal seeds full contradiction and unsupported fallback" `Quick
+          (with_total compatible_seed_contradiction_fallback);
+        Alcotest.test_case "compatible literal seeds preserve both signed-zero identities" `Quick
+          (with_total compatible_seed_signed_zeros)]
+   | _ -> [])
