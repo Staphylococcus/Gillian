@@ -18601,39 +18601,55 @@ let wrapped_filter_counter_fallback () = with_nonblank_counter_trace (fun () ->
      "whole-contradiction",2.,1.,"unsat"])
 
 let wrapped_filter_counter_guards () = with_nonblank_counter_trace (fun () ->
-  let fs,gamma,lower,upper = wrapped_filter_counter_fixture "guards" in
-  let decline label facts types =
-    let before = nonblank_counter_rows () in
-    Alcotest.(check bool) (label ^ " recognizer declines without a solver call") true
-      (Option.is_none (Smt.nonempty_counter_model facts types)
-       && before = nonblank_counter_rows ()) in
-  List.iter (fun (label,atom) -> decline label (Expr.Set.remove atom fs) gamma)
-    ["missing cast alias",bin Equal (Expr.UnOp (ToIntOp,upper)) upper;
-     "missing lower integrality",Expr.UnOp (IsInt,lower);
-     "missing lower sign",bin FLessThanEqual (Expr.num 0.) lower;
-     "missing upper integrality",Expr.UnOp (IsInt,upper);
-     "missing upper bound",bin FLessThanEqual upper (Expr.num 4294967295.)];
-  let upper_name = match upper with Expr.LVar n -> n | _ -> assert false in
-  let missing = Hashtbl.copy gamma in Hashtbl.remove missing upper_name;
-  decline "absent original Number type" fs missing;
-  let wrong = Hashtbl.copy gamma in Hashtbl.replace wrong upper_name Type.IntType;
-  decline "wrong original Number type (recognizer only)" fs wrong;
+  (* Exercise the public complete-query path with well-typed native fixtures.
+     Missing Number-domain coverage is retained in strict_counter_guards_weak;
+     never encode an invalid Gamma merely to force a recognizer decline. *)
+  let fixture label =
+    let lower=Expr.LVar ("#wrapped_guard_" ^ label ^ "_lower")
+    and upper=Expr.LVar ("#wrapped_guard_" ^ label ^ "_upper") in
+    let gamma=Hashtbl.create 3 in
+    List.iter (function Expr.LVar n -> Hashtbl.add gamma n Type.NumberType | _ -> assert false)
+      [lower;upper];
+    let fs = strict_counter_pins (Expr.Set.of_list [Expr.UnOp (IsInt,lower);
+      Expr.UnOp (IsInt,upper);bin FLessThanEqual (Expr.num 0.) lower;
+      bin FLessThanEqual upper (Expr.num 10.);
+      bin FLessThan lower (Expr.UnOp (ToIntOp,upper));
+      bin Equal (Expr.UnOp (ToIntOp,upper)) upper]) lower upper 2. 3. in
+    fs,gamma,lower,upper in
+  List.iter (fun guard ->
+    let fs,gamma,lower,upper = fixture guard in
+    let atom = match guard with
+      | "missing cast alias" -> bin Equal (Expr.UnOp (ToIntOp,upper)) upper
+      | "missing lower integrality" -> Expr.UnOp (IsInt,lower)
+      | "missing lower sign" -> bin FLessThanEqual (Expr.num 0.) lower
+      | "missing upper integrality" -> Expr.UnOp (IsInt,upper)
+      | "missing upper bound" -> bin FLessThanEqual upper (Expr.num 10.)
+      | _ -> assert false in
+    ignore (strict_counter_run ~required:true ~wanted:(2.,3.) guard
+      (Expr.Set.remove atom fs) gamma lower upper "sat"))
+    ["missing cast alias";"missing lower integrality";"missing lower sign";
+     "missing upper integrality";"missing upper bound"];
+  let fs,gamma,lower,upper = fixture "ambiguous" in
   let extra = Expr.LVar "#wrapped_other_upper" in
-  let types = Hashtbl.copy gamma in Hashtbl.add types "#wrapped_other_upper" Type.NumberType;
+  Hashtbl.add gamma "#wrapped_other_upper" Type.NumberType;
   let fs = Expr.Set.union fs (Expr.Set.of_list [Expr.UnOp (IsInt,extra);
     bin FLessThanEqual extra (Expr.num 10.);bin FLessThan lower (Expr.UnOp (ToIntOp,extra));
-    bin Equal (Expr.UnOp (ToIntOp,extra)) extra]) in
-  decline "two wrapped pairs stay ambiguous" fs types;
+    bin Equal (Expr.UnOp (ToIntOp,extra)) extra;bin ValueEqual extra (Expr.num 4.)]) in
+  ignore (strict_counter_run ~required:true ~wanted:(2.,3.)
+    "two wrapped pairs stay ambiguous" fs gamma lower upper "sat");
   let a=Expr.LVar "#wrapped_direct_a" and b=Expr.LVar "#wrapped_direct_b"
   and c=Expr.LVar "#wrapped_direct_c" and d=Expr.LVar "#wrapped_direct_d" in
   let gamma=Hashtbl.create 4 in
   List.iter (function Expr.LVar n -> Hashtbl.add gamma n Type.NumberType | _ -> assert false) [a;b;c;d];
   let natural x = [Expr.UnOp (IsInt,x);bin FLessThanEqual (Expr.num 0.) x;
     bin FLessThanEqual x (Expr.num 10.)] in
-  let base = Expr.Set.of_list (List.concat_map natural [a;b;c;d] @
-    [bin Equal (Expr.UnOp (ToIntOp,d)) d;bin FLessThan a (Expr.UnOp (ToIntOp,d))]) in
-  decline "old direct ambiguity cannot be replaced by a unique wrapped pair"
-    (Expr.Set.union base (Expr.Set.of_list [bin FLessThan a b;bin FLessThan a c])) gamma;
+  let fs = Expr.Set.of_list (List.concat_map natural [a;b;c;d] @
+    [bin Equal (Expr.UnOp (ToIntOp,d)) d;bin FLessThan a (Expr.UnOp (ToIntOp,d));
+     bin FLessThan a b;bin FLessThan a c;
+     bin ValueEqual a (Expr.num 2.);bin ValueEqual b (Expr.num 3.);
+     bin ValueEqual c (Expr.num 4.);bin ValueEqual d (Expr.num 5.)]) in
+  ignore (strict_counter_run ~required:true ~wanted:(2.,3.)
+    "old direct ambiguity cannot be replaced by a unique wrapped pair" fs gamma a b "sat");
   (* Old strict direct recognition still wins over a new weak wrapped pair. *)
   let fs = Expr.Set.of_list [Expr.UnOp (IsInt,a);Expr.UnOp (IsInt,b);
     bin FLessThan (Expr.num 0.) a;bin FLessThan a b;bin FLessThanEqual b (Expr.num 10.);
