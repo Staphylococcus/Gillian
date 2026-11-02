@@ -18674,3 +18674,144 @@ let tests = tests @
         Alcotest.test_case "wrapped filter counter eligibility ambiguity and old priority" `Quick
           (with_total wrapped_filter_counter_guards)]
    | _ -> [])
+
+(* Full observed strict-positive Keep state, before the old numeric witness's
+   two literal guesses. The original native maximum-safe bits are restored
+   exactly; Expr.pp's rounded decimal is not used as a new premise. *)
+let strict_nonblank_filter_fixture label =
+  let fs = parse_gil_set [
+    "(! (u16\"length\" -e- #loopOutKeys))";
+    "(! (#lvar_1430 v== -0.))";
+    "(! ((num_to_int #n) == 0.))";
+    "(! ((num_to_utf16 #lvar_1430) -e- #loopOutKeys))";
+    "(! ((u16-trim #dhHead) == u16\"\"))";
+    "(is_int #lvar_1429)";
+    "(is_int #lvar_1430)";
+    "(is_int #n)";
+    "(is_int (num_to_int #n))";
+    "(is_int (#lvar_1429 + 1.))";
+    "(is_int (#lvar_1430 + 1.))";
+    "(is_int ((num_to_int #n) - #lvar_1429))";
+    "(is_int ((num_to_int #n) - (#lvar_1429 + 1.)))";
+    "(is_int ((num_to_int #n) - (#lvar_1430 + 1.)))";
+    "(0i i<= (l-len #dhTailValues))";
+    "(0i i<= (l-len #loopChosen))";
+    "(0i i<= (l-len #loopLocals))";
+    "(0i i<= (l-len #loopPrefix))";
+    "(0i i<= (l-len #lvar_1587))";
+    "(0i i<= (as_int (#lvar_1429 - 0.)))";
+    "(0i i<= (as_int (#n - 0.)))";
+    "(0i i<= (as_int (#n - #lvar_1429)))";
+    "(0. < #lvar_1429)";
+    "(0. <= #lvar_1430)";
+    "(0. <= #n)";
+    "(0. <= (num_to_int #n))";
+    "(0. <= (#lvar_1429 + 1.))";
+    "(0. <= (#lvar_1430 + 1.))";
+    "(0. <= ((num_to_int #n) - #lvar_1429))";
+    "(0. <= ((num_to_int #n) - (#lvar_1429 + 1.)))";
+    "(0. <= ((num_to_int #n) - (#lvar_1430 + 1.)))";
+    "(#lvar_1429 < #n)";
+    "(#lvar_1429 < (num_to_int #n))";
+    "(#lvar_1429 <= 4294967294.)";
+    "(#lvar_1429 <= 4294967295.)";
+    "(#lvar_1430 <= 4294967294.)";
+    "(#lvar_1430 <= 4294967295.)";
+    "(#lvar_1430 <= #lvar_1429)";
+    "(#n <= 4294967295.)";
+    "((num_to_int #n) == #n)";
+    "((num_to_int #n) <= 4294967295.)";
+    "((num_to_int #n) <= 9007199254740991.)";
+    "((l-len #dhTailValues) i<= 4294967294i)";
+    "((u16-len #dhHead) i<= 9007199254740991i)";
+    "((u16-len (u16-trim #dhHead)) i<= (u16-len #dhHead))";
+    "((as_int #lvar_1429) == (l-len #loopPrefix))";
+    "((as_int #lvar_1430) == (l-len #loopChosen))";
+    "((as_int #n) == (1i i+ ((l-len #dhTailValues) i+ (l-len #loopPrefix))))";
+    "((as_int #n) == (1i i+ ((l-len #dhTailValues) i+ (as_int #lvar_1429))))";
+    "((as_int (#lvar_1429 + 1.)) == (1i i+ (as_int #lvar_1429)))";
+    "((as_int (#lvar_1430 + 1.)) == (1i i+ (as_int #lvar_1430)))";
+    "((#lvar_1429 + 1.) <= 4294967295.)";
+    "((#lvar_1429 + 1.) <= (num_to_int #n))";
+    "((#lvar_1430 + 1.) <= 4294967295.)";
+    "((#lvar_1430 + 1.) <= (num_to_int #n))";
+    "(((l-len #dhTailValues) i+ (l-len #loopPrefix)) i<= 4294967294i)";
+    "(-u- (#lvar_1425, #lvar_1426) == -u- (#lvar_1492, #lvar_1493))";
+    "(-u- (#lvar_1425, #lvar_1426) == -u- (-{ (num_to_utf16 #lvar_1429) }-,\n                                      #dhPrefixKeys, #dhTailKeys))";
+  ] in
+  let gamma = Hashtbl.create 18 in
+  List.iter (fun (name,typ) -> Hashtbl.add gamma name typ) [
+    "#lvar_1492",Type.SetType;
+    "#lvar_1426",Type.SetType;
+    "#lvar_1429",Type.NumberType;
+    "#lvar_1588",Type.SetType;
+    "#loopPrefix",Type.ListType;
+    "#lvar_1425",Type.SetType;
+    "#dhTailKeys",Type.SetType;
+    "#dhPrefixKeys",Type.SetType;
+    "#n",Type.NumberType;
+    "#loopOutKeys",Type.SetType;
+    "#lvar_1493",Type.SetType;
+    "#lvar_1587",Type.ListType;
+    "#loopLocals",Type.ListType;
+    "#dhHead",Type.Utf16Type;
+    "#dhTailValues",Type.ListType;
+    "#lvar_1430",Type.NumberType;
+    "#loopChosen",Type.ListType;
+    "#lvar_1586",Type.Utf16Type;
+  ];
+  Alcotest.(check int) "complete original strict-nonblank assertions" 58 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "complete original strict-nonblank Gamma" 18 (Hashtbl.length gamma);
+  if label = "saved" then fs,gamma else
+    let rename = object inherit [_] Visitors.endo
+      method! visit_LVar () _ n = Expr.LVar (n ^ "_strict_head_" ^ label) end in
+    let fs = Expr.Set.fold (fun e acc -> Expr.Set.add (rename#visit_expr () e) acc) fs Expr.Set.empty in
+    let renamed = Hashtbl.create 18 in
+    Hashtbl.iter (fun n typ -> Hashtbl.add renamed (n ^ "_strict_head_" ^ label) typ) gamma;
+    fs,renamed
+
+let strict_nonblank_filter_native () = with_nonblank_counter_trace (fun () ->
+  let check label fs gamma head status =
+    let before=nonblank_counter_rows () and atoms=Expr.Set.elements fs
+    and types=nonblank_counter_types gamma in
+    let role n = Expr.LVar (if label="saved" then n else n ^ "_strict_head_" ^ label) in
+    let lower=role "#lvar_1429" and upper=role "#n"
+    and position=role "#lvar_1430" and item=role "#dhHead" in
+    let pins head = List.fold_left (fun fs (role,value) -> Expr.Set.add
+      (bin ValueEqual role value) fs) fs
+      [lower,Expr.num 1.;upper,Expr.num 2.;position,Expr.num 0.;
+       item,nonblank_utf16 head] in
+    let model,contexts=pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+    finite_number_bound_complete label before contexts status;
+    ignore (strict_counter_endpoint label before contexts "optional-nonblank-counter"
+      (pins (if status="unsat" then head else "a")) gamma
+      (if head=" a" || status="unsat" then "unsat" else "sat"));
+    if head=" a" then ignore (strict_counter_endpoint label before contexts
+      "optional-nonblank-whitespace-counter" (pins " a") gamma "sat");
+    Alcotest.(check bool) "complete original model status" (status="sat") (Option.is_some model);
+    Option.iter (fun model ->
+      strict_counter_values label model gamma lower upper (Some (1.,2.));
+      let name = function Expr.LVar n -> n | _ -> assert false in
+      primary_check_lift label model gamma [name position,Literal.Num 0.;
+        name item,Literal.Utf16String (Utils.Utf16.of_canonical head)]) model;
+    let old=nonblank_counter_rows () in
+    ignore (Smt.check_sat fs gamma);
+    Alcotest.(check bool) "strict head complete-key cache emits no endpoint" true
+      (old=nonblank_counter_rows ());
+    nonblank_counter_retained label fs gamma atoms types in
+  let fs,gamma = strict_nonblank_filter_fixture "saved" in check "saved" fs gamma "a" "sat";
+  let fs,gamma = strict_nonblank_filter_fixture "alpha" in check "alpha" fs gamma "a" "sat";
+  let fs,gamma = strict_nonblank_filter_fixture "whitespace" in
+  let head=Expr.LVar "#dhHead_strict_head_whitespace" in
+  check "whitespace" (Expr.Set.add (not_ (bin ValueEqual head (nonblank_utf16 "a"))) fs)
+    gamma " a" "sat";
+  let fs,gamma = strict_nonblank_filter_fixture "blank" in
+  check "blank" (Expr.Set.add (bin ValueEqual (Expr.LVar "#dhHead_strict_head_blank")
+    (nonblank_utf16 "")) fs) gamma "" "unsat")
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None -> [Alcotest.test_case
+       "strict-positive Keep exact full native models and failed-hint fallback" `Quick
+       (with_total strict_nonblank_filter_native)]
+   | _ -> [])

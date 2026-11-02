@@ -4218,9 +4218,10 @@ let trimmed_counter_model fs gamma =
   with SMT_unknown -> None
 
 (* A nonblank trimmed head may use its own bounded complete-query witness.
-   Keep this after every old witness attempt. Literal pins are respected, and
-   only native SAT for the full original frame plus hints returns a model. *)
-let nonblank_counter_model fs gamma =
+   Default mode keeps its old search position. Strict-only mode recognizes a
+   previously ineligible positive lower bound before generic counter search.
+   Literal pins are respected; only validated full-query SAT returns a model. *)
+let nonblank_counter_model ?(strict_only = false) fs gamma =
   let vars = Expr.Set.fold (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty in
   let of_type typ = SS.filter (fun x -> Hashtbl.find_opt gamma x = Some typ) vars in
   let heads = of_type Type.Utf16Type and numbers = of_type Type.NumberType in
@@ -4233,8 +4234,8 @@ let nonblank_counter_model fs gamma =
        | _ -> ()); super#visit_expr () e
   end in
   Expr.Set.iter (rounded#visit_expr ()) fs;
-  if not !Config.Verification.total || SS.cardinal heads <> 1
-     || SS.cardinal numbers < 3 || rounded#observed
+  if not !Config.Verification.total || (strict_only && !Config.under_approximation)
+     || SS.cardinal heads <> 1 || SS.cardinal numbers < 3 || rounded#observed
      || not (SS.is_empty (of_type Type.StringType)) then None else
   let head = SS.choose heads in
   let empty = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical "")) in
@@ -4251,10 +4252,13 @@ let nonblank_counter_model fs gamma =
       | _ -> false) fs in
   let natural x = bounded_integer x && Expr.Set.mem
     (Expr.BinOp (Expr.num 0., FLessThanEqual, LVar x)) fs in
+  let lower_natural x = if not strict_only then natural x else
+    bounded_integer x && not (natural x) && Expr.Set.mem
+      (Expr.BinOp (Expr.num 0., FLessThan, LVar x)) fs in
   let shape = if not trim_nonblank then None else
     List.find_map (function
       | Expr.BinOp (LVar lower, FLessThan, LVar upper)
-        when lower <> upper && natural lower && bounded_integer upper ->
+        when lower <> upper && lower_natural lower && bounded_integer upper ->
           let remaining = SS.remove upper (SS.remove lower numbers) in
           let positions = SS.filter (fun position -> natural position
             && Expr.Set.mem
@@ -4276,7 +4280,7 @@ let nonblank_counter_model fs gamma =
   let distinct_counters =
     Expr.Set.mem (Expr.UnOp (Not, Expr.BinOp (LVar lower, ValueEqual, LVar position))) fs
     || Expr.Set.mem (Expr.UnOp (Not, Expr.BinOp (LVar position, ValueEqual, LVar lower))) fs in
-  let lower_default,upper_default = if distinct_counters then 1.,2. else 0.,1. in
+  let lower_default,upper_default = if strict_only || distinct_counters then 1.,2. else 0.,1. in
   let make_query default_head = List.fold_left (fun acc (name,default) -> Expr.Set.add
     (Expr.BinOp (LVar name, ValueEqual, literal name default)) acc) fs
     [lower,Expr.num lower_default; upper,Expr.num upper_default; position,Expr.num 0.; head,Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical default_head))] in
@@ -4538,6 +4542,12 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   | None ->
       let () = L.verbose (fun m -> m "SAT check not found in cache") in
       let ret =
+        (* A strict-positive nonblank state was not eligible for the old head
+           witness. Try its complete, validated head/counter model first;
+           failed hints retain every existing attempt and required fallback. *)
+        match nonblank_counter_model ~strict_only:true fs gamma with
+        | Some _ as witness -> witness
+        | None ->
         match nonempty_counter_model fs gamma with
         | Some _ as witness -> witness
         | None ->
