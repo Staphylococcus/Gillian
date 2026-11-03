@@ -760,6 +760,10 @@ module Make (State : SState.S) :
     let success = List.for_all (fun (_, x_v) -> x_v <> None) new_bindings in
     if not success then
       raise (Failure "MATCH INVARIANT FAILURE: binders not captured")
+    else if revisited then
+      (* Preservation and descent were checked on every matched branch above.
+         The interpreter cuts this path; no abstract continuation is needed. *)
+      Res_list.return (frame_state, new_state, None)
     else
       let new_bindings =
         List.map (fun (x, x_v) -> (x, Option.get x_v)) new_bindings

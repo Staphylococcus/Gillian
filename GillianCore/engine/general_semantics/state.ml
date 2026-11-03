@@ -116,7 +116,8 @@ module type S = sig
   (** [match_invariant prog revisited state invariant binders] returns a list of
       frames, generalized states and optional frozen loop measures. On a
       back-edge, measure binders are instantiated by this invariant match, so
-      heap measures refer to current values instead of stale entry ghosts *)
+      heap measures refer to current values instead of stale entry ghosts.
+      Revisited states certify preservation only and must not be continued. *)
   val match_invariant :
     'a MP.prog ->
     bool ->
