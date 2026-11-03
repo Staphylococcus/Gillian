@@ -1368,6 +1368,40 @@ module Make (State : SState.S) :
     | (a, b, c, d, e, f) :: more_specs ->
         run_spec_aux ~more_specs ?existential_bindings:f a b c d e astate
 
+  (* Opt-in terminal POST errors only: no state dump or extra solver calls. *)
+  let post_match_reports = ref 0
+
+  let log_post_match_errors name results =
+    if Sys.getenv_opt "GILLIAN_POSTCONDITION_DIAGNOSTIC" = Some name
+       && !post_match_reports < 3 then (
+      incr post_match_reports;
+      let errors = List.filter_map (function Error err -> Some err | Ok _ -> None) results in
+      let buffer = Buffer.create 256 in
+      let remaining = ref 2048 in
+      let exception Diagnostic_full in
+      let write text offset length =
+        let amount = min length !remaining in
+        Buffer.add_substring buffer text offset amount;
+        remaining := !remaining - amount;
+        if amount < length then raise Diagnostic_full
+      in
+      let formatter = Format.make_formatter write (fun () -> ()) in
+      let truncated =
+        try
+          Fmt.(list ~sep:(any "; ") State.pp_err) formatter errors;
+          Format.pp_print_flush formatter ();
+          false
+        with
+        | Diagnostic_full -> true
+        | _ -> Buffer.clear buffer;
+            Buffer.add_string buffer "diagnostic formatting unavailable";
+            true
+      in
+      L.normal (fun m ->
+          m "POSTCONDITION_MATCH_FAILURE target=%s report=%d/3 branches=%d errors=%d truncated=%b: %S"
+            name !post_match_reports (List.length results) (List.length errors)
+            truncated (Buffer.contents buffer)))
+
   let matches
       (astate : t)
       (subst : st)
@@ -1388,6 +1422,9 @@ module Make (State : SState.S) :
         let () =
           L.verbose (fun fmt -> fmt "PSTATE.matches: Success: %b" success)
         in
+        (match match_type with
+        | Postcondition name when not success -> log_post_match_errors name matching_results
+        | _ -> ());
         Some success
 
   let unfolding_vals (astate : t) (fs : Expr.t list) : vt list =
