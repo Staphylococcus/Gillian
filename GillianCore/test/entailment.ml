@@ -18977,3 +18977,65 @@ let tests = tests @
        Alcotest.test_case "weak nonblank missing guard and rejected hints retain native fallback" `Quick
          (with_total weak_nonblank_precedence_fallback)]
    | _ -> [])
+
+(* Local reduction runs between whole-state simplifications. Only a direct
+   typed value identity may replace its Number variable, including signed zero.
+   NaN payloads are not distinct language values (Literal.same_value), whereas
+   the zero sign is observable and must be checked by bits. No solver is used. *)
+let direct_numeric_value_identity_reduction () =
+  let name = "#local_numeric_identity" in
+  let variable = Expr.LVar name and item = Expr.LVar "#local_identity_item" in
+  let reduce ?(typed = true) ?(reduce_lvars = true) facts expression =
+    let g = Gamma.init () in
+    if typed then Gamma.update g name Type.NumberType;
+    Gamma.update g "#local_identity_item" Type.Utf16Type;
+    Engine.Reduction.reduce_lexpr ~gamma:g ~pfs:(Engine.PFS.of_list facts)
+      ~reduce_lvars expression
+  in
+  let check_expr label expected actual =
+    Alcotest.(check bool) label true (Expr.equal expected actual)
+  in
+  let check_number label expected = function
+    | Expr.Lit (Num actual) when Float.is_nan expected ->
+        Alcotest.(check bool) label true (Float.is_nan actual)
+    | Expr.Lit (Num actual) ->
+        Alcotest.(check int64) label
+          (Int64.bits_of_float expected) (Int64.bits_of_float actual)
+    | actual -> Alcotest.failf "%s: expected Number, got %a" label Expr.pp actual
+  in
+  List.iter (fun (label, value) ->
+    List.iter (fun reversed ->
+      let label = label ^ (if reversed then " literal-left" else " variable-left") in
+      let identity = if reversed then bin ValueEqual (Expr.num value) variable
+        else bin ValueEqual variable (Expr.num value) in
+      check_number label value (reduce [identity] variable);
+      check_expr (label ^ " untyped remains symbolic") variable
+        (reduce ~typed:false [identity] variable);
+      check_expr (label ^ " disabled remains symbolic") variable
+        (reduce ~reduce_lvars:false [identity] variable);
+      if not (Float.is_nan value) then (
+        let index = Expr.UnOp (NumToInt, variable) in
+        check_expr (label ^ " NumToInt collapses") (Expr.int 0)
+          (reduce [identity] index);
+        check_expr (label ^ " singleton indexing collapses") item
+          (reduce [identity] (bin LstNth (Expr.EList [item]) index))))
+      [false; true]) ["positive zero", 0.; "negative zero", -0.; "NaN", nan];
+  List.iter (fun zero ->
+    List.iter (fun reversed ->
+      let equality = if reversed then bin Equal (Expr.num zero) variable
+        else bin Equal variable (Expr.num zero) in
+      check_expr "ordinary numeric zero equality remains symbolic" variable
+        (reduce [equality] variable)) [false; true]) [0.; -0.];
+  let exact_zero = bin ValueEqual variable (Expr.num 0.) in
+  List.iter (fun (label, facts) ->
+    check_expr label variable (reduce facts variable))
+    ["no fact remains symbolic", [];
+     "disjunction remains symbolic", [bin Or exact_zero (bin ValueEqual variable (Expr.num 1.))];
+     "negated identity remains symbolic", [not_ exact_zero]];
+  check_number "ordinary nonzero equality still reduces" 2.
+    (reduce [bin Equal variable (Expr.num 2.)] variable)
+
+let tests = tests @
+  [Alcotest.test_case
+     "local typed numeric ValueEqual exact literals and conservative guards" `Quick
+     (with_total direct_numeric_value_identity_reduction)]

@@ -1604,12 +1604,30 @@ let rec reduce_lexpr_loop
                  LVar
        ------------------------- *)
     | LVar _ when reduce_lvars ->
-        get_equal_expressions pfs le
-        |> List.find_opt (function
-             | Expr.Lit (Num n) -> n <> 0. && not (Float.is_nan n)
-             | Expr.Lit _ -> true
-             | _ -> false)
-        |> Option.value ~default:le
+        (* Value identity fixes the literal's raw zero sign, unlike numeric
+           equality. Use only a direct asserted fact with a known Num type. *)
+        let exact =
+          if fst (Typing.type_lexpr input_gamma le) <> Some NumberType then None
+          else
+            PFS.fold_left
+              (fun found fact ->
+                match (found, (fact : Expr.t)) with
+                | Some _, _ -> found
+                | None, BinOp ((LVar _ as variable), ValueEqual, (Lit (Num _) as value))
+                | None, BinOp ((Lit (Num _) as value), ValueEqual, (LVar _ as variable))
+                  when Expr.equal variable le -> Some value
+                | _ -> None)
+              None pfs
+        in
+        (match exact with
+        | Some value -> value
+        | None ->
+            get_equal_expressions pfs le
+            |> List.find_opt (function
+                 | Expr.Lit (Num n) -> n <> 0. && not (Float.is_nan n)
+                 | Expr.Lit _ -> true
+                 | _ -> false)
+            |> Option.value ~default:le)
     | LVar _ -> le
     (* -------------------------
                  EList
