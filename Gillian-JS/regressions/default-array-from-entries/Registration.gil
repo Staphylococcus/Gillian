@@ -1,0 +1,17 @@
+import "Effects.gil";
+
+(* The exact ready binding fragment. The rest of the Object constructor and
+   caller World stays framed. Startup production of this fragment is a separate
+   consumer obligation, not an assumed successful initializer theorem. *)
+pred FEReadyBinding(objectMd:Obj, functionMd:Obj):
+  <Metadata>($lobj;objectMd) * <Cell>(objectMd,u16"@class";u16"Function") *
+  <Cell>($lobj,u16"fromEntries";{{u16"d",$lobj_fromEntries,true,false,true}}) *
+  <Metadata>($lobj_fromEntries;functionMd) * <Metadata>(functionMd;null) *
+  <Cell>(functionMd,u16"@proto";$lfun_proto) *
+  <Cell>(functionMd,u16"@class";u16"Function") *
+  <Cell>(functionMd,u16"@extensible";true) *
+  <Cell>(functionMd,u16"@call";u16"Object_fromEntries") *
+  <Cell>(functionMd,u16"@scope";empty) *
+  <Props>(functionMd,-{u16"@proto",u16"@class",u16"@extensible",u16"@call",u16"@scope"}-;) *
+  <Cell>($lobj_fromEntries,u16"length";{{u16"d",1.0,false,false,true}}) *
+  <Props>($lobj_fromEntries,-{u16"length"}-;);

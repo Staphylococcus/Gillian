@@ -1,0 +1,41 @@
+import "javert_internal_functions.jsil";
+
+(* Exact ordinary mapped-array/pair footprint; metadata identities and complete
+   observable own-field sequences survive the call. Payload contents are framed
+   by the caller: this helper borrows only its existing metadata cell. *)
+pred FEArray2(a:Obj, md:Obj, first, second):
+  <Metadata>(a;md) * <Metadata>(md;null) *
+  <Cell>(md,u16"@class";u16"Array") *
+  <Cell>(md,u16"@proto";$larr_proto) *
+  <Cell>(md,u16"@extensible";true) *
+  <Props>(md,-{u16"@class",u16"@proto",u16"@extensible"}-;) *
+  <OrderedFields>(a;{{u16"0",u16"1",u16"length"}},
+    {{{{u16"d",first,true,true,true}},{{u16"d",second,true,true,true}},
+      {{u16"d",2.0,true,false,false}}}});
+
+pred FEInput(e:Obj, emd:Obj, p:Obj, pmd:Obj, s:Obj, smd:Obj,
+             payload:Obj, payloadMd:Obj, reverse:Bool):
+  [payload_first] (reverse == false) *
+    FEArray2(e,emd,p,s) *
+    FEArray2(p,pmd,u16"payload",payload) *
+    FEArray2(s,smd,u16"statusCode",200.0) *
+    <Metadata>(payload;payloadMd),
+  [status_first] (reverse == true) *
+    FEArray2(e,emd,s,p) *
+    FEArray2(p,pmd,u16"payload",payload) *
+    FEArray2(s,smd,u16"statusCode",200.0) *
+    <Metadata>(payload;payloadMd);
+
+(* A complete output prefix, not assumed successful builtin behaviour. *)
+pred FEPrefix(out:Obj, index:Num, payload:Obj, reverse:Bool):
+  [fe_empty] (index == 0.0) * JSObject(out) * <OrderedFields>(out;nil,nil),
+  [payload_one] (index == 1.0) * (reverse == false) * JSObject(out) *
+    <OrderedFields>(out;{{u16"payload"}},{{{{u16"d",payload,true,true,true}}}}),
+  [status_one] (index == 1.0) * (reverse == true) * JSObject(out) *
+    <OrderedFields>(out;{{u16"statusCode"}},{{{{u16"d",200.0,true,true,true}}}}),
+  [payload_two] (index == 2.0) * (reverse == false) * JSObject(out) *
+    <OrderedFields>(out;{{u16"payload",u16"statusCode"}},
+      {{{{u16"d",payload,true,true,true}},{{u16"d",200.0,true,true,true}}}}),
+  [status_two] (index == 2.0) * (reverse == true) * JSObject(out) *
+    <OrderedFields>(out;{{u16"statusCode",u16"payload"}},
+      {{{{u16"d",200.0,true,true,true}},{{u16"d",payload,true,true,true}}}});
