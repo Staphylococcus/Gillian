@@ -247,6 +247,52 @@ proc Object_create (xsc, vthis, o, props) {
 	elab: throw
 };
 
+(* Selected default-array MODEL, not arbitrary-iterable support.
+   The caller supplies an ordinary, unchanged, data-only array and pairs,
+   primitive string keys and the captured default iteration protocol.
+   Private nonescaping iterator/result objects are simulated by index/len;
+   existing input, pair, caller and collection resources are never discarded.
+   ponytail: execute that intrinsic path directly; no general iterator engine. *)
+proc Object_fromEntries (xsc, vthis, iterable) {
+          goto [typeOf iterable = Obj] fe_array fe_model_error;
+  fe_array:
+          input_md := metadata(iterable);
+          input_class := [input_md, "@class"];
+          goto [input_class = "Array"] fe_init fe_model_error;
+
+  fe_init:
+          out := "create_default_object" ($lobj_proto, "Object", true);
+          len := "get" (iterable, "length") with elab;
+          zero := 0;
+
+  fe_loop: PHI(index: zero, next_index);
+          goto [index < len] fe_item fe_done;
+
+  fe_item: next_index := index + 1;
+          index_key := "i__toString" (index) with elab;
+          entry := "get" (iterable, index_key) with elab;
+          goto [typeOf entry = Obj] fe_pair fe_type_error;
+
+  fe_pair: entry_key := "get" (entry, "0") with elab;
+          entry_value := "get" (entry, "1") with elab;
+          goto [typeOf entry_key = Str] fe_store fe_model_error;
+  fe_store:
+          (* CreateDataProperty on the fresh, extensible ordinary target.
+             All properties previously created here are configurable data. *)
+          [out, entry_key] := {{"d", entry_value, true, true, true}};
+          (* Default ArrayIterator reads current length on each next step. *)
+          len := "get" (iterable, "length") with elab;
+          goto fe_loop;
+
+  fe_done: ret := out;
+          return;
+
+  fe_type_error: ret := "TypeError" ();
+          goto elab;
+  fe_model_error: ret := "Unsupported Object.fromEntries MODEL input";
+  elab:   throw
+};
+
 (* *** DEFINEPROPERTY *** *)
 
 proc Object_defineProperty (xsc, vthis, o, prop, attr) {
