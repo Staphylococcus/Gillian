@@ -214,6 +214,7 @@ proc setupInitialHeap () {
 			[$lobj, "isFrozen"]                 := {{ "d", $lobj_isFrozen, true, false, true }};
 			[$lobj, "isExtensible"]             := {{ "d", $lobj_isExtensible, true, false, true }};
 			[$lobj, "keys"]                     := {{ "d", $lobj_keys, true, false, true }};
+			[$lobj, "fromEntries"]              := {{ "d", $lobj_fromEntries, true, false, true }};
 
 			ret := "create_object_with_call_construct_concrete" ($lobj_getPrototypeOf, "Object_getPrototypeOf", empty, 1);
   			ret := "create_object_with_call_construct_concrete" ($lobj_getOwnPropertyDescriptor, "Object_getOwnPropertyDescriptor", empty, 2);
@@ -228,6 +229,7 @@ proc setupInitialHeap () {
  			ret := "create_object_with_call_construct_concrete" ($lobj_isFrozen, "Object_isFrozen", empty, 1);
   			ret := "create_object_with_call_construct_concrete" ($lobj_isExtensible, "Object_isExtensible", empty, 1);
   			ret := "create_object_with_call_construct_concrete" ($lobj_keys, "Object_keys", empty, 1);
+			ret := "create_object_with_call_construct_concrete" ($lobj_fromEntries, "Object_fromEntries", empty, 1);
 
 			(* Object.prototype *)
 
