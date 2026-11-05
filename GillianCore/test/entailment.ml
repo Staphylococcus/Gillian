@@ -18977,3 +18977,82 @@ let tests = tests @
        Alcotest.test_case "weak nonblank missing guard and rejected hints retain native fallback" `Quick
          (with_total weak_nonblank_precedence_fallback)]
    | _ -> [])
+
+let stable_assertion_dedup_native () = with_nonblank_counter_trace (fun () ->
+  let x = Expr.LVar "#dedup_x" and y = Expr.LVar "#dedup_y" in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#dedup_x" Type.NumberType;
+  Gamma.update gamma "#dedup_y" Type.NumberType;
+  let formatting value =
+    let formatted = Expr.UnOp (NumberToUtf16,value) in
+    [bin Equal formatted (nonblank_utf16 "0");
+     bin Equal (Expr.UnOp (Utf16Len,formatted)) (Expr.int 1);
+     not_ (bin Equal formatted (nonblank_utf16 "1"))] in
+  let shared = Expr.Set.of_list (formatting x @ formatting y) in
+  let positive = bin ValueEqual x (Expr.num 0.)
+  and negative = bin ValueEqual y (Expr.num (-0.)) in
+  let sat = Expr.Set.add positive (Expr.Set.add negative shared) in
+  (* Reverse operands so both contradictory pins survive even a literal
+     ordering which identifies the two floating-point zeros. *)
+  let conflicting = bin ValueEqual (Expr.num (-0.)) x in
+  let unsat = Expr.Set.add conflicting sat in
+  let run label fs expected =
+    let caller = "control-dedup-" ^ label in
+    let before = nonblank_counter_rows () and atoms = Expr.Set.elements fs
+    and types = nonblank_counter_types gamma in
+    let model,contexts = pending_context_capture (fun () ->
+      Smt.exec_sat ~caller_kind:caller fs gamma) in
+    Alcotest.(check bool) (label ^ " real native verdict") expected (Option.is_some model);
+    ignore (nonblank_counter_observe label before caller
+      (if expected then "sat" else "unsat") fs gamma);
+    Alcotest.(check int) (label ^ " one submitted query") 1 (List.length contexts);
+    let context = List.hd contexts in
+    let text = function `String s -> s | _ -> Alcotest.fail "expected native text" in
+    let commands = match pending_context_field "encoded_assertions" context with
+      | `List xs -> List.map (fun x -> Sexplib.Sexp.of_string (text x)) xs
+      | _ -> Alcotest.fail "expected actual command list" in
+    let assertions = List.filter (function
+      | Sexplib.Sexp.List (Sexplib.Sexp.Atom "assert" :: _) -> true
+      | _ -> false) commands in
+    Alcotest.(check bool) (label ^ " nonempty meaningful assertion stream") true
+      (List.length assertions >= 8);
+    Alcotest.(check int) (label ^ " exact repeated assertions removed")
+      (List.length assertions) (List.length (List.sort_uniq Stdlib.compare assertions));
+    let query = text (pending_context_field "query" context) in
+    let dump = nonblank_counter_read (Filename.concat "gillian_smt_queries" query) in
+    let marker = "Encoded as SMT Query:\n" in
+    let start = Str.search_forward (Str.regexp_string marker) dump 0 + String.length marker in
+    Alcotest.(check string) (label ^ " inspected commands are the actual submitted dump")
+      (String.trim (text (pending_context_field "encoded_assertion_dump" context)))
+      (String.trim (String.sub dump start (String.length dump - start)));
+    let pin variable bits reversed =
+      let v = "(Elem (Num $$dedup_" ^ variable ^ "))"
+      and n = "(Elem (Num ((_ to_fp 11 53) #x" ^ bits ^ ")))" in
+      Sexplib.Sexp.of_string ("(assert (= " ^
+        (if reversed then n ^ " " ^ v else v ^ " " ^ n) ^ "))") in
+    let position wanted =
+      match List.find_opt (fun (_,command) -> command = wanted)
+        (List.mapi (fun i command -> i,command) assertions) with
+      | Some (i,_) -> i | None -> Alcotest.fail (label ^ " lost distinct zero constraint") in
+    let px = position (pin "x" "0000000000000000" false)
+    and ny = position (pin "y" "8000000000000000" false) in
+    Alcotest.(check bool) (label ^ " main assertion order retained") true (px < ny);
+    if not expected then ignore (position (pin "x" "8000000000000000" true));
+    nonblank_counter_retained label fs gamma atoms types;
+    model in
+  let model = Option.get (run "sat" sat true) in
+  let lifted = Hashtbl.create 2 in
+  Smt.lift_model model gamma (Hashtbl.add lifted) (Expr.Set.of_list [x;y]);
+  List.iter (fun (name,wanted) -> match Hashtbl.find_opt lifted name with
+    | Some (Expr.Lit (Literal.Num actual)) -> Alcotest.(check int64)
+        (name ^ " native signed-zero bits retained") (Int64.bits_of_float wanted)
+        (Int64.bits_of_float actual)
+    | _ -> Alcotest.fail "missing native signed-zero witness")
+    ["#dedup_x",0.;"#dedup_y",-0.];
+  ignore (run "unsat" unsat false))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None -> [Alcotest.test_case "stable exact SMT assertion deduplication and signed zeros"
+       `Quick (with_total stable_assertion_dedup_native)]
+   | _ -> [])

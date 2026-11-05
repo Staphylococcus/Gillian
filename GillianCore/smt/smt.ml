@@ -2305,7 +2305,14 @@ let encode_assertions_needs_handler (fs : Expr.Set.t) (gamma : typenv) :
     let extra_asrts = List.concat_map (fun e -> e.extra_asrts) encoded in
     let encoded_asrts = List.map (fun e -> e.expr) encoded in
     let facts = List.concat_map (fun e -> e.facts) encoded in
-    List.map assume (extra_asrts @ facts @ encoded_asrts)
+    (* These immutable terms are complete assertions. Keep their first
+       occurrence without changing literals, declarations or conjunct order. *)
+    let seen = Hashtbl.create 64 in
+    extra_asrts @ facts @ encoded_asrts
+    |> List.filter (fun assertion ->
+         if Hashtbl.mem seen assertion then false
+         else (Hashtbl.add seen assertion (); true))
+    |> List.map assume
   in
   consts @ asrts
 
