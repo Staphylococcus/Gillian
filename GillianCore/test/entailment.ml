@@ -19157,7 +19157,8 @@ let formatted_index_fallback () = with_nonblank_counter_trace (fun () ->
   let name = match index with LVar name -> name | _ -> assert false in
   primary_check_lift "raw negative zero fallback" model gamma [name,Literal.Num (-0.)];
   let contradiction,gamma,index = formatted_index_fixture "conflict" in
-  let contradiction = Expr.Set.add (bin FLessThan index (Expr.num 0.)) contradiction in
+  let contradiction = Expr.Set.add (bin SetMem (Expr.UnOp (NumberToUtf16,index))
+    (Expr.LVar "#formatted_keys_conflict")) contradiction in
   ignore (formatted_index_attempt "conflict" contradiction gamma false 0.);
   Alcotest.(check bool) "contradictory full frame cannot become a SAT witness" true
     (Option.is_none (Smt.check_sat contradiction gamma));
