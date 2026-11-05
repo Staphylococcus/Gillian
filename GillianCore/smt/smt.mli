@@ -58,6 +58,12 @@ val positive_trace_index_witness_query :
 val positive_trace_index_model :
   Expr.Set.t -> (string, Type.t) Hashtbl.t -> model option
 
+(** Optional complete-query index witness. Only validated native SAT returns a
+    model; declined, UNSAT or UNKNOWN guesses retain the required fallback.
+    This helper neither changes the caller FS/Gamma nor populates its cache. *)
+val formatted_index_model :
+  Expr.Set.t -> (string, Type.t) Hashtbl.t -> model option
+
 (** Native Z3 phase policy controls search order only. Default 3 matches Z3; an
     explicit override is useful for exact solver-defect reproductions. *)
 val exec_sat :
