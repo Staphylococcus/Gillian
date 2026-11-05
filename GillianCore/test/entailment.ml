@@ -19242,3 +19242,97 @@ let tests = tests @
        Alcotest.test_case "positive trace next length retained UTF16 frame contradiction" `Quick
          (with_total positive_trace_next_length_frame)]
    | _ -> [])
+
+(* Complete retained prefix/current/suffix frame. The nonempty suffix is
+   expressed by a weak successor bound plus a numerical disequality. *)
+let nonempty_suffix_fixture label =
+  let name x = if label="saved" then x else x ^ "_suffix_" ^ label in
+  let rename = object inherit [_] Visitors.endo
+    method! visit_LVar () _ x = Expr.LVar (name x)
+  end in
+  let one text = Expr.Set.choose (parse_gil_set [text]) |> rename#visit_expr () in
+  let fs = Expr.Set.of_list (List.map one [
+    "(! ((#index + 1.) == #n))";
+    "(is_int #index)"; "(is_int #n)"; "(is_int (#index + 1.))";
+    "(0i i<= (l-len #prefix))"; "(0i i<= (l-len #suffix))";
+    "(0i i<= ((as_int #n) i+ (-1i i* (as_int (#index + 1.)))))";
+    "(0. <= #index)"; "(0. <= #n)"; "(0. <= (#index + 1.))";
+    "(#current == l-nth(l+(#prefix,l+({{#current}},#suffix)),(as_int #index)))";
+    "(#index < #n)"; "(#index <= 4294967295.)"; "(#n <= 4294967295.)";
+    "((as_int #index) == (l-len #prefix))";
+    "((u16-len #current) i<= 9007199254740991i)";
+    "((as_int #n) == (1i i+ ((l-len #prefix) i+ (l-len #suffix))))";
+    "((as_int #n) i<= 4294967295i)";
+    "((as_int (#index + 1.)) == (1i i+ (as_int #index)))";
+    "((as_int (#index + 1.)) i<= 4294967295i)";
+    "((#index + 1.) <= 4294967295.)"; "((#index + 1.) <= #n)";
+    "(((l-len #prefix) i+ (l-len #suffix)) i<= 4294967294i)";
+    "(((as_int #n) i+ (-1i i* (as_int (#index + 1.)))) == (l-len #suffix))";
+    "((-1i i+ ((-1i i* (as_int #index)) i+ (as_int #n))) == ((as_int #n) i+ (-1i i* (as_int (#index + 1.)))))";
+    "(((as_int #n) i+ (-1i i* (as_int (#index + 1.)))) i< ((as_int #n) i+ (-1i i* (as_int #index))))";
+    "((1i i+ (l-len #suffix)) == ((-1i i* (as_int #index)) i+ (as_int #n)))"
+  ]) in
+  let gamma = Hashtbl.create 5 in
+  List.iter (fun (n,t) -> Hashtbl.add gamma (name n) t)
+    ["#current",Type.Utf16Type;"#index",Type.NumberType;"#n",Type.NumberType;
+     "#prefix",Type.ListType;"#suffix",Type.ListType];
+  Alcotest.(check int) "whole retained prefix/suffix frame" 27 (Expr.Set.cardinal fs);
+  fs,gamma,Expr.LVar (name "#index"),Expr.LVar (name "#n"),one
+
+let nonempty_suffix_run label fs gamma lower upper hint wanted =
+  let _,_,hint_status = hint in
+  let model = strict_counter_run ~hint ~required:(hint_status="unsat") ~wanted
+    label fs gamma lower upper "sat"
+    |> Option.get in
+  positive_trace_replay label model gamma fs lower (fst wanted)
+
+let nonempty_suffix_models () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun label ->
+    let fs,gamma,lower,upper,one = nonempty_suffix_fixture label in
+    nonempty_suffix_run label fs gamma lower upper (0.,2.,"sat") (0.,2.);
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) "same complete query uses checked cache without a new endpoint" true
+      (Option.is_some (Smt.check_sat fs gamma) && before=nonblank_counter_rows ());
+    if label="saved" then (
+      let reversed = Expr.Set.add (one "(! (#n == (#index + 1.)))")
+        (Expr.Set.remove (one "(! ((#index + 1.) == #n))") fs) in
+      nonempty_suffix_run "reversed numerical disequality" reversed gamma lower upper
+        (0.,2.,"sat") (0.,2.))) ["saved";"alpha";"collision"])
+
+let nonempty_suffix_fallback () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,lower,upper,one = nonempty_suffix_fixture "fallback" in
+  let no_gap = Expr.Set.remove (one "(! ((#index + 1.) == #n))") fs in
+  nonempty_suffix_run "old weak successor keeps zero-one seed" no_gap gamma lower upper
+    (0.,1.,"sat") (0.,1.);
+  let fixed = strict_counter_pins fs lower upper 1. 3. in
+  nonempty_suffix_run "failed zero-two seed keeps original full SAT" fixed gamma
+    lower upper (0.,2.,"unsat") (1.,3.);
+  let raw_zero = strict_counter_pins fs lower upper (-.0.) 2. in
+  nonempty_suffix_run "raw negative zero survives positive-zero hint miss" raw_zero
+    gamma lower upper (0.,2.,"unsat") (-.0.,2.))
+
+let nonempty_suffix_frame () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,lower,upper,one = nonempty_suffix_fixture "frame" in
+  let frame = one "(#current == u16\"retained nonnumeric frame\")" in
+  let fs = Expr.Set.add frame fs in
+  nonempty_suffix_run "whole UTF16/list frame SAT" fs gamma lower upper (0.,2.,"sat") (0.,2.);
+  let fs = Expr.Set.add (not_ frame) fs in
+  ignore (strict_counter_run ~hint:(0.,2.,"unsat")
+    "whole UTF16/list frame contradiction" fs gamma lower upper "unsat");
+  let before = nonblank_counter_rows () and caller = "control-nonempty-suffix-full-frame" in
+  let rejected,contexts = pending_context_capture (fun () ->
+    Option.is_none (Smt.exec_sat ~caller_kind:caller fs gamma)) in
+  Alcotest.(check bool) "independent original complete-frame UNSAT" true rejected;
+  finite_number_bound_complete "whole original frame" before contexts "unsat";
+  ignore (strict_counter_endpoint "whole original frame" before contexts caller fs gamma "unsat"))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None -> [
+       Alcotest.test_case "nonempty suffix full frame native models disequality and cache" `Quick
+         (with_total nonempty_suffix_models);
+       Alcotest.test_case "nonempty suffix old weak seed raw zero and full fallback" `Quick
+         (with_total nonempty_suffix_fallback);
+       Alcotest.test_case "nonempty suffix retained UTF16 list frame contradiction" `Quick
+         (with_total nonempty_suffix_frame)]
+   | _ -> [])

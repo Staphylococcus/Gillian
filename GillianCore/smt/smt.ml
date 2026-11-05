@@ -2629,7 +2629,7 @@ let optional_timeout cap =
   string_of_int (if configured = 0 then cap else min cap configured)
 
 (* A bounded natural counter pair may use one optional complete-query witness:
-   preserve 0/2 for explicit (lower + 1) < upper, otherwise 0/1, whenever the
+   use 0/2 for a retained strict successor gap, otherwise 0/1, whenever the
    original weak lower bound is present. A strict-only 0 < lower instead tries
    1/3 or 1/2, respectively; these are guesses, never added source premises.
    Positive finite literal lower bounds raise this one candidate to the least
@@ -2686,10 +2686,14 @@ let nonempty_counter_model fs gamma =
   match ordered with
   | [] | _ :: _ :: _ -> None
   | [(lower, upper)] ->
+      let successor = Expr.BinOp (Expr.LVar lower, FPlus, Expr.num 1.)
+      and bound = Expr.LVar upper in
       let upper_value =
-        if Expr.Set.mem (Expr.BinOp
-          (Expr.BinOp (Expr.LVar lower, FPlus, Expr.num 1.), FLessThan,
-           Expr.LVar upper)) fs then 2. else 1. in
+        if Expr.Set.mem (Expr.BinOp (successor, FLessThan, bound)) fs
+           || (Expr.Set.mem (Expr.BinOp (successor, FLessThanEqual, bound)) fs
+               && (Expr.Set.mem (Expr.UnOp (Not, BinOp (successor, Equal, bound))) fs
+                   || Expr.Set.mem (Expr.UnOp (Not, BinOp (bound, Equal, successor))) fs))
+        then 2. else 1. in
       let lower_value, upper_value =
         if Expr.Set.mem (Expr.BinOp (Expr.num 0., FLessThanEqual,
           Expr.LVar lower)) fs then 0., upper_value
