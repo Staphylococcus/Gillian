@@ -3711,6 +3711,10 @@ let original_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
       | _ -> None
     in
     let finite_add = function
+      | (Expr.UnOp (Not, UnOp (IsInt,
+           BinOp ((LVar _ as p), FPlus, Lit (Num 1.)))) as failed)
+        when number p ->
+          core [ failed; Expr.UnOp (IsInt, p) ]
       | (Expr.UnOp
            (Not, BinOp ((BinOp ((LVar _ as p), FPlus, Lit (Num 1.)) as sum),
                         Equal, same)) as failed)

@@ -19336,3 +19336,102 @@ let tests = tests @
        Alcotest.test_case "nonempty suffix retained UTF16 list frame contradiction" `Quick
          (with_total nonempty_suffix_frame)]
    | _ -> [])
+
+
+(* Original integrality atoms only. Rounding may stall a large successor;
+   this precheck proves no strict progress and cannot replace a loop rank. *)
+let integral_successor_fixture label step =
+  let index = Expr.LVar ("#successor_" ^ label)
+  and frame = Expr.LVar ("#successor_frame_" ^ label) in
+  let gamma = Hashtbl.create 2 in
+  (match index,frame with Expr.LVar n,Expr.LVar s ->
+    Hashtbl.add gamma n Type.NumberType;
+    Hashtbl.add gamma s Type.Utf16Type | _ -> assert false);
+  let premise = Expr.UnOp (IsInt,index) in
+  let failed = not_ (Expr.UnOp (IsInt,bin FPlus index (Expr.num step))) in
+  let core = Expr.Set.of_list [premise;failed] in
+  let full = Expr.Set.add
+    (bin Equal frame (original_core_literal [65;32;66])) core in
+  index,gamma,premise,failed,core,full
+
+let integral_successor_observe label fs gamma core wanted =
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+  finite_number_bound_complete label before contexts wanted;
+  Alcotest.(check bool) (label ^ " actual complete result") (wanted="sat")
+    (Option.is_some model);
+  (match core with
+   | Some expected ->
+       let row = nonblank_counter_observe label before "optional-original-core"
+         "unsat" expected gamma in
+       Alcotest.(check string) (label ^ " optional unknown stays inconclusive")
+         "true" (smt_result_field "raw_unknown" row);
+       Alcotest.(check string) (label ^ " unchanged optional timeout")
+         (Smt.optional_timeout 5000) (smt_result_field "timeout_ms" row)
+   | None ->
+       Alcotest.(check bool) (label ^ " selector declined") true
+         (List.for_all (fun c -> pending_context_field "caller" c
+           <> `String "optional-original-core") contexts);
+       ignore (strict_counter_endpoint label before contexts "required-complete"
+         fs gamma wanted));
+  nonblank_counter_retained label fs gamma original types;
+  model
+
+let integral_successor_original_core () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun label ->
+    let _,gamma,_,_,core,full = integral_successor_fixture label 1. in
+    Alcotest.(check bool) (label ^ " strict original subset") true
+      (Expr.Set.subset core full && not (Expr.Set.equal core full));
+    ignore (integral_successor_observe label full gamma (Some core) "unsat");
+    let before = nonblank_counter_read "file.log" in
+    Alcotest.(check bool) (label ^ " original full-key cache UNSAT") true
+      (Option.is_none (Smt.check_sat full gamma));
+    Alcotest.(check string) (label ^ " cached result adds no native endpoint")
+      before (nonblank_counter_read "file.log")) ["plain";"renamed"])
+
+let integral_successor_countercontrols () = with_nonblank_counter_trace (fun () ->
+  let index,gamma,premise,_,_,full = integral_successor_fixture "fraction" 1. in
+  let fs = Expr.Set.add (bin ValueEqual index (Expr.num 0.5))
+    (Expr.Set.remove premise full) in
+  let model = integral_successor_observe "missing-integrality" fs gamma None "sat" in
+  positive_trace_replay "missing-integrality" (Option.get model) gamma fs index 0.5;
+  let index,gamma,_,failed,_,full = integral_successor_fixture "no_goal" 1. in
+  let fs = Expr.Set.add (bin ValueEqual index (Expr.num 0.))
+    (Expr.Set.remove failed full) in
+  let model = integral_successor_observe "missing-failed-goal" fs gamma None "sat" in
+  positive_trace_replay "missing-failed-goal" (Option.get model) gamma fs index 0.;
+  let index,gamma,_,_,_,full = integral_successor_fixture "half" 0.5 in
+  let fs = Expr.Set.add (bin ValueEqual index (Expr.num 0.)) full in
+  let model = integral_successor_observe "half-increment" fs gamma None "sat" in
+  positive_trace_replay "half-increment" (Option.get model) gamma fs index 0.;
+  let _,gamma,_,_,core,_ = integral_successor_fixture "exact" 1. in
+  ignore (integral_successor_observe "no-proper-subset" core gamma None "unsat"))
+
+let integral_successor_boundaries () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,value) ->
+    let index,gamma,_,_,core,full = integral_successor_fixture label 1. in
+    let fs = Expr.Set.add (bin ValueEqual index (Expr.num value)) full in
+    ignore (integral_successor_observe label fs gamma (Some core) "unsat"))
+    ["positive_zero",0.;"negative_zero",-.0.;
+     "stalled_large",9007199254740992.;"maximum_finite",Float.max_float];
+  let index,gamma,premise,_,_,full = integral_successor_fixture "no_progress" 1. in
+  let fs = full |> Expr.Set.remove
+      (not_ (Expr.UnOp (IsInt,bin FPlus index (Expr.num 1.))))
+    |> Expr.Set.add (bin ValueEqual index (Expr.num 9007199254740992.))
+    |> Expr.Set.add (not_ (bin FLessThan index (bin FPlus index (Expr.num 1.)))) in
+  assert (Expr.Set.mem premise fs);
+  let model = integral_successor_observe "integrality-is-not-descent" fs gamma None "sat" in
+  positive_trace_replay "integrality-is-not-descent" (Option.get model) gamma fs index
+    9007199254740992.)
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None -> [
+       Alcotest.test_case "original integral successor exact core and full cache" `Quick
+         (with_total integral_successor_original_core);
+       Alcotest.test_case "original integral successor premise goal delta and subset controls" `Quick
+         (with_total integral_successor_countercontrols);
+       Alcotest.test_case "original integral successor raw zero finite boundaries and no descent" `Quick
+         (with_total integral_successor_boundaries)]
+   | _ -> [])
