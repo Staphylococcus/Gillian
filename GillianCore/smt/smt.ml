@@ -4512,7 +4512,6 @@ let positive_trace_index_witness_query fs gamma =
                   List.length (List.sort_uniq String.compare
                     [i; v; c; index_name; current_name; values_name]) = 6
                   && not (Expr.Set.mem cast_lower fs)
-                  && not (Expr.Set.mem next_length fs)
                   && not (has_equal current nth_count)
                   && not (has_equal current nth_predecessor)
               | _ -> false in

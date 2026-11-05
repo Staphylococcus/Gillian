@@ -19177,3 +19177,68 @@ let tests = tests @
        Alcotest.test_case "formatted index missed hint raw zero conflict and fallback" `Quick
          (with_total formatted_index_fallback)]
    | _ -> [])
+
+(* The original alias frame may also retain the next-prefix length bound.
+   This is the complete current15 frame, not an inferred cast lower bound. *)
+let positive_trace_next_length_fixture label =
+  let fs,gamma,index,name,one = positive_trace_current_frame_fixture 0 label in
+  let fs = Expr.Set.add (one "((1i i+ (as_int #index)) i<= (l-len #values))") fs in
+  Alcotest.(check int) "whole alias plus next-length frame" 15 (Expr.Set.cardinal fs);
+  fs,gamma,index,name,one
+
+let positive_trace_next_length_models () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun label ->
+    let fs,gamma,index,_,one = positive_trace_next_length_fixture label in
+    positive_trace_run (label ^ "-next-length") fs gamma index "sat" "sat" 1.;
+    let rows = nonblank_counter_rows () in
+    let cached = Smt.check_sat fs gamma in
+    Alcotest.(check bool) "same complete-key cache reuses actual SAT model" true
+      (Option.is_some cached && rows = nonblank_counter_rows ());
+    let missing = Expr.Set.remove (one "(is_int #index)") fs in
+    Alcotest.(check bool) "missing original index support still declines" true
+      (Option.is_none (Smt.positive_trace_index_witness_query missing gamma)))
+    ["saved";"next_length_alpha";"collision"])
+
+let positive_trace_next_length_fallback () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,value) ->
+    let fs,gamma,index,_,_ = positive_trace_next_length_fixture label in
+    positive_trace_run label (Expr.Set.add (bin ValueEqual index (Expr.num value)) fs)
+      gamma index "unsat" "sat" value)
+    ["next-length-positive-zero",0.;"next-length-negative-zero",-.0.;
+     "next-length-index-two",2.])
+
+let positive_trace_next_length_frame () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,index,name,one = positive_trace_next_length_fixture "next_length_frame" in
+  let frame = one "(#current == u16\"unchanged frame\")" in
+  let fs = Expr.Set.add frame fs in
+  positive_trace_run "next-length-UTF16-frame" fs gamma index "sat" "sat" 1.;
+  let fs = Expr.Set.add (not_ frame) fs in
+  let hinted = match Smt.positive_trace_index_witness_query fs gamma with
+    | Some hinted -> hinted | None -> Alcotest.fail "whole contradictory frame must reach native check" in
+  let before = nonblank_counter_rows () and caller = "control-next-length-frame-contradiction" in
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let rejected,contexts = pending_context_capture (fun () ->
+    Alcotest.(check bool) "optional complete frame contradiction cannot yield SAT" true
+      (Option.is_none (Smt.positive_trace_index_model fs gamma));
+    Option.is_none (Smt.exec_sat ~caller_kind:caller fs gamma)) in
+  Alcotest.(check bool) "required original contradiction independently rejects" true rejected;
+  positive_trace_complete "next-length-frame" before contexts "unsat";
+  ignore (positive_trace_selected "next-length-frame" contexts "optional-positive-trace-index" hinted gamma);
+  ignore (positive_trace_selected "next-length-frame" contexts caller fs gamma);
+  ignore (nonblank_counter_observe "next-length-frame" before "optional-positive-trace-index" "unsat" hinted gamma);
+  ignore (nonblank_counter_observe "next-length-frame" before caller "unsat" fs gamma);
+  Alcotest.(check bool) "all original frame atoms and Gamma entries unchanged" true
+    (List.equal Expr.equal original (Expr.Set.elements fs) && types=nonblank_counter_types gamma);
+  Alcotest.(check bool) "actual current role is retained" true
+    (Hashtbl.find_opt gamma (name "#current")=Some Type.Utf16Type))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None -> [
+       Alcotest.test_case "positive trace next length whole native models alpha and public cache" `Quick
+         (with_total positive_trace_next_length_models);
+       Alcotest.test_case "positive trace next length hint miss signed zero complete fallback" `Quick
+         (with_total positive_trace_next_length_fallback);
+       Alcotest.test_case "positive trace next length retained UTF16 frame contradiction" `Quick
+         (with_total positive_trace_next_length_frame)]
+   | _ -> [])
