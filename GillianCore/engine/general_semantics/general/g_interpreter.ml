@@ -326,7 +326,8 @@ struct
         (annot : annot option)
         (state : State.t) : unit =
       let loc = Option.bind annot Annot.get_origin_loc in
-      L.normal (fun m ->
+      (* Whole command/state traces belong to verbose logging, not routine outcomes. *)
+      L.verbose (fun m ->
           m
             "@[------------------------------------------------------@\n\
              TIME: %f@\n\
