@@ -1322,11 +1322,13 @@ module Make (State : SState.S) :
               (fun x y -> (x, Expr.LVar y))
               lemma.data.lemma_existentials binders
           in
+          (* Returned names must survive the simplification inside run_spec_aux;
+             protecting them afterwards cannot restore an eliminated alias. *)
+          let astate = add_spec_vars astate (Var.Set.of_list binders) in
           let** astate, _ =
             run_spec_aux ~existential_bindings lname lemma.data.lemma_params
               lemma.mp None v_args astate
           in
-          let astate = add_spec_vars astate (Var.Set.of_list binders) in
           let _, astates = simplify ~matching:true astate in
           if lname = "S05CopyAppendCell" && Owned_prefix_lifecycle.active () then List.iter (fun state ->
             lifecycle "apply-return" state (fun () -> `Null)) astates;
