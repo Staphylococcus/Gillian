@@ -366,6 +366,10 @@ struct
                 post_loc;
               }
             in
+            (if Reduction.preparation_profile_enabled
+                && Sys.getenv_opt "GILLIAN_VERIFY_BODY_STACK_TARGET" = Some name then
+              L.normal (fun m -> m "PREPARED_POST_PLAN name=%s case=(%d,%d)@\n%a@\nEND_PREPARED_POST_PLAN"
+                name id id' MP.pp post_mp));
             (if Preparation_provenance.field_framed () then
               Preparation_provenance.snapshot_fields preparation_origin ~id:test.id
                 ~phase:"test-created" ~prepare:(fun()->())
