@@ -2149,7 +2149,29 @@ struct
            let command =
              String.map (function '\n' | '\r' -> ' ' | c -> c) command
            in
-           L.normal (fun m -> m "EXECUTION_COMMAND_EXCEPTION: %s" command)
+           L.normal (fun m -> m "EXECUTION_COMMAND_EXCEPTION: %s" command);
+           (* Read only existing messages. Registered exception printers may
+              serialize the complete state, even if truncated afterwards. *)
+           let reason =
+             match exn with
+             | Gillian_result.Exc.Gillian_error error -> (
+                 match error with
+                 | AnalysisFailures ({ msg; _ } :: _) -> msg
+                 | CompilationError { msg; _ } | InternalError { msg; _ } -> msg
+                 | OperationError msg -> msg
+                 | AnalysisFailures [] -> "AnalysisFailures")
+             | Gillian_result.Exc.Gillian_internal_error { msg; _ }
+             | Internal_error msg | Failure msg | Invalid_argument msg -> msg
+             | Interpreter_error _ -> "Interpreter_error (state omitted)"
+             | _ -> Printexc.exn_slot_name exn
+           in
+           let reason = String.sub reason 0 (min 768 (String.length reason)) in
+           let reason =
+             String.map
+               (fun c -> if Char.code c < 32 || Char.code c > 126 then ' ' else c)
+               reason
+           in
+           L.normal (fun m -> m "EXECUTION_EXCEPTION_REASON: %s" reason)
          with _ -> ());
         Printexc.raise_with_backtrace exn backtrace
   end
