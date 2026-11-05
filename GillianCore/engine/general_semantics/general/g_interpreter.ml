@@ -2154,6 +2154,24 @@ struct
               serialize the complete state, even if truncated afterwards. *)
            let reason =
              match exn with
+             | State.Internal_State_Error (errors, _) ->
+                 let short s = String.sub s 0 (min 160 (String.length s)) in
+                 let rec take n = function
+                   | _ when n = 0 -> []
+                   | [] -> []
+                   | error :: rest ->
+                       let item =
+                         match error with
+                         | StateErr.EVar name -> "EVar: " ^ short name
+                         | EOther msg -> "EOther: " ^ short msg
+                         | EMem _ -> "EMem"
+                         | EPure _ -> "EPure"
+                         | EAsrt _ -> "EAsrt"
+                         | EInfeasibleUnfold _ -> "EInfeasibleUnfold"
+                       in
+                       item :: take (n - 1) rest
+                 in
+                 "Internal_State_Error: " ^ String.concat "; " (take 4 errors)
              | Gillian_result.Exc.Gillian_error error -> (
                  match error with
                  | AnalysisFailures ({ msg; _ } :: _) -> msg
