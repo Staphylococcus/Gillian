@@ -745,17 +745,6 @@ let finite_difference_core formulae gamma goal =
   if not !Config.Verification.total || !Config.under_approximation
      || not (Expr.Set.mem goal formulae) then None
   else match goal with
-  | Expr.UnOp (Not, BinOp (Lit (Num lower), FLessThanEqual,
-      BinOp ((BinOp (LVar base, FMinus, Lit (Num 1.)) as predecessor),
-        FMinus, Lit (Num 1.))))
-    when lower = -. Float.max_float && typed base ->
-      (* The measured nested predecessor needs only its original finiteness
-         certificate. No subtraction identity or new premise is introduced;
-         native UNSAT is required and every inconclusive result falls back. *)
-      let core = Expr.Set.of_list [goal; Expr.UnOp (IsInt, predecessor)] in
-      if Expr.Set.cardinal core = 2 && Expr.Set.subset core formulae
-         && not (Expr.Set.equal core formulae)
-      then Some core else None
   | Expr.UnOp (Not, BinOp
       (BinOp (BinOp ((LVar base as value), FPlus, Lit (Num 1.)),
          FMinus, Lit (Num 1.)), Equal, LVar same))

@@ -19436,15 +19436,16 @@ let tests = tests @
          (with_total integral_successor_boundaries)]
    | _ -> [])
 
-let nested_predecessor_bound_controls () = with_nonblank_counter_trace (fun () ->
-  List.iter (fun label ->
-    let name = "#nested_" ^ label in
+let nested_predecessor_bound_controls upper () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,direct) ->
+    let name = (if upper then "#nested_upper_" else "#nested_lower_") ^ label in
     let value = Expr.LVar name in
     let gamma = index_difference_context [name] in
     let types = Gamma.as_hashtbl gamma in
     let predecessor = bin FMinus value (Expr.num 1.) in
     let result = bin FMinus predecessor (Expr.num 1.) in
-    let goal = bin FLessThanEqual (Expr.num (-. Float.max_float)) result in
+    let goal = if upper then bin FLessThanEqual result (Expr.num Float.max_float)
+      else bin FLessThanEqual (Expr.num (-. Float.max_float)) result in
     let support = Expr.UnOp (IsInt,predecessor) in
     let failed = not_ goal in
     let core = Expr.Set.of_list [failed;support] in
@@ -19452,36 +19453,39 @@ let nested_predecessor_bound_controls () = with_nonblank_counter_trace (fun () -
       bin FLessThanEqual value (Expr.num 4294967295.);
       bin FLessThan (Expr.num 0.) predecessor] in
     let full = Expr.Set.add failed facts in
-    Alcotest.(check bool) (label ^ " exact proper original subset") true
-      (match Solver.finite_difference_core full types failed with
-       | Some selected -> Expr.Set.equal selected core | None -> false);
-    let before = strict_successor_public label true facts goal gamma in
+    let original = Expr.Set.elements full and original_types = nonblank_counter_types types in
+    let before = if direct then (
+      let before = nonblank_counter_rows () in
+      Alcotest.(check bool) (label ^ " direct complete check is UNSAT") true
+        (Option.is_none (Smt.check_sat full types));
+      before) else strict_successor_public label true facts goal gamma in
     ignore (nonblank_counter_observe label before
-      "optional-entailment-finite-difference-core" "unsat" core types);
+      "optional-original-core" "unsat" core types);
     Alcotest.(check int) (label ^ " one definite endpoint, no complete fallback")
       1 (List.length (symbolic_prefix_new_rows before));
-    List.iter (fun fs -> Alcotest.(check bool) (label ^ " missing atom or no omission declines")
-      true (Option.is_none (Solver.finite_difference_core fs types failed)))
-      [Expr.Set.remove support full;facts;core];
-    let wrong = Hashtbl.copy types in Hashtbl.replace wrong name Type.Utf16Type;
-    Alcotest.(check bool) (label ^ " wrong original type declines") true
-      (Option.is_none (Solver.finite_difference_core full wrong failed));
+    Alcotest.(check bool) (label ^ " exact full frame and Gamma retained") true
+      (original = Expr.Set.elements full && original_types = nonblank_counter_types types);
     List.iter (fun (suffix,fs) ->
       let before = nonblank_counter_rows () in
       Alcotest.(check bool) (label ^ suffix ^ " native SAT") true
         (Option.is_some (Smt.exec_sat ~caller_kind:("control-nested-" ^ suffix) fs types));
       ignore (nonblank_counter_observe (label ^ suffix) before
-        ("control-nested-" ^ suffix) "sat" fs types))
+        ("control-nested-" ^ suffix) "sat" fs types);
+      Alcotest.(check bool) (label ^ suffix ^ " shared API preserves SAT") true
+        (Option.is_some (Smt.check_sat fs types)))
       ["without-finiteness", Expr.Set.add (bin ValueEqual value (Expr.num Float.nan))
          (Expr.Set.remove support core);
        "without-goal", Expr.Set.remove failed core];
-    let false_goal = bin FLessThanEqual (Expr.num 0.) result in
+    let false_goal = if upper then bin FLessThanEqual result (Expr.num (-3.))
+      else bin FLessThanEqual (Expr.num 0.) result in
     let false_facts = Expr.Set.of_list [support;bin ValueEqual value (Expr.num 0.)] in
     ignore (strict_successor_public (label ^ " false-bound") false false_facts false_goal gamma))
-    ["plain";"renamed"])
+    ["public_plain",false;"direct_renamed",true])
 
 let tests = tests @
   (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
    | Some _, None -> [Alcotest.test_case "nested predecessor original finite subset and native omission controls" `Quick
-       (with_total nested_predecessor_bound_controls)]
+       (with_total (nested_predecessor_bound_controls false));
+     Alcotest.test_case "nested predecessor upper finite subset through both public APIs" `Quick
+       (with_total (nested_predecessor_bound_controls true))]
    | _ -> [])

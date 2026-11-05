@@ -3711,6 +3711,19 @@ let original_unsat_precheck (fs : Expr.Set.t) (gamma : typenv) : bool =
       | _ -> None
     in
     let finite_add = function
+      | (Expr.UnOp (Not, BinOp (Lit (Num lower), FLessThanEqual,
+           BinOp ((BinOp ((LVar _ as value), FMinus, Lit (Num 1.)) as predecessor),
+             FMinus, Lit (Num 1.)))) as failed)
+        when lower = -. Float.max_float && number value ->
+          (* Shared by entailment and satisfiability. Both atoms are original;
+             only native UNSAT may discharge the complete query. *)
+          core [failed; Expr.UnOp (IsInt, predecessor)]
+      | (Expr.UnOp (Not, BinOp (
+           BinOp ((BinOp ((LVar _ as value), FMinus, Lit (Num 1.)) as predecessor),
+             FMinus, Lit (Num 1.)), FLessThanEqual, Lit (Num upper))) as failed)
+        when upper = Float.max_float && number value ->
+          (* NumToInt definedness checks both finite bounds. *)
+          core [failed; Expr.UnOp (IsInt, predecessor)]
       | (Expr.UnOp (Not, UnOp (IsInt,
            BinOp ((LVar _ as p), FPlus, Lit (Num 1.)))) as failed)
         when number p ->
