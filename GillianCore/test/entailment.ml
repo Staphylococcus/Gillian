@@ -18980,9 +18980,9 @@ let tests = tests @
 
 let stable_assertion_dedup_native () = with_nonblank_counter_trace (fun () ->
   let x = Expr.LVar "#dedup_x" and y = Expr.LVar "#dedup_y" in
-  let gamma = Gamma.init () in
-  Gamma.update gamma "#dedup_x" Type.NumberType;
-  Gamma.update gamma "#dedup_y" Type.NumberType;
+  let gamma = Hashtbl.create 2 in
+  Hashtbl.add gamma "#dedup_x" Type.NumberType;
+  Hashtbl.add gamma "#dedup_y" Type.NumberType;
   let formatting value =
     let formatted = Expr.UnOp (NumberToUtf16,value) in
     [bin Equal formatted (nonblank_utf16 "0");
@@ -19014,8 +19014,27 @@ let stable_assertion_dedup_native () = with_nonblank_counter_trace (fun () ->
     let assertions = List.filter (function
       | Sexplib.Sexp.List (Sexplib.Sexp.Atom "assert" :: _) -> true
       | _ -> false) commands in
-    Alcotest.(check bool) (label ^ " nonempty meaningful assertion stream") true
-      (List.length assertions >= 8);
+    (* Eight/nine main constraints, four distinct formatter bridge facts and
+       two literal-parser facts must all survive; uniqueness alone would let
+       a broken encoder discard distinct intrinsic facts. *)
+    Alcotest.(check int) (label ^ " every distinct constraint retained")
+      (if expected then 14 else 15) (List.length assertions);
+    let rec contains atom = function
+      | Sexplib.Sexp.Atom value -> value = atom
+      | Sexplib.Sexp.List values -> List.exists (contains atom) values in
+    let intrinsic head terms = List.filter (function
+      | Sexplib.Sexp.List [Sexplib.Sexp.Atom "assert";
+          Sexplib.Sexp.List (Sexplib.Sexp.Atom op :: _)] as fact ->
+          op = head && List.for_all (fun term -> contains term fact) terms
+      | _ -> false) assertions in
+    List.iter (fun variable ->
+      Alcotest.(check int) (label ^ variable ^ " formatter roundtrip retained once")
+        1 (List.length (intrinsic "or" [variable;"num2utf16";"utf162num"]));
+      Alcotest.(check int) (label ^ variable ^ " decimal recognition retained once")
+        1 (List.length (intrinsic "=>" [variable;"gil_uint32_decimal_value"])))
+      ["$$dedup_x";"$$dedup_y"];
+    Alcotest.(check int) (label ^ " both literal-parser facts retained once")
+      2 (List.length (intrinsic "=" ["utf162num"]));
     Alcotest.(check int) (label ^ " exact repeated assertions removed")
       (List.length assertions) (List.length (List.sort_uniq Stdlib.compare assertions));
     let query = text (pending_context_field "query" context) in
