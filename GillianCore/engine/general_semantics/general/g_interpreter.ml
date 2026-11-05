@@ -2116,7 +2116,18 @@ struct
         }
       in
 
-      do_eval cmd eval_state
+      try do_eval cmd eval_state with exn ->
+        let backtrace = Printexc.get_raw_backtrace () in
+        (* Retain only the failed operation, never its heap or proof state. *)
+        (try
+           let command = Fmt.str "%s:%d %a" proc_name i Cmd.pp_indexed cmd in
+           let command = String.sub command 0 (min 1024 (String.length command)) in
+           let command =
+             String.map (function '\n' | '\r' -> ' ' | c -> c) command
+           in
+           L.normal (fun m -> m "EXECUTION_COMMAND_EXCEPTION: %s" command)
+         with _ -> ());
+        Printexc.raise_with_backtrace exn backtrace
   end
 
   let evaluate_cmd = Evaluate_cmd.eval_cmd
