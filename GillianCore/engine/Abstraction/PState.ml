@@ -950,7 +950,7 @@ module Make (State : SState.S) :
       @param state Current state
       @param preds Current predicate set
       @return List of states/predicate sets resulting from the evaluation *)
-  let evaluate_slcmd (prog : 'a MP.prog) (lcmd : SLCmd.t) (astate : t) :
+  let evaluate_slcmd_impl (prog : 'a MP.prog) (lcmd : SLCmd.t) (astate : t) :
       (t, err_t) Res_list.t =
     Owned_prefix_lifecycle.scope "logic-command" ~state:astate
       (fun () -> Cmd.to_yojson (fun (_ : unit) -> `Null) (Cmd.Logic (LCmd.SL lcmd))) @@ fun () ->
@@ -1339,6 +1339,19 @@ module Make (State : SState.S) :
     if Owned_prefix_lifecycle.active () then
       List.iter (fun state -> lifecycle "logic-return" state (fun () -> `Null)) astates;
     Res_list.just_oks astates
+
+  let evaluate_slcmd prog lcmd astate =
+    try evaluate_slcmd_impl prog lcmd astate with exn ->
+      let backtrace = Printexc.get_raw_backtrace () in
+      (* Only the command, after failure: never serialize the proof state. A
+         diagnostic failure must not replace the original exception/backtrace. *)
+      (try
+         let command = Fmt.str "%a" SLCmd.pp lcmd in
+         let command = String.sub command 0 (min 1024 (String.length command)) in
+         let command = String.map (function '\n' | '\r' -> ' ' | c -> c) command in
+         L.normal (fun m -> m "PROOF_COMMAND_FAILURE: %s" command)
+       with _ -> ());
+      Printexc.raise_with_backtrace exn backtrace
 
   let run_spec
       (spec : MP.spec)
