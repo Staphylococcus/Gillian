@@ -19075,3 +19075,104 @@ let tests = tests @
    | Some _, None -> [Alcotest.test_case "stable exact SMT assertion deduplication and signed zeros"
        `Quick (with_total stable_assertion_dedup_native)]
    | _ -> [])
+
+let formatted_index_fixture label =
+  let index = Expr.LVar ("#formatted_index_" ^ label)
+  and keys = Expr.LVar ("#formatted_keys_" ^ label) in
+  let gamma = Hashtbl.create 3 in
+  (match index,keys with LVar i,LVar k ->
+    Hashtbl.add gamma i Type.NumberType; Hashtbl.add gamma k Type.SetType
+   | _ -> assert false);
+  Hashtbl.add gamma "#unused_formatted_frame" Type.BooleanType;
+  let next = bin FPlus index (Expr.num 1.) in
+  let formatted = Expr.UnOp (NumberToUtf16,index) in
+  let fs = Expr.Set.of_list [Expr.UnOp (IsInt,index);Expr.UnOp (IsInt,next);
+    bin FLessThanEqual (Expr.num 0.) index;
+    bin FLessThan index (Expr.num 4294967295.);
+    bin FLessThanEqual next (Expr.num 4294967295.);
+    bin ILessThanEqual (Expr.int 0) (Expr.UnOp (NumToInt,index));
+    not_ (bin SetMem formatted keys);
+    bin Equal (Expr.UnOp (NumberToUtf16,Expr.UnOp (ToUint32Op,
+      bin FPlus index (Expr.num 0.)))) formatted;
+    bin Equal (Expr.UnOp (NumToInt,next))
+      (bin IPlus (Expr.int 1) (Expr.UnOp (NumToInt,index)))] in
+  fs,gamma,index
+
+let formatted_index_attempt label fs gamma expected guess =
+  let before = nonblank_counter_rows () and atoms = Expr.Set.elements fs
+  and types = nonblank_counter_types gamma in
+  let model,contexts = pending_context_capture (fun () ->
+    Smt.formatted_index_model fs gamma) in
+  Alcotest.(check bool) (label ^ " real complete optional verdict") expected
+    (Option.is_some model);
+  let index = Expr.LVar ("#formatted_index_" ^ label) in
+  let submitted = Expr.Set.add (bin ValueEqual index (Expr.num guess)) fs in
+  let caller = "optional-formatted-index" in
+  ignore (nonblank_counter_observe label before caller
+    (if expected then "sat" else "unsat") submitted gamma);
+  Alcotest.(check int) (label ^ " exactly one native complete attempt") 1 (List.length contexts);
+  let context = List.hd contexts in
+  List.iter (fun (key,want) -> Alcotest.(check bool) (label ^ " policy " ^ key) true
+    (pending_context_field key context = want))
+    ["raw_unknown",`Bool true;"timeout_ms",`String "1000";"phase_selection",`Int 3];
+  Alcotest.(check bool) (label ^ " native model validation retained") true
+    (pending_context_field "model_validate" (pending_context_field "initial_options" context)
+       = `String "true");
+  nonblank_counter_retained label fs gamma atoms types;
+  model
+
+let formatted_index_native () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,positive) ->
+    let fs,gamma,index = formatted_index_fixture label in
+    let fs = if positive then Expr.Set.add (bin FLessThan (Expr.num 0.) index) fs else fs in
+    let guess = if positive then 1. else 0. in
+    let model = Option.get (formatted_index_attempt label fs gamma true guess) in
+    let name = match index with LVar name -> name | _ -> assert false in
+    primary_check_lift label model gamma [name,Literal.Num guess];
+    let before = nonblank_counter_rows () in
+    let cached,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+    Alcotest.(check bool) (label ^ " public dispatch returns a native model") true (Option.is_some cached);
+    ignore (nonblank_counter_observe (label ^ " public") before "optional-formatted-index" "sat"
+      (Expr.Set.add (bin ValueEqual index (Expr.num guess)) fs) gamma);
+    Alcotest.(check bool) (label ^ " public complete endpoint is observed") true (contexts <> []);
+    let files = nonblank_counter_files () in
+    ignore (Smt.check_sat fs gamma);
+    Alcotest.(check bool) (label ^ " complete-key cache needs no new native query") true
+      (files = nonblank_counter_files ())) ["zero",false;"positive",true])
+
+let formatted_index_fallback () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,index = formatted_index_fixture "miss" in
+  let nonzero = Expr.Set.add (bin FLessThanEqual (Expr.num 2.) index) fs in
+  ignore (formatted_index_attempt "miss" nonzero gamma false 0.);
+  let before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () -> Smt.check_sat nonzero gamma) in
+  Alcotest.(check bool) "failed guess preserves a full native nonzero model" true (Option.is_some model);
+  ignore (nonblank_counter_observe "miss fallback" before "required-complete" "sat" nonzero gamma);
+  Alcotest.(check bool) "required complete fallback was actually submitted" true (contexts <> []);
+  let negative,gamma,index = formatted_index_fixture "negative" in
+  let negative = Expr.Set.add (bin ValueEqual index (Expr.num (-0.))) negative in
+  Alcotest.(check bool) "fixed raw negative zero declines the positive-zero hint" true
+    (Option.is_none (Smt.formatted_index_model negative gamma));
+  let model = Option.get (Smt.check_sat negative gamma) in
+  let name = match index with LVar name -> name | _ -> assert false in
+  primary_check_lift "raw negative zero fallback" model gamma [name,Literal.Num (-0.)];
+  let contradiction,gamma,index = formatted_index_fixture "conflict" in
+  let contradiction = Expr.Set.add (bin FLessThan index (Expr.num 0.)) contradiction in
+  ignore (formatted_index_attempt "conflict" contradiction gamma false 0.);
+  Alcotest.(check bool) "contradictory full frame cannot become a SAT witness" true
+    (Option.is_none (Smt.check_sat contradiction gamma));
+  let plain,gamma,index = formatted_index_fixture "decline" in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "missing original integrality declines the hint" true
+    (Option.is_none (Smt.formatted_index_model (Expr.Set.remove (Expr.UnOp (IsInt,index)) plain) gamma));
+  Alcotest.(check bool) "ineligible shape submits no solver guess" true
+    (before = nonblank_counter_rows ()))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None -> [
+       Alcotest.test_case "formatted index complete native witness and public cache" `Quick
+         (with_total formatted_index_native);
+       Alcotest.test_case "formatted index missed hint raw zero conflict and fallback" `Quick
+         (with_total formatted_index_fallback)]
+   | _ -> [])

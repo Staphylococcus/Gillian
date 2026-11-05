@@ -4542,6 +4542,38 @@ let positive_trace_index_model fs gamma =
           ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
           ~raw_unknown:true query gamma with SMT_unknown -> None)
 
+(* A bounded index with an excluded formatted key can try one small witness.
+   This pins only the complete-query search, never the symbolic state. A
+   rejected or inconclusive hint preserves the required native fallback. *)
+let formatted_index_model fs gamma =
+  if not !Config.Verification.total || !Config.under_approximation then None else
+  let vars = Expr.Set.fold (fun e acc -> SS.union (Expr.lvars e) acc) fs SS.empty in
+  let typed typ = SS.filter (fun x -> Hashtbl.find_opt gamma x = Some typ) vars in
+  let numbers = typed Type.NumberType and sets = typed Type.SetType in
+  if SS.cardinal vars <> 2 || SS.cardinal numbers <> 1 || SS.cardinal sets <> 1
+  then None else
+  let name = SS.choose numbers and keys = SS.choose sets in
+  let index = Expr.LVar name in
+  let bounded = Expr.Set.exists (function
+    | Expr.BinOp (LVar x, (FLessThan | FLessThanEqual), Lit (Num bound)) ->
+        x = name && Float.is_finite bound && 0. <= bound && bound <= 4294967295.
+    | _ -> false) fs in
+  let fixed = Expr.Set.exists (function
+    | Expr.BinOp (LVar x, ValueEqual, Lit (Num _))
+    | Expr.BinOp (Lit (Num _), ValueEqual, LVar x) -> x = name
+    | _ -> false) fs in
+  if fixed || not bounded || not (List.for_all (fun e -> Expr.Set.mem e fs)
+    [Expr.UnOp (IsInt,index);
+     Expr.BinOp (Expr.num 0.,FLessThanEqual,index);
+     Expr.UnOp (Not,BinOp (UnOp (NumberToUtf16,index),SetMem,LVar keys))])
+  then None else
+  let positive = Expr.Set.mem (Expr.BinOp (Expr.num 0.,FLessThan,index)) fs in
+  let query = Expr.Set.add
+    (Expr.BinOp (index,ValueEqual,Expr.num (if positive then 1. else 0.))) fs in
+  try run_sat ~caller_kind:"optional-formatted-index"
+    ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+    ~raw_unknown:true query gamma with SMT_unknown -> None
+
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   let key = formula_key fs gamma in
   match Formula_cache.find_opt sat_cache key with
@@ -4585,7 +4617,9 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
                       let complete_fs = with_checked_index_identities fs gamma in
                       (match natural_gap_model complete_fs gamma with
                        | Some _ as witness -> witness
-                       | None -> exec_sat complete_fs gamma)))))
+                       | None -> (match formatted_index_model complete_fs gamma with
+                         | Some _ as witness -> witness
+                         | None -> exec_sat complete_fs gamma))))))
       in
       let () =
         L.verbose (fun m ->
