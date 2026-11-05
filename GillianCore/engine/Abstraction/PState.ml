@@ -66,6 +66,13 @@ module Make (State : SState.S) :
   module L = Logging
   module SMatcher = Matcher.Make (State)
 
+  (* Passive opt-in context: print only literal stages, never a proof state. *)
+  let lemma_stage name stage =
+    try
+      if Sys.getenv_opt "GILLIAN_LEMMA_STAGE_TARGET" = Some name then
+        L.normal (fun m -> m "LEMMA_STAGE: %s" stage)
+    with _ -> ()
+
   type init_data = State.init_data
 
   type t = SMatcher.t = {
@@ -349,6 +356,7 @@ module Make (State : SState.S) :
         m "About to use the spec of %s with the following MP:@\n%a@\n" name
           MP.pp mp);
 
+    lemma_stage name "pre";
     let res = SMatcher.match_ astate' subst mp (FunctionCall name) in
     if List.exists Result.is_error res then
       L.normal (fun m ->
@@ -377,6 +385,7 @@ module Make (State : SState.S) :
     in
 
     (* OK FOR DELAY ENTAILMENT *)
+    lemma_stage name "post";
     let* final_state = SMatcher.produce_posts frame_state subst posts in
     if name = "S05CopyAppendCell" then
       lifecycle "apply-post-produced" final_state (fun () -> SVal.SESubst.to_yojson subst);
@@ -386,11 +395,13 @@ module Make (State : SState.S) :
     let final_state = set_store final_state (SStore.copy frame_store) in
     let v_ret = Option.value ~default:(Lit Undefined) v_ret in
     let final_state = update_store final_state x v_ret in
+    lemma_stage name "spec-simplify";
     let _, final_states = simplify ~matching:true final_state in
     final_states
     |> List.filter_map @@ fun final_state ->
        if name = "S05CopyAppendCell" then
          lifecycle "apply-post-simplified" final_state (fun () -> `Null);
+       lemma_stage name "concrete-unfold";
        match SMatcher.unfold_concrete_preds final_state with
        | Some (_, with_unfolded_concrete) ->
            if name = "S05CopyAppendCell" then
@@ -1269,6 +1280,7 @@ module Make (State : SState.S) :
             | Error _ -> Fmt.failwith "Lemma %s does not exist" lname
             | Ok lemma -> lemma
           in
+          lemma_stage lname "args";
           let v_args : vt list =
             List.map
               (fun arg ->
@@ -1329,6 +1341,7 @@ module Make (State : SState.S) :
             run_spec_aux ~existential_bindings lname lemma.data.lemma_params
               lemma.mp None v_args astate
           in
+          lemma_stage lname "apply-simplify";
           let _, astates = simplify ~matching:true astate in
           if lname = "S05CopyAppendCell" && Owned_prefix_lifecycle.active () then List.iter (fun state ->
             lifecycle "apply-return" state (fun () -> `Null)) astates;
@@ -1337,9 +1350,11 @@ module Make (State : SState.S) :
           raise
             (Failure "Invariant must be treated by the match_invariant function")
     in
+    (match lcmd with ApplyLem (name, _, _) -> lemma_stage name "logic-simplify" | _ -> ());
     let _, astates = simplify resulting_astate in
     if Owned_prefix_lifecycle.active () then
       List.iter (fun state -> lifecycle "logic-return" state (fun () -> `Null)) astates;
+    (match lcmd with ApplyLem (name, _, _) -> lemma_stage name "return" | _ -> ());
     Res_list.just_oks astates
 
   let evaluate_slcmd prog lcmd astate =
