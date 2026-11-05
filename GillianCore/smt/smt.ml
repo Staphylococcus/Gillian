@@ -3013,7 +3013,7 @@ let seeded_model fs gamma =
       | _ -> value) fs 0. in
     let initial = SS.fold (fun x acc ->
       let guess = root_guess x in
-      if number x && guess > 1. && not (List.mem_assoc x acc)
+      if number x && guess > 0. && not (List.mem_assoc x acc)
       then (x,guess)::acc else acc) vars literal_values in
     if List.length initial = List.length literal_values then None else
     let value guesses = function
@@ -3032,7 +3032,7 @@ let seeded_model fs gamma =
       | _ -> acc in
     let step guesses = Expr.Set.fold (fun e acc ->
       let equal left right acc = match left,value acc right with
-        | Expr.LVar x,Some n -> assign false x n acc | _ -> acc in
+        | Expr.LVar x,Some n -> assign true x n acc | _ -> acc in
       match e with
       | BinOp (left,(Equal | ValueEqual),right) ->
           equal right left (equal left right acc)

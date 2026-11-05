@@ -19489,3 +19489,132 @@ let tests = tests @
      Alcotest.test_case "nested predecessor upper finite subset through both public APIs" `Quick
        (with_total (nested_predecessor_bound_controls true))]
    | _ -> [])
+
+(* Complete21-atom/35-type actual PRE feasibility frame. Dump8555B SHA256
+   816f72f87f0c464bc0ce4b9f1404a3e5d47226c5629710eb04c6925ff61d968e. *)
+let measured_positive_copy_fixture prefix =
+  let fs = parse_gil_set [
+    "(! (#mapReturnedCount v== -0.))";
+    "(is_int #mapReturnedCount)";
+    "(is_int #replyN)";
+    "(0i i<= (l-len #replyValues))";
+    "(0i i<= (as_int (#mapReturnedCount - 1.)))";
+    "(0. < #mapReturnedCount)";
+    "(0. < #replyPs)";
+    "(0. <= #replyN)";
+    "(#lvar_4377 v== 1.)";
+    "(#lvar_4909 v== u16\"$.\")";
+    "(#lvar_4910 v== 4.)";
+    "(#lvar_4938 v== u16\"$.payload\")";
+    "(#lvar_4939 v== 3.)";
+    "(#lvar_4950 v== u16\"payload\")";
+    "(#lvar_4961 v== u16\"payload\")";
+    "(#mapReturnedCount == #replyN)";
+    "(#mapReturnedCount <= 4294967295.)";
+    "(#replyN <= 4294967295.)";
+    "(#replyN <= #mapReturnedCount)";
+    "(#replySp < 0.)";
+    "((1i i+ (as_int (#mapReturnedCount - 1.))) i<= (l-len #replyValues))";
+  ] in
+  let gamma = Hashtbl.create 35 in
+  List.iter (fun (name,typ) -> Hashtbl.add gamma name typ) [
+    "#replyKeys", Type.SetType;
+    "#lvar_4976", Type.ObjectType;
+    "#lvar_3948", Type.NumberType;
+    "#replySp", Type.NumberType;
+    "#lvar_4204", Type.NumberType;
+    "#lvar_3947", Type.NumberType;
+    "#replySafe", Type.NumberType;
+    "#lvar_4979", Type.ObjectType;
+    "#lvar_4980", Type.ObjectType;
+    "#replyMin", Type.NumberType;
+    "#replyN", Type.NumberType;
+    "#lvar_3949", Type.NumberType;
+    "#lvar_4199", Type.NumberType;
+    "#replyValues", Type.ListType;
+    "#lvar_4964", Type.ObjectType;
+    "#lvar_4200", Type.NumberType;
+    "#lvar_4977", Type.ObjectType;
+    "#lvar_4202", Type.NumberType;
+    "#lvar_3946", Type.NumberType;
+    "#replyPs", Type.NumberType;
+    "#lvar_3945", Type.NumberType;
+    "#replyMax", Type.NumberType;
+    "#mapReturnedCount", Type.NumberType;
+    "#lvar_4978", Type.ObjectType;
+    "#lvar_4201", Type.NumberType;
+    "#lvar_4965", Type.ObjectType;
+    "#replyEps", Type.NumberType;
+    "#lvar_4981", Type.ObjectType;
+    "#lvar_4206", Type.NumberType;
+    "#lvar_4205", Type.NumberType;
+    "#lvar_4144", Type.ObjectType;
+    "#lvar_3942", Type.NumberType;
+    "#lvar_3944", Type.NumberType;
+    "#lvar_3943", Type.NumberType;
+    "#lvar_4203", Type.NumberType;
+  ];
+  Alcotest.(check int) "whole actual feasibility FS" 21 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "whole actual feasibility Gamma" 35 (Hashtbl.length gamma);
+  let printed = Fmt.str "%a" (Fmt.iter ~sep:Fmt.comma Expr.Set.iter Expr.pp) fs in
+  Alcotest.(check string) "captured FS literal/shape roundtrip"
+    "6cc5d160a8aa9797363f2e0ee84123e6"
+    (Digest.to_hex (Digest.string (zero_decline_compact printed)));
+  let rename e = Expr.map_opt (function
+    | Expr.LVar name -> Some (Expr.LVar (prefix ^ name)),false
+    | e -> Some e,true) None e |> Option.get in
+  let renamed = Expr.Set.fold (fun e acc -> Expr.Set.add (rename e) acc) fs Expr.Set.empty in
+  let types = Hashtbl.create 35 in
+  Hashtbl.iter (fun name typ -> Hashtbl.add types (prefix ^ name) typ) gamma;
+  renamed,types
+
+let measured_positive_copy_run prefix variant =
+  let fs,gamma = measured_positive_copy_fixture prefix in
+  let name x = prefix ^ x in
+  let fs = if variant = "two" then Expr.Set.add
+      (bin ValueEqual (Expr.LVar (name "#mapReturnedCount")) (Expr.num 2.)) fs
+    else if variant = "contradiction" then Expr.Set.add
+      (bin ValueEqual (Expr.LVar (name "#lvar_4950"))
+        (original_core_literal [87;82;79;78;71])) fs
+    else fs in
+  let count = if variant = "two" then 2. else 1. in
+  let query = List.fold_left (fun fs (n,value) -> Expr.Set.add
+    (bin ValueEqual (Expr.LVar (name n)) (Expr.num value)) fs)
+    fs ["#mapReturnedCount",count;"#replyN",count;"#replyPs",1.] in
+  let original = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+  let status = if variant = "contradiction" then "unsat" else "sat" in
+  ignore (nonblank_counter_observe variant before "optional-seeded-model" status query gamma);
+  List.iter (fun context -> Alcotest.(check bool) "full native model validation enabled" true
+    (pending_context_field "model_validate" (pending_context_field "initial_options" context)
+      = `String "true")) contexts;
+  Alcotest.(check bool) "complete query verdict" (status = "sat") (Option.is_some model);
+  Alcotest.(check bool) "whole caller FS/Gamma unchanged" true
+    (original = Expr.Set.elements fs && types = nonblank_counter_types gamma);
+  if status = "sat" then (
+    primary_check_lift variant (Option.get model) gamma
+      [name "#mapReturnedCount",Literal.Num count;name "#replyN",Literal.Num count];
+    let prior = nonblank_counter_read "file.log" in
+    Alcotest.(check bool) "same complete-query cache remains SAT" true
+      (Option.is_some (Smt.check_sat fs gamma));
+    Alcotest.(check string) "cache adds no native endpoint" prior (nonblank_counter_read "file.log"))
+  else (
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) "unhinted full-frame contradiction is native UNSAT" true
+      (Option.is_none (Smt.exec_sat ~caller_kind:"control-positive-copy-contradiction" fs gamma));
+    ignore (nonblank_counter_observe variant before "control-positive-copy-contradiction"
+      "unsat" fs gamma))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _, None -> [
+       Alcotest.test_case "actual positive copy full frame one-count hint and renamed model" `Quick
+         (with_total (fun () -> with_nonblank_counter_trace (fun () ->
+           measured_positive_copy_run "" "one";
+           measured_positive_copy_run "#renamed" "one")));
+       Alcotest.test_case "actual positive copy non-one model and false full frame" `Quick
+         (with_total (fun () -> with_nonblank_counter_trace (fun () ->
+           measured_positive_copy_run "#two" "two";
+           measured_positive_copy_run "#false" "contradiction")))]
+   | _ -> [])
