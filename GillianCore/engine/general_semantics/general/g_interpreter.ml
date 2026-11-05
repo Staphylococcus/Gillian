@@ -2120,7 +2120,31 @@ struct
         let backtrace = Printexc.get_raw_backtrace () in
         (* Retain only the failed operation, never its heap or proof state. *)
         (try
-           let command = Fmt.str "%s:%d %a" proc_name i Cmd.pp_indexed cmd in
+           let identity fmt = function
+             | None -> Fmt.string fmt "<absent>"
+             | Some value -> (
+                 match Val.to_expr value with
+                 | Expr.ALoc _ | Expr.LVar _ | Expr.Lit (Loc _) ->
+                     Val.pp fmt value
+                 | _ -> Fmt.string fmt "<non-location>")
+           in
+           let rec take_frames n = function
+             | _ when n = 0 -> []
+             | [] -> []
+             | name :: rest ->
+                 String.sub name 0 (min 100 (String.length name))
+                 :: take_frames (n - 1) rest
+           in
+           let callable =
+             if proc_name = "i__isCallable" then
+               Fmt.str " l=%a m=%a"
+                 identity (Store.get store "l") identity (Store.get store "m")
+             else ""
+           in
+           let command =
+             Fmt.str "%s:%d%s stack=%a %a" proc_name i callable pp_str_list
+               (take_frames 8 (Call_stack.get_cur_procs cs)) Cmd.pp_indexed cmd
+           in
            let command = String.sub command 0 (min 1024 (String.length command)) in
            let command =
              String.map (function '\n' | '\r' -> ' ' | c -> c) command
