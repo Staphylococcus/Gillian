@@ -317,6 +317,13 @@ struct
             in
             State.pp_by_need pvars lvars locs
       in
+      (* Cost profiles need command entry, never a symbolic-state dump. *)
+      let () =
+        if Sys.getenv_opt "GILLIAN_SMT_COST_PROFILE" = Some "1" then
+          L.normal (fun m ->
+              m "TIME: %f@\nCMD: %a@\nPROC: %s:%d@\n"
+                (Unix.gettimeofday ()) Cmd.pp_indexed cmd proc_name i)
+      in
       ConfigReport.log state_printer
         (ConfigReport.make ~proc_name ~proc_line:i ~time:(Unix.gettimeofday ())
            ~cmd ~callstack:cs ~annot ~branching:b_counter ~state ?branch_case ())
@@ -326,6 +333,12 @@ struct
         (annot : annot option)
         (state : State.t) : unit =
       let loc = Option.bind annot Annot.get_origin_loc in
+      let () =
+        if Sys.getenv_opt "GILLIAN_SMT_COST_PROFILE" = Some "1" then
+          L.normal (fun m ->
+              m "TIME: %f@\nLCMD: %a@\nLOC: %a@\n"
+                (Unix.gettimeofday ()) LCmd.pp lcmd Location.pp_log_opt loc)
+      in
       (* Whole command/state traces belong to verbose logging, not routine outcomes. *)
       L.verbose (fun m ->
           m
