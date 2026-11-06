@@ -162,6 +162,18 @@ module Make (State : SState.S) :
   module L = Logging
   module Origin = LogicPreprocessing.InadmissibleOrigin
 
+  let matching_profile_enabled =
+    Sys.getenv_opt "GILLIAN_SMT_COST_PROFILE" = Some "1"
+
+  let matching_profile op name =
+    if matching_profile_enabled then (
+      let safe = String.length name <= 128 && String.for_all (function
+        | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '.' | '$' | ':' | '-' -> true
+        | _ -> false) name in
+      let op, name = if safe && name <> "" then op, name else "unavailable", "-" in
+      try L.normal (fun m -> m "MATCH_PROFILE op=%s name=%s" op name)
+      with _ -> ())
+
   type state_t = State.t [@@deriving yojson]
   type abs_t = string * Expr.t list
   type err_t = State.err_t [@@deriving yojson, show]
@@ -1544,6 +1556,16 @@ module Make (State : SState.S) :
       (astate : t)
       (subst : SVal.SESubst.t)
       (step : MP.step) : (t, err_t) Res_list.t * L.Report_id.t option =
+    if matching_profile_enabled then (
+      match fst step with
+      | a when Option.is_some (Asrt.as_definedness a) -> matching_profile "definedness" "-"
+      | Asrt.CorePred (name, _, _) -> (match Asrt.as_user_pred_name name with
+          | Some name -> matching_profile "user" name
+          | None -> matching_profile "core" name)
+      | Asrt.Pure _ -> matching_profile "pure" "-"
+      | Asrt.Types _ -> matching_profile "types" "-"
+      | Asrt.Wand _ -> matching_profile "wand" "-"
+      | Asrt.Emp -> matching_profile "emp" "-");
     let capture_step = match fst step with
       | Asrt.CorePred (name,_,_) -> Option.fold ~none:false
           ~some:Owned_prefix_lifecycle.focused (Asrt.as_user_pred_name name)
@@ -2103,6 +2125,7 @@ module Make (State : SState.S) :
       "predicate",`String pred.pred.pred_name;"kind",match_kind_to_yojson match_kind;
       "arguments",`List (List.map Expr.to_yojson args)]) @@ fun () ->
     let pred_name = pred.pred.pred_name in
+    matching_profile "fold" pred_name;
     if
       !Config.Verification.total
       && (pred.pred.pred_abstract || Option.is_some pred.pred.pred_guard)
