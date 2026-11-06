@@ -687,7 +687,8 @@ struct
      no changes to interpreter results. Eight reports per native process. *)
   let execution_failure_diagnostic_count = ref 0
 
-  let log_execution_failure name (case_index, case_part) proc proc_idx loc errors =
+  let log_execution_failure name (case_index, case_part) proc proc_idx loc errors
+      error_state =
     if !execution_failure_diagnostic_count < 8 then (
       incr execution_failure_diagnostic_count;
       let buffer = Buffer.create 256 in
@@ -712,16 +713,39 @@ struct
             Buffer.add_string buffer "diagnostic formatting unavailable";
             true
       in
+      let callable =
+        if proc <> "i__isCallable"
+           || Sys.getenv_opt "GILLIAN_RECOVERY_SELECTION_PROFILE" <> Some "1"
+        then ""
+        else
+          let category =
+            try
+              match SStore.get (SPState.get_store error_state) "l" with
+              | Some (Expr.Lit (Loc name)) ->
+                  List.assoc_opt name
+                    [ ("$lap_push", "push"); ("$lsp_concat", "concat");
+                      ("$lfp_call", "function-call");
+                      ("$lop_hasOwnProperty", "has-own");
+                      ("$larr_isArray", "is-array") ]
+                  |> Option.value ~default:"other-literal-location"
+              | Some (Expr.ALoc _ | Expr.LVar _) -> "dynamic"
+              | Some _ -> "non-location"
+              | None -> "unavailable"
+            with _ -> "unavailable"
+          in
+          " callableArg=" ^ category
+      in
       L.normal (fun m ->
-          m "NATIVE_EXECUTION_FAILURE spec=%s id=(%d,%d) proc=%s command=%d%a report=%d/8 errors=%d truncated=%b further_reports_suppressed_after_limit=true: %s"
+          m "NATIVE_EXECUTION_FAILURE spec=%s id=(%d,%d) proc=%s command=%d%a%s report=%d/8 errors=%d truncated=%b further_reports_suppressed_after_limit=true: %s"
             name case_index case_part proc proc_idx Location.pp_full loc
+            callable
             !execution_failure_diagnostic_count
             (List.length errors) truncated (Buffer.contents buffer)))
 
   let analyse_proc_result test flag ?parent_id result : unit Gillian_result.t =
     match (result : SAInterpreter.result_t) with
     | Exec_res.RFail { proc; proc_idx; error_state; errors; loc } ->
-        log_execution_failure test.name test.id proc proc_idx loc errors;
+        log_execution_failure test.name test.id proc proc_idx loc errors error_state;
         L.verbose (fun m ->
             m
               "VERIFICATION FAILURE: Procedure %s, Command %d\n\
