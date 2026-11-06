@@ -133,6 +133,9 @@ let finite_position () =
                  (fun () -> really_input_string channel (in_channel_length channel)) in
                Alcotest.(check bool) "fatal input stays complete and bounded" true
                  (String.length script <= 65536 && String.ends_with ~suffix:"(check-sat)" script);
+               Alcotest.(check bool) "fatal input has the complete native header" true
+                 (String.starts_with ~prefix:"; Gillian required-complete UNKNOWN query=query_" script
+                  && String.ends_with ~suffix:".smt2" (List.hd (String.split_on_char '\n' script)));
                let commands = Sexplib.Sexp.scan_sexps (Lexing.from_string script) in
                Alcotest.(check int) "fatal input has exactly one original check" 1
                  (List.length (List.filter ((=) (Sexplib.Sexp.List [Sexplib.Sexp.Atom "check-sat"])) commands));
@@ -170,6 +173,11 @@ let finite_position () =
         let log = Fun.protect ~finally:(fun () -> close_in ch)
           (fun () -> really_input_string ch (in_channel_length ch)) in
         let lines = String.split_on_char '\n' log in
+        List.iter (fun (name,reason) ->
+          Alcotest.(check bool) ("capture failure reason " ^ reason) true
+            (List.mem ("SMT_REQUIRED_UNKNOWN_INPUT query=control-" ^ name
+              ^ " status=unavailable reason=" ^ reason) lines))
+          ["existing","open";"oversized","size"];
         Alcotest.(check bool) "unknown remains visible at normal logging" true
           (List.mem "The solver returned: unknown" lines);
         let prefix = "SMT_QUERY_RESULT " in

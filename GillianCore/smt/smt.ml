@@ -2482,15 +2482,19 @@ let reset_solver () =
 let save_required_unknown_input path ~query ~timeout_ms ~phase_selection
     ~primary_command declarations assertions =
   let created = ref false in
+  let stage = ref "path" and too_large = ref false in
   let note status =
-    try L.normal (fun m -> m "SMT_REQUIRED_UNKNOWN_INPUT query=%s status=%s" query status)
+    let reason = if status = "saved" then "" else
+      " reason=" ^ (if !too_large then "size" else !stage) in
+    try L.normal (fun m -> m "SMT_REQUIRED_UNKNOWN_INPUT query=%s status=%s%s" query status reason)
     with _ -> () in
   try
     if path = "" || Filename.is_relative path then invalid_arg "absolute input path";
+    stage := "format";
     let buffer = Buffer.create 4096 in
     let formatter = Format.make_formatter
         (fun text offset length ->
-          if Buffer.length buffer + length > 65536 then raise Exit;
+          if Buffer.length buffer + length > 65536 then (too_large := true; raise Exit);
           Buffer.add_substring buffer text offset length)
         (fun () -> ()) in
     Fmt.pf formatter "; Gillian required-complete UNKNOWN query=%s@\n" query;
@@ -2500,8 +2504,10 @@ let save_required_unknown_input path ~query ~timeout_ms ~phase_selection
     Fmt.pf formatter "%a@?"
       (Fmt.list ~sep:(Fmt.any "\n") Sexplib.Sexp.pp_mach)
       (options @ declarations @ assertions @ [primary_command]);
+    stage := "open";
     let channel = open_out_gen [Open_wronly;Open_creat;Open_excl;Open_binary] 0o600 path in
     created := true;
+    stage := "write";
     Fun.protect ~finally:(fun () -> close_out channel)
       (fun () -> output_string channel (Buffer.contents buffer); flush channel);
     note "saved";
