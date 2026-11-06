@@ -172,7 +172,7 @@ module Make (State : SState.S) :
   (* Passive, bounded scalar observation. Never evaluates a proof expression. *)
   let summary_audit_calls = ref 0
   let summary_audit_events = ref 0
-  let summary_activation audit branch phase astate =
+  let summary_activation ?tuple_mask audit branch phase astate =
     try match audit with
     | None -> ()
     | Some (id, _) ->
@@ -181,9 +181,13 @@ module Make (State : SState.S) :
           let owners = List.fold_left (fun n (name, _) ->
             if name = "S05CopyLeafActivation" then n + 1 else n)
               0 (Preds.to_list astate.preds) in
-          L.normal (fun m -> m
-            "SUMMARY_ACTIVATION id=%d branch=%d phase=%s owners=%d"
-            id branch phase owners))
+          match tuple_mask with
+          | None -> L.normal (fun m -> m
+              "SUMMARY_ACTIVATION id=%d branch=%d phase=%s owners=%d"
+              id branch phase owners)
+          | Some mask -> L.normal (fun m -> m
+              "SUMMARY_ACTIVATION id=%d branch=%d phase=%s owners=%d tupleMask=%d"
+              id branch phase owners mask))
         else if !summary_audit_events = 64 then (
           incr summary_audit_events;
           L.normal (fun m -> m "SUMMARY_ACTIVATION capped"))
@@ -1029,8 +1033,46 @@ module Make (State : SState.S) :
       match lcmd with
       | SymbExec -> failwith "Impossible: Untreated SymbExec"
       | Fold (pname, les, fold_info) ->
+          let audit =
+            try if !summary_audit_calls > 0 && !summary_audit_events <= 64 &&
+              Sys.getenv_opt "GILLIAN_SUMMARY_ACTIVATION_PROFILE" = Some "1" &&
+              (pname = "S05CopyStringBox" || pname = "S05CompactFreshStep")
+            then Some (0, ref 0) else None with _ -> None
+          in
           let vs = List.map (eval_proof_expr "Fold argument") les in
           let pred = MP.get_pred_def prog.preds pname in
+          let () = try match audit with
+            | None -> ()
+            | Some _ when pname = "S05CopyStringBox" ->
+                summary_activation audit 0 "box-entry" astate
+            | Some _ ->
+                (* Syntactic value/path/S/M comparison only. Derive the
+                   expected tuple from the existing definition, never reduce
+                   an expression, allocate a witness or query the solver. *)
+                let tuple_mask = try
+                  let tuples = List.concat_map (fun (_, body) ->
+                    List.filter_map (function
+                      | Asrt.CorePred (name, [v; p; s; m], _)
+                        when Asrt.as_user_pred_name name = Some "S05CopyLeafActivation" ->
+                          Some [v; p; s; m]
+                      | _ -> None) body) pred.pred.pred_definitions in
+                  let held = List.filter (fun (name, _) ->
+                    name = "S05CopyLeafActivation") (Preds.to_list astate.preds) in
+                  match tuples, held with
+                  | [expected], [(_, [v; p; s; m; _; _])] ->
+                      let bindings = List.map2 (fun (name, _) value ->
+                        (Expr.PVar name, value)) pred.pred.pred_params vs in
+                      let subst = SVal.SESubst.init bindings in
+                      let expected = List.map (fun e ->
+                        Option.get (SVal.SESubst.subst_in_expr_opt subst e)) expected in
+                      snd (List.fold_left2 (fun (bit, mask) actual wanted ->
+                        (bit lsl 1, if Expr.equal actual wanted then mask lor bit else mask))
+                        (1, 0) [v; p; s; m] expected)
+                  | _ -> -1
+                with _ -> -1 in
+                summary_activation ~tuple_mask audit 0 "fresh-entry" astate
+            with _ -> ()
+          in
           let additional_bindings =
             Option.fold
               ~some:(fun (_, bindings) ->
@@ -1040,8 +1082,18 @@ module Make (State : SState.S) :
                   bindings)
               ~none:[] fold_info
           in
-          SMatcher.fold ~additional_bindings ~match_kind:LogicCommand
+          let result = SMatcher.fold ~additional_bindings ~match_kind:LogicCommand
             ~state:astate pred vs
+          in
+          let () = try match audit with
+            | None -> ()
+            | Some _ -> List.iter (function
+                | Ok state -> summary_activation audit 0
+                    (if pname = "S05CopyStringBox" then "box-return" else "fresh-return") state
+                | Error _ -> ()) result
+            with _ -> ()
+          in
+          result
       | Unfold (pname, les, additional_bindings, b) ->
           (* Unfoldig predicate with name [pname] and arguments [les].
              [additional_bindings] is the set set of additional bindings that may be learned when unfolding,
