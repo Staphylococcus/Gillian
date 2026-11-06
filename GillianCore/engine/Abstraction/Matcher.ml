@@ -1411,6 +1411,12 @@ module Make (State : SState.S) :
           lifecycle "direct-consume-before" astate (fun () -> `Assoc [
             "name",`String pname;"input_count",`Int ins_number;
             "target",`List (List.map (function None -> `Null | Some x -> Expr.to_yojson x) vs)]);
+        if matching_profile_enabled then
+          matching_profile
+            (match Preds.find_pabs_by_name preds pname with
+             | [] -> "select-zero"
+             | [_] -> "select-one"
+             | _ -> "select-many") pname;
         let selected = Preds.consume_pred ~maintain:pred_pure preds pname vs ins_indexes
             (State.equals state) in
         if Owned_prefix_lifecycle.focused pname then
