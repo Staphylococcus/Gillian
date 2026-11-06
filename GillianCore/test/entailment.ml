@@ -20987,3 +20987,143 @@ let tests = tests @
        Alcotest.test_case "negated finite candidate false frames signed zeros nonfinite and contradictions" `Quick
          (with_total negated_bound_rejections)]
    | _ -> [])
+
+(* The captured production query needed four positive predecessors. These
+   smaller fixtures exercise that shape, not a retained program/query snapshot. *)
+let predecessor_seed_fixture label depth lower guard =
+  let name part = "#predecessor_seed_" ^ label ^ "_" ^ part in
+  let index = Expr.LVar (name "index") and length = Expr.LVar (name "length")
+  and values = Expr.LVar (name "values") and frame = Expr.LVar (name "frame") in
+  let gamma = Hashtbl.create 4 in
+  List.iter (fun (part,typ) -> Hashtbl.add gamma (name part) typ)
+    ["index",Type.NumberType;"length",Type.NumberType;
+     "values",Type.ListType;"frame",Type.Utf16Type];
+  let count = Expr.UnOp (NumToInt,index) and size = Expr.UnOp (LstLen,values) in
+  let rec chain n expression = if n=0 then expression else
+    chain (n-1) (bin FMinus expression (Expr.num 1.)) in
+  let fs = Expr.Set.of_list [Expr.UnOp (IsInt,index);Expr.UnOp (IsInt,length);
+    bin FLessThan (Expr.num 0.) index;
+    bin FLessThanEqual index length;
+    bin FLessThanEqual (Expr.num 0.) length;
+    bin FLessThanEqual length (Expr.num 4294967295.);
+    bin FLessThanEqual index (Expr.num 4294967295.);
+    bin Equal (Expr.UnOp (NumToInt,length)) size;
+    bin ILessThanEqual (Expr.int 0) count;
+    guard (Expr.num lower) (chain depth index);
+    bin ValueEqual frame (original_core_literal [65])] in
+  let fs = List.init depth (fun n -> chain (n+1) index) |> List.fold_left
+    (fun fs predecessor -> let position = Expr.UnOp (NumToInt,predecessor) in
+      List.fold_left (fun fs atom -> Expr.Set.add atom fs) fs
+        [Expr.UnOp (IsInt,predecessor);
+         bin ILessThanEqual (Expr.int 0) position;
+         bin ILessThan position size;
+         bin Equal (Expr.UnOp (TypeOf,bin LstNth values position))
+           (Expr.Lit (Type Type.Utf16Type))]) fs in
+  fs,gamma,index,length,frame
+
+let predecessor_seed_attempt label fs gamma index length chosen expected =
+  let atoms = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let query = fs |> Expr.Set.add (bin ValueEqual index (Expr.num chosen))
+    |> Expr.Set.add (bin ValueEqual length (Expr.num chosen)) in
+  let before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () -> Smt.seeded_model fs gamma) in
+  ignore (zero_inclusive_list_context label contexts "optional-seeded-model" query gamma);
+  ignore (nonblank_counter_observe label before "optional-seeded-model"
+    (if expected then "sat" else "unsat") query gamma);
+  List.iter (fun context -> Alcotest.(check bool) (label ^ " native model validation") true
+    (pending_context_field "model_validate" (pending_context_field "initial_options" context)
+     = `String "true")) contexts;
+  Alcotest.(check bool) (label ^ " actual complete candidate status") expected (Option.is_some model);
+  nonblank_counter_retained label fs gamma atoms types;
+  model
+
+let predecessor_seed_models () = with_nonblank_counter_trace (fun () ->
+  let forms = [
+    "direct_strict",0,2.,(fun l x -> bin FLessThan l x),3.;
+    "direct_weak",0,2.,(fun l x -> bin FLessThanEqual l x),2.;
+    "nested_strict",4,0.,(fun l x -> bin FLessThan l x),5.;
+    "nested_weak",4,0.,(fun l x -> bin FLessThanEqual l x),4.;
+    "nested_not_le",4,0.,(fun l x -> not_ (bin FLessThanEqual x l)),5.;
+    "nested_not_lt",4,0.,(fun l x -> not_ (bin FLessThan x l)),4.;
+    "alpha_fractional",2,0.25,(fun l x -> bin FLessThan l x),3.] in
+  let models = List.map (fun (label,depth,lower,guard,chosen) ->
+    let fs,gamma,index,length,_ = predecessor_seed_fixture label depth lower guard in
+    let model = Option.get (predecessor_seed_attempt label fs gamma index length chosen true) in
+    if label="nested_strict" then (
+      ignore (Option.get (Smt.check_sat fs gamma));
+      let before = nonblank_counter_rows () and files = nonblank_counter_files () in
+      ignore (Option.get (Smt.check_sat fs gamma));
+      Alcotest.(check bool) "original-key cache adds no native endpoint" true
+        (before = nonblank_counter_rows () && files = nonblank_counter_files ()));
+    let name = function Expr.LVar n -> n | _ -> assert false in
+    model,gamma,[name index,Literal.Num chosen;name length,Literal.Num chosen]) forms in
+  List.iter (fun (model,gamma,expected) ->
+    primary_check_lift "predecessor full model after other native contexts" model gamma expected) models)
+
+let predecessor_seed_rejections () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,index,length,frame = predecessor_seed_fixture "false_frame" 4 0.
+    (fun l x -> bin FLessThan l x) in
+  let false_frame = Expr.Set.add (bin ValueEqual frame (original_core_literal [66])) fs in
+  ignore (predecessor_seed_attempt "retained contradictory UTF16 frame"
+    false_frame gamma index length 5. false);
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "whole original false frame remains native UNSAT" true
+    (Option.is_none (Smt.exec_sat ~caller_kind:"control-predecessor-false-frame" false_frame gamma));
+  ignore (nonblank_counter_observe "whole false frame" before
+    "control-predecessor-false-frame" "unsat" false_frame gamma);
+  let fs,gamma,index,length,_ = predecessor_seed_fixture "excluded_five" 4 0.
+    (fun l x -> bin FLessThan l x) in
+  let excluded = Expr.Set.add (not_ (bin ValueEqual index (Expr.num 5.))) fs in
+  ignore (predecessor_seed_attempt "rejected guess is not original UNSAT"
+    excluded gamma index length 5. false);
+  let alternative = excluded |> Expr.Set.add (bin ValueEqual index (Expr.num 6.))
+    |> Expr.Set.add (bin ValueEqual length (Expr.num 6.)) in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "rejected minimum has a different native whole-frame model" true
+    (Option.is_some (Smt.exec_sat ~caller_kind:"control-predecessor-alternative" alternative gamma));
+  ignore (nonblank_counter_observe "whole alternative" before
+    "control-predecessor-alternative" "sat" alternative gamma);
+  List.iter (fun zero ->
+    let label = if Int64.bits_of_float zero = Int64.bits_of_float (-0.) then "minus_zero" else "plus_zero" in
+    let fs,gamma,index,length,_ = predecessor_seed_fixture label 4 0.
+      (fun l x -> bin FLessThan l x) in
+    let name = "#predecessor_seed_" ^ label ^ "_fixed" in
+    Hashtbl.add gamma name Type.NumberType;
+    let fs = Expr.Set.add (bin ValueEqual (Expr.LVar name) (Expr.num zero)) fs in
+    let model = Option.get (predecessor_seed_attempt label fs gamma index length 5. true) in
+    primary_check_lift "existing raw zero is never replaced" model gamma [name,Literal.Num zero]) [0.;-0.];
+  let fs,gamma,index,length,_ = predecessor_seed_fixture "fixed_six" 4 0.
+    (fun l x -> bin FLessThan l x) in
+  let fs = Expr.Set.add (bin ValueEqual index (Expr.num 6.)) fs in
+  ignore (predecessor_seed_attempt "existing fixed assignment takes precedence"
+    fs gamma index length 6. true);
+  let name = "#predecessor_decline" and index = Expr.LVar "#predecessor_decline" in
+  let gamma = Hashtbl.create 1 in Hashtbl.add gamma name Type.NumberType;
+  let before = nonblank_counter_rows () in
+  List.iter (fun (label,operand,lower) ->
+    let fs = Expr.Set.singleton (bin FLessThan (Expr.num lower) operand) in
+    Alcotest.(check bool) (label ^ " contributes no candidate") true
+      (Option.is_none (Smt.seeded_model fs gamma)))
+    ["adjusted cap",predecessor_test_chain 8 index,0.;
+     "overflow",bin FMinus (bin FMinus index (Expr.num Float.max_float))
+       (Expr.num Float.max_float),0.;
+     "NaN offset",bin FMinus index (Expr.num Float.nan),0.;
+     "infinite offset",bin FMinus index (Expr.num Float.infinity),0.;
+     "nonfinite lower",index,Float.infinity;
+     "unsupported operand",bin FMinus (bin FPlus index (Expr.num 1.)) (Expr.num 1.),0.];
+  List.iter (fun typ ->
+    let types = Hashtbl.create 1 in Option.iter (Hashtbl.add types name) typ;
+    let fs = Expr.Set.singleton (bin FLessThan (Expr.num 0.) (predecessor_test_chain 4 index)) in
+    Alcotest.(check bool) "missing or wrong Number type contributes no candidate" true
+      (Option.is_none (Smt.seeded_model fs types))) [None;Some Type.StringType];
+  Alcotest.(check bool) "declining guards dispatch no native query" true
+    (before = nonblank_counter_rows ()))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "bounded predecessor seed actual whole-query models and original cache" `Quick
+         (with_total predecessor_seed_models);
+       Alcotest.test_case "bounded predecessor seed false frame alternative raw zeros and declines" `Quick
+         (with_total predecessor_seed_rejections)]
+   | _ -> [])

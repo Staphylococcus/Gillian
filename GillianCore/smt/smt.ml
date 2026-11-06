@@ -3204,16 +3204,25 @@ let seeded_model fs gamma =
         when number x && not (List.mem_assoc x acc) -> (x,value)::acc
       | _ -> acc) fs [] in
     let root_guess x = Expr.Set.fold (fun e value ->
-      let bound lower strict =
-        if lower >= 0. && lower < 8. then
-          max value (if strict then floor lower +. 1. else ceil lower)
-        else value in
+      (* Read finite literal-subtraction guards only to select a candidate.
+         Host addition is not an FP identity; the unchanged full native query
+         must validate the guess, including every predecessor/list domain. *)
+      let rec bound lower strict operand =
+        if not (Float.is_finite lower) then value else match operand with
+        | Expr.LVar name when name = x ->
+            if lower >= 0. && lower < 8. then
+              max value (if strict then floor lower +. 1. else ceil lower)
+            else value
+        | Expr.BinOp (inner,FMinus,Expr.Lit (Num offset))
+          when Float.is_finite offset -> bound (lower +. offset) strict inner
+        | _ -> value in
       match e with
-      | BinOp (Lit (Num lower), FLessThan, LVar name) when name = x ->
-          bound lower true
-      | BinOp (Lit (Num lower), FLessThanEqual, LVar name)
-      | UnOp (Not, BinOp (LVar name, FLessThan, Lit (Num lower)))
-        when name = x -> bound lower false
+      | BinOp (Lit (Num lower), FLessThan, operand)
+      | UnOp (Not, BinOp (operand, FLessThanEqual, Lit (Num lower))) ->
+          bound lower true operand
+      | BinOp (Lit (Num lower), FLessThanEqual, operand)
+      | UnOp (Not, BinOp (operand, FLessThan, Lit (Num lower))) ->
+          bound lower false operand
       | _ -> value) fs 0. in
     let initial = SS.fold (fun x acc ->
       let guess = root_guess x in
