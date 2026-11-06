@@ -781,6 +781,19 @@ let finite_difference_core formulae gamma goal =
       if Expr.Set.cardinal core = 2 && Expr.Set.subset core formulae
          && not (Expr.Set.equal core formulae)
       then Some core else None
+  | Expr.UnOp
+      (Not, BinOp (BinOp ((LVar name as index), FMinus, Lit (Num step)),
+        FLessThanEqual, Lit (Num upper)))
+    when upper = Float.max_float && step = 1. && typed name ->
+      (* The measured upper counterpart needs only its original counter bound.
+         Negative infinity is harmless for this upper goal; NaN/+infinity
+         cannot satisfy that premise. Native UNSAT, not this observation,
+         licenses the proper two-atom weakening; keep every fallback. *)
+      let core = Expr.Set.of_list
+        [goal; Expr.BinOp (index, FLessThanEqual, Expr.num 4294967295.)] in
+      if Expr.Set.cardinal core = 2 && Expr.Set.subset core formulae
+         && not (Expr.Set.equal core formulae)
+      then Some core else None
   | Expr.UnOp (Not, BinOp
       (BinOp (BinOp ((LVar base as value), FPlus, Lit (Num 1.)),
          FMinus, Lit (Num 1.)), Equal, LVar same))

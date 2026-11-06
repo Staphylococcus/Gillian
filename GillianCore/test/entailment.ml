@@ -19977,3 +19977,79 @@ let tests = tests @
        Alcotest.test_case "positive predecessor omission has required native countermodel" `Quick
          (with_total positive_predecessor_omission)]
    | _ -> [])
+
+(* Upper counterpart of the measured pcIndex-1 definedness request. Only the
+   original upper counter bound is selected; no integrality/domain is assumed. *)
+let bounded_predecessor_fixture label =
+  let name = "#bounded_predecessor_" ^ label in
+  let index = Expr.LVar name and gamma = index_difference_context [name] in
+  let wanted = bin FLessThanEqual (bin FMinus index (Expr.num 1.))
+    (Expr.num Float.max_float) in
+  index,gamma,wanted,bin FLessThanEqual index (Expr.num 4294967295.)
+
+let bounded_predecessor_native () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,reverse) ->
+    let index,gamma,wanted,bound = bounded_predecessor_fixture label in
+    let facts = Expr.Set.of_list [bound;Expr.UnOp (IsInt,index);
+      bin FLessThan (Expr.num 0.) index] in
+    let full = Expr.Set.add (not_ wanted) facts
+    and core = Expr.Set.of_list [not_ wanted;bound] in
+    let types = Gamma.as_hashtbl gamma in
+    Alcotest.(check bool) (label ^ " exact original two-atom upper subset") true
+      (match Solver.finite_difference_core full types (not_ wanted) with
+       | Some selected -> Expr.Set.equal selected core | None -> false);
+    let before = strict_successor_public ~reverse label true facts wanted gamma in
+    let row = nonblank_counter_observe label before
+      "optional-entailment-finite-difference-core" "unsat" core types in
+    Alcotest.(check bool) (label ^ " unchanged optional UNKNOWN and time policy") true
+      (smt_result_field "raw_unknown" row = "true"
+       && smt_result_field "timeout_ms" row = "5000");
+    Alcotest.(check int) (label ^ " native upper core without fallback") 1
+      (List.length (symbolic_prefix_new_rows before));
+    let decline reason fs types goal =
+      Alcotest.(check bool) (label ^ reason) true
+        (Option.is_none (Solver.finite_difference_core fs types goal)) in
+    decline " whole/core is not a weakening" core types (not_ wanted);
+    decline " missing upper bound" (Expr.Set.remove bound full) types (not_ wanted);
+    decline " missing goal" facts types (not_ wanted);
+    decline " another bound is not inserted"
+      (full |> Expr.Set.remove bound |> Expr.Set.add
+        (bin FLessThanEqual index (Expr.num 4294967294.))) types (not_ wanted);
+    let missing = Hashtbl.copy types in Hashtbl.remove missing
+      (match index with Expr.LVar n -> n | _ -> assert false);
+    decline " missing Number type" full missing (not_ wanted);
+    let wrong = Hashtbl.copy types in Hashtbl.replace wrong
+      (match index with Expr.LVar n -> n | _ -> assert false) Type.IntType;
+    decline " wrong type" full wrong (not_ wanted);
+    List.iter (fun (upper,step) ->
+      let changed = not_ (bin FLessThanEqual (bin FMinus index (Expr.num step))
+        (Expr.num upper)) in
+      decline " different goal/offset" (Expr.Set.add changed facts) types changed)
+      [(100.),1.;Float.max_float,2.])
+    ["measured",false;"alpha_reordered",true])
+
+let bounded_predecessor_omission () = with_nonblank_counter_trace (fun () ->
+  let index,gamma,wanted,_ = bounded_predecessor_fixture "omission" in
+  let full = Expr.Set.of_list [not_ wanted;
+    bin ValueEqual index (Expr.num infinity)] in
+  let types = Gamma.as_hashtbl gamma in
+  Alcotest.(check bool) "omitted upper bound declines selector" true
+    (Option.is_none (Solver.finite_difference_core full types (not_ wanted)));
+  let before = nonblank_counter_rows () in
+  let model = match Smt.exec_sat full types with
+    | Some model -> model | None -> Alcotest.fail "omitted upper bound needs native countermodel" in
+  ignore (nonblank_counter_observe "omitted upper bound" before
+    "required-complete" "sat" full types);
+  let name = match index with Expr.LVar n -> n | _ -> assert false in
+  primary_check_lift "omitted upper bound" model types [name,Literal.Num infinity];
+  ignore (strict_successor_public "omitted upper bound public fallback" false
+    (Expr.Set.remove (not_ wanted) full) wanted gamma))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "bounded predecessor original upper core through public entailment" `Quick
+         (with_total bounded_predecessor_native);
+       Alcotest.test_case "bounded predecessor omission has required native countermodel" `Quick
+         (with_total bounded_predecessor_omission)]
+   | _ -> [])
