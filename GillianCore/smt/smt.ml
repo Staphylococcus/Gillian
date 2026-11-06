@@ -4742,8 +4742,10 @@ let formatted_index_model fs gamma =
     ~raw_unknown:true query gamma with SMT_unknown -> None
 
 (* A formatter-dependent Number compared to a finite literal, or whose
-   difference from that literal is compared to numeric zero, can try the
-   literal's bits as one complete-query search hint. In particular fp.eq
+   finite-literal subtraction chain is compared to numeric zero, can try one
+   complete-query search hint. Fold offsets innermost first, preserving the
+   original literal bits at depth one. The host-rounded sum is only a guess,
+   not an identity for floating-point subtraction. In particular fp.eq
    zero leaves both signs possible: this is a guess, never a derived identity.
    Keep every assertion and Gamma binding; only validated native SAT succeeds.
    A rejected/unknown guess leaves the unchanged required query below. *)
@@ -4760,13 +4762,25 @@ let literal_formatter_witness_query fs gamma =
       super#visit_expr () e
   end in
   Expr.Set.iter (visitor#visit_expr ()) fs;
+  let rec difference_candidate offsets = function
+    | Expr.BinOp (value,FMinus,(Lit (Num n) as literal)) when Float.is_finite n ->
+        difference_candidate ((n,literal) :: offsets) value
+    | Expr.LVar name ->
+        let rec sum n literal = function
+          | [] -> Some (name,n,literal)
+          | (offset,_) :: rest ->
+              let n = n +. offset in
+              if Float.is_finite n then sum n (Expr.num n) rest else None in
+        (match offsets with (n,literal) :: rest -> sum n literal rest | [] -> None)
+    | _ -> None in
   let candidate = function
     | Expr.BinOp (LVar name, Equal, (Lit (Num n) as literal))
     | Expr.BinOp ((Lit (Num n) as literal), Equal, LVar name) ->
         Some (name,n,literal)
-    | Expr.BinOp (BinOp (LVar name, FMinus, (Lit (Num n) as literal)), Equal, Lit (Num z))
-    | Expr.BinOp (Lit (Num z), Equal, BinOp (LVar name, FMinus, (Lit (Num n) as literal)))
-      when z = 0. -> Some (name,n,literal)
+    | Expr.BinOp (difference, Equal, Lit (Num z))
+      when z = 0. -> difference_candidate [] difference
+    | Expr.BinOp (Lit (Num z), Equal, difference)
+      when z = 0. -> difference_candidate [] difference
     | _ -> None in
   let candidates = Expr.Set.fold (fun atom candidates -> match candidate atom with
     | Some (name,n,literal)

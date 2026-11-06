@@ -19942,7 +19942,7 @@ let tests = tests @
        (with_total native_context_scopes_only)]
    | None -> [])
 
-let literal_formatter_fixture ?(difference=false) ?(reverse=false) label literal =
+let literal_formatter_fixture ?(difference=false) ?(tail_offsets=[]) ?(reverse=false) label literal =
   let name = "#literal_formatter_" ^ label in
   let index = Expr.LVar name and keys = Expr.LVar (name ^ "_keys")
   and values = Expr.LVar (name ^ "_values") in
@@ -19952,7 +19952,8 @@ let literal_formatter_fixture ?(difference=false) ?(reverse=false) label literal
      name ^ "_values",Type.ListType;name ^ "_unused",Type.BooleanType];
   let format step = Expr.UnOp (NumberToUtf16,bin FPlus index (Expr.num step)) in
   let left,right = if difference then
-      bin FMinus index (Expr.num literal), Expr.num 0.
+      List.fold_left (fun value offset -> bin FMinus value (Expr.num offset))
+        (bin FMinus index (Expr.num literal)) tail_offsets, Expr.num 0.
     else index, Expr.num literal in
   let comparison = if reverse then bin Equal right left else bin Equal left right in
   let fs = Expr.Set.of_list [comparison;
@@ -19986,28 +19987,30 @@ let literal_formatter_attempt label fs gamma index literal expected =
   model
 
 let literal_formatter_native () = with_nonblank_counter_trace (fun () ->
-  List.iter (fun (label,literal,difference,reverse) ->
-    let fs,gamma,index,_,_ = literal_formatter_fixture ~difference ~reverse label literal in
-    let model = Option.get (literal_formatter_attempt label fs gamma index literal true) in
+  List.iter (fun (label,literal,difference,tail_offsets,reverse,witness) ->
+    let fs,gamma,index,_,_ = literal_formatter_fixture ~difference ~tail_offsets ~reverse label literal in
+    let model = Option.get (literal_formatter_attempt label fs gamma index witness true) in
     let name = match index with LVar name -> name | _ -> assert false in
-    primary_check_lift label model gamma [name,Literal.Num literal];
+    primary_check_lift label model gamma [name,Literal.Num witness];
     let before = nonblank_counter_rows () in
     Alcotest.(check bool) (label ^ " public complete-query dispatch succeeds") true
       (Option.is_some (Smt.check_sat fs gamma));
     ignore (nonblank_counter_observe (label ^ " public") before "optional-literal-formatter"
-      "sat" (Expr.Set.add (bin ValueEqual index (Expr.num literal)) fs) gamma);
+      "sat" (Expr.Set.add (bin ValueEqual index (Expr.num witness)) fs) gamma);
     let files = nonblank_counter_files () in
     ignore (Smt.check_sat fs gamma);
     Alcotest.(check bool) (label ^ " original-key cache adds no native query") true
       (files = nonblank_counter_files ()))
-    ["zero",0.,false,false;"negative_zero",-0.,false,false;"two",2.,false,true;
-     "difference_one",1.,true,false;"alpha_difference_two",2.,true,true])
+    ["zero",0.,false,[],false,0.;"negative_zero",-0.,false,[],false,-0.;
+     "two",2.,false,[],true,2.;"difference_one",1.,true,[],false,1.;
+     "alpha_difference_two",2.,true,[],true,2.;
+     "nested_two",1.,true,[1.],false,2.;
+     "alpha_nested_three",1.,true,[2.;3.],true,6.])
 
 let literal_formatter_fallback () = with_nonblank_counter_trace (fun () ->
-  List.iter (fun difference ->
-  let suffix = if difference then "difference" else "direct" in
+  List.iter (fun (difference,tail_offsets,suffix) ->
   let zero_label = "opposite_zero_" ^ suffix in
-  let fs,gamma,index,_,_ = literal_formatter_fixture ~difference zero_label 0. in
+  let fs,gamma,index,_,_ = literal_formatter_fixture ~difference ~tail_offsets zero_label 0. in
   let opposite = Expr.Set.add (not_ (bin ValueEqual index (Expr.num 0.))) fs in
   ignore (literal_formatter_attempt "opposite zero" opposite gamma index 0. false);
   let before = nonblank_counter_rows () in
@@ -20016,7 +20019,7 @@ let literal_formatter_fallback () = with_nonblank_counter_trace (fun () ->
     "required-complete" "sat" opposite gamma);
   primary_check_lift "required negative-zero model" model gamma
     ["#literal_formatter_" ^ zero_label,Literal.Num (-0.)];
-  let fs,gamma,index,keys,format = literal_formatter_fixture ~difference ("false_frame_" ^ suffix) 0. in
+  let fs,gamma,index,keys,format = literal_formatter_fixture ~difference ~tail_offsets ("false_frame_" ^ suffix) 0. in
   let false_frame = Expr.Set.add (bin SetMem (format 1.) keys) fs in
   ignore (literal_formatter_attempt "unchanged false UTF16 frame" false_frame gamma index 0. false);
   Alcotest.(check bool) "full contradictory frame is required native UNSAT" true
@@ -20024,10 +20027,11 @@ let literal_formatter_fallback () = with_nonblank_counter_trace (fun () ->
   let before = nonblank_counter_rows () in
   let decline label fs gamma = Alcotest.(check bool) label true
     (Option.is_none (Smt.literal_formatter_witness_query fs gamma)) in
-  let fs,gamma,index,_,_ = literal_formatter_fixture ~difference ("decline_" ^ suffix) 0. in
+  let fs,gamma,index,_,_ = literal_formatter_fixture ~difference ~tail_offsets ("decline_" ^ suffix) 0. in
   let name = match index with LVar name -> name | _ -> assert false in
   let comparison literal rhs = if difference then
-      bin Equal (bin FMinus index (Expr.num literal)) (Expr.num rhs)
+      bin Equal (List.fold_left (fun value offset -> bin FMinus value (Expr.num offset))
+        (bin FMinus index (Expr.num literal)) tail_offsets) (Expr.num rhs)
     else bin Equal index (Expr.num literal) in
   let missing = Hashtbl.copy gamma in Hashtbl.remove missing name;
   decline "original Number type required" fs missing;
@@ -20040,6 +20044,23 @@ let literal_formatter_fallback () = with_nonblank_counter_trace (fun () ->
   if difference then decline "nonzero difference RHS is ineligible"
     (fs |> Expr.Set.remove (comparison 0. 0.)
         |> Expr.Set.add (comparison 0. 1.)) gamma;
+  if difference then (
+    let base = Expr.Set.remove (comparison 0. 0.) fs in
+    let chain offsets = List.fold_left (fun value offset ->
+      bin FMinus value (Expr.num offset)) index offsets in
+    List.iter (fun offsets -> decline "nonfinite inner offset or intermediate sum"
+      (Expr.Set.add (bin Equal (chain offsets) (Expr.num 0.)) base) gamma)
+      [[infinity;0.];[0.;nan];[Float.max_float;Float.max_float;-.Float.max_float]];
+    decline "non-subtraction inner expression"
+      (Expr.Set.add (bin Equal
+        (bin FMinus (bin FPlus index (Expr.num 1.)) (Expr.num 1.)) (Expr.num 0.)) base) gamma;
+    let negative_zero = Expr.Set.add (bin Equal
+      (bin FMinus index (Expr.num (-0.))) (Expr.num 0.)) base in
+    Alcotest.(check bool) "single offset retains original negative-zero bits" true
+      (match Smt.literal_formatter_witness_query negative_zero gamma with
+       | Some query -> Expr.Set.equal query
+           (Expr.Set.add (bin ValueEqual index (Expr.num (-0.))) negative_zero)
+       | None -> false));
   let unformatted = Expr.Set.filter (fun e ->
     let present = ref false in
     let visitor = object
@@ -20055,7 +20076,8 @@ let literal_formatter_fallback () = with_nonblank_counter_trace (fun () ->
   decline "opposite literal bits make the candidate ambiguous"
     (Expr.Set.add (bin Equal index (Expr.num (-0.))) fs) gamma;
   Alcotest.(check bool) "declining guards never dispatch a native guess" true
-    (before = nonblank_counter_rows ())) [false;true])
+    (before = nonblank_counter_rows ()))
+    [false,[],"direct";true,[],"difference";true,[0.;0.],"nested"])
 
 let tests = tests @
   (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
