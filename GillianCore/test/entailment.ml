@@ -19596,8 +19596,17 @@ let nested_predecessor_bound_controls upper () = with_nonblank_counter_trace (fu
       Alcotest.(check bool) (label ^ " direct complete check is UNSAT") true
         (Option.is_none (Smt.check_sat full types));
       before) else strict_successor_public label true facts goal gamma in
+    (* The public entailment API now proves the unchanged chained bound from
+       its two original order atoms. Direct SMT retains its original IsInt
+       core, including the omission controls below. *)
+    let observed_caller,observed_core = if direct then
+        "optional-original-core",core
+      else "optional-entailment-finite-difference-core",
+        Expr.Set.of_list [failed;
+          if upper then bin FLessThanEqual value (Expr.num 4294967295.)
+          else bin FLessThan (Expr.num 0.) predecessor] in
     ignore (nonblank_counter_observe label before
-      "optional-original-core" "unsat" core types);
+      observed_caller "unsat" observed_core types);
     Alcotest.(check int) (label ^ " one definite endpoint, no complete fallback")
       1 (List.length (symbolic_prefix_new_rows before));
     Alcotest.(check bool) (label ^ " exact full frame and Gamma retained") true
@@ -20058,17 +20067,23 @@ let tests = tests @
    | _ -> [])
 
 (* The measured predecessor shape, not a retained full BODY query. *)
-let positive_predecessor_fixture label =
+let predecessor_test_chain depth base =
+  let rec loop remaining value =
+    if remaining=0 then value else loop (remaining-1) (bin FMinus value (Expr.num 1.)) in
+  loop depth base
+
+let positive_predecessor_fixture ?(depth=0) label =
   let name = "#positive_predecessor_" ^ label in
-  let index = Expr.LVar name and gamma = index_difference_context [name] in
+  let index = predecessor_test_chain depth (Expr.LVar name)
+  and gamma = index_difference_context [name] in
   let wanted = bin FLessThanEqual (Expr.num (-. Float.max_float))
     (bin FMinus index (Expr.num 1.)) in
   let positive = bin FLessThan (Expr.num 0.) index in
   index,gamma,wanted,positive
 
 let positive_predecessor_native () = with_nonblank_counter_trace (fun () ->
-  List.iter (fun (label,reverse) ->
-    let index,gamma,wanted,positive = positive_predecessor_fixture label in
+  List.iter (fun (label,reverse,depth) ->
+    let index,gamma,wanted,positive = positive_predecessor_fixture ~depth label in
     let facts = Expr.Set.of_list [positive;Expr.UnOp (IsInt,index);
       bin FLessThanEqual index (Expr.num 4294967295.)] in
     let full = Expr.Set.add (not_ wanted) facts
@@ -20090,22 +20105,36 @@ let positive_predecessor_native () = with_nonblank_counter_trace (fun () ->
         (Option.is_none (Solver.finite_difference_core fs types goal)) in
     decline " whole/core is not a weakening" core types (not_ wanted);
     decline " missing positivity" (Expr.Set.remove positive full) types (not_ wanted);
+    if depth>0 then decline " base positivity cannot replace exact operand positivity"
+      (full |> Expr.Set.remove positive |> Expr.Set.add
+        (bin FLessThan (Expr.num 0.) (Expr.LVar (Utils.Containers.SS.choose (Expr.lvars index)))))
+      types (not_ wanted);
     decline " missing goal" facts types (not_ wanted);
-    let missing = Hashtbl.copy types in Hashtbl.remove missing
-      (match index with Expr.LVar n -> n | _ -> assert false);
+    let name = Utils.Containers.SS.choose (Expr.lvars index) in
+    let missing = Hashtbl.copy types in Hashtbl.remove missing name;
     decline " missing Number type" full missing (not_ wanted);
     let wrong = Hashtbl.copy types in Hashtbl.replace wrong
-      (match index with Expr.LVar n -> n | _ -> assert false) Type.IntType;
+      name Type.IntType;
     decline " wrong type" full wrong (not_ wanted);
     List.iter (fun (bound,step) ->
       let changed = not_ (bin FLessThanEqual (Expr.num bound)
         (bin FMinus index (Expr.num step))) in
       decline " different goal/offset" (Expr.Set.add changed facts) types changed)
-      [(-100.),1.;(-. Float.max_float),2.])
-    ["measured",false;"alpha_reordered",true])
+      [(-100.),1.;(-. Float.max_float),2.];
+    List.iter (fun operand ->
+      let changed = not_ (bin FLessThanEqual (Expr.num (-. Float.max_float))
+        (bin FMinus operand (Expr.num 1.))) in
+      let changed_facts = Expr.Set.add changed (Expr.Set.add
+        (bin FLessThan (Expr.num 0.) operand) facts) in
+      decline " malformed inner predecessor chain" changed_facts types changed)
+      [bin FPlus index (Expr.num 1.);bin FMinus index (Expr.num 2.)])
+    ["measured",false,0;"alpha_reordered",true,0;
+     "nested_three",false,2;"alpha_nested_five",true,4])
 
 let positive_predecessor_omission () = with_nonblank_counter_trace (fun () ->
-  let index,gamma,wanted,_ = positive_predecessor_fixture "omission" in
+  List.iter (fun depth ->
+  let index,gamma,wanted,positive = positive_predecessor_fixture ~depth
+      ("omission_" ^ string_of_int depth) in
   let full = Expr.Set.of_list [not_ wanted;
     bin ValueEqual index (Expr.num neg_infinity)] in
   let types = Gamma.as_hashtbl gamma in
@@ -20114,10 +20143,14 @@ let positive_predecessor_omission () = with_nonblank_counter_trace (fun () ->
     | Some model -> model | None -> Alcotest.fail "omitted positivity needs native countermodel" in
   ignore (nonblank_counter_observe "omitted positivity" before
     "required-complete" "sat" full types);
-  let name = match index with Expr.LVar n -> n | _ -> assert false in
+  let name = Utils.Containers.SS.choose (Expr.lvars index) in
   primary_check_lift "omitted positivity" model types [name,Literal.Num neg_infinity];
   ignore (strict_successor_public "omitted positivity public fallback" false
-    (Expr.Set.remove (not_ wanted) full) wanted gamma))
+    (Expr.Set.remove (not_ wanted) full) wanted gamma);
+  let without_goal = Expr.Set.of_list [positive;
+    bin ValueEqual (Expr.LVar name) (Expr.num (float_of_int (depth+1)))] in
+  Alcotest.(check bool) "omitted goal remains native SAT" true
+    (Option.is_some (Smt.exec_sat without_goal types))) [0;2;4])
 
 let tests = tests @
   (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
@@ -20130,16 +20163,17 @@ let tests = tests @
 
 (* Upper counterpart of the measured pcIndex-1 definedness request. Only the
    original upper counter bound is selected; no integrality/domain is assumed. *)
-let bounded_predecessor_fixture label =
+let bounded_predecessor_fixture ?(depth=0) label =
   let name = "#bounded_predecessor_" ^ label in
-  let index = Expr.LVar name and gamma = index_difference_context [name] in
+  let base = Expr.LVar name in
+  let index = predecessor_test_chain depth base and gamma = index_difference_context [name] in
   let wanted = bin FLessThanEqual (bin FMinus index (Expr.num 1.))
     (Expr.num Float.max_float) in
-  index,gamma,wanted,bin FLessThanEqual index (Expr.num 4294967295.)
+  index,gamma,wanted,bin FLessThanEqual base (Expr.num 4294967295.)
 
 let bounded_predecessor_native () = with_nonblank_counter_trace (fun () ->
-  List.iter (fun (label,reverse) ->
-    let index,gamma,wanted,bound = bounded_predecessor_fixture label in
+  List.iter (fun (label,reverse,depth) ->
+    let index,gamma,wanted,bound = bounded_predecessor_fixture ~depth label in
     let facts = Expr.Set.of_list [bound;Expr.UnOp (IsInt,index);
       bin FLessThan (Expr.num 0.) index] in
     let full = Expr.Set.add (not_ wanted) facts
@@ -20165,21 +20199,30 @@ let bounded_predecessor_native () = with_nonblank_counter_trace (fun () ->
     decline " another bound is not inserted"
       (full |> Expr.Set.remove bound |> Expr.Set.add
         (bin FLessThanEqual index (Expr.num 4294967294.))) types (not_ wanted);
-    let missing = Hashtbl.copy types in Hashtbl.remove missing
-      (match index with Expr.LVar n -> n | _ -> assert false);
+    let name = Utils.Containers.SS.choose (Expr.lvars index) in
+    let missing = Hashtbl.copy types in Hashtbl.remove missing name;
     decline " missing Number type" full missing (not_ wanted);
     let wrong = Hashtbl.copy types in Hashtbl.replace wrong
-      (match index with Expr.LVar n -> n | _ -> assert false) Type.IntType;
+      name Type.IntType;
     decline " wrong type" full wrong (not_ wanted);
     List.iter (fun (upper,step) ->
       let changed = not_ (bin FLessThanEqual (bin FMinus index (Expr.num step))
         (Expr.num upper)) in
       decline " different goal/offset" (Expr.Set.add changed facts) types changed)
-      [(100.),1.;Float.max_float,2.])
-    ["measured",false;"alpha_reordered",true])
+      [(100.),1.;Float.max_float,2.];
+    List.iter (fun operand ->
+      let changed = not_ (bin FLessThanEqual
+        (bin FMinus operand (Expr.num 1.)) (Expr.num Float.max_float)) in
+      decline " malformed upper predecessor chain"
+        (Expr.Set.add changed facts) types changed)
+      [bin FPlus index (Expr.num 1.);bin FMinus index (Expr.num 2.)])
+    ["measured",false,0;"alpha_reordered",true,0;
+     "nested_three",false,2;"alpha_nested_five",true,4])
 
 let bounded_predecessor_omission () = with_nonblank_counter_trace (fun () ->
-  let index,gamma,wanted,_ = bounded_predecessor_fixture "omission" in
+  List.iter (fun depth ->
+  let index,gamma,wanted,bound = bounded_predecessor_fixture ~depth
+      ("omission_" ^ string_of_int depth) in
   let full = Expr.Set.of_list [not_ wanted;
     bin ValueEqual index (Expr.num infinity)] in
   let types = Gamma.as_hashtbl gamma in
@@ -20190,10 +20233,14 @@ let bounded_predecessor_omission () = with_nonblank_counter_trace (fun () ->
     | Some model -> model | None -> Alcotest.fail "omitted upper bound needs native countermodel" in
   ignore (nonblank_counter_observe "omitted upper bound" before
     "required-complete" "sat" full types);
-  let name = match index with Expr.LVar n -> n | _ -> assert false in
+  let name = Utils.Containers.SS.choose (Expr.lvars index) in
   primary_check_lift "omitted upper bound" model types [name,Literal.Num infinity];
   ignore (strict_successor_public "omitted upper bound public fallback" false
-    (Expr.Set.remove (not_ wanted) full) wanted gamma))
+    (Expr.Set.remove (not_ wanted) full) wanted gamma);
+  let without_goal = Expr.Set.of_list [bound;
+    bin ValueEqual (Expr.LVar name) (Expr.num (float_of_int (depth+1)))] in
+  Alcotest.(check bool) "omitted upper goal remains native SAT" true
+    (Option.is_some (Smt.exec_sat without_goal types))) [0;2;4])
 
 let tests = tests @
   (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
