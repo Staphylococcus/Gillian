@@ -141,6 +141,10 @@ val exec_sat :
    are independent of them. Native result logs join the actual dump filename. *)
 val proves_unsat : ?caller_kind:string -> Expr.Set.t -> (string, Type.t) Hashtbl.t -> bool
 
+(** Existing optional complete-query seed, exposed for native submission/model
+    controls. A rejected or unknown guess never decides the original query. *)
+val seeded_model : Expr.Set.t -> (string, Type.t) Hashtbl.t -> model option
+
 (** Complete-query satisfiability, with bounded existential witness searches for
     eligible UTF-16/Number queries. Before any witness search, a total-mode
     mixed UTF-16/Number query first runs a sufficient native UNSAT precheck on a
