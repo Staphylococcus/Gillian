@@ -92,6 +92,9 @@ let prioritise (a1 : atom) (a2 : atom) =
   | Types [ (e, _) ], Types [ (e', _) ] -> lloc_aloc_pvar_lvar e e'
   | Types _, _ -> -1
   | _, Types _ -> 1
+  | CorePred (n1, _, _), CorePred (n2, _, _)
+    when Option.is_some (as_user_pred_name n1)
+         && Option.is_some (as_user_pred_name n2) -> 0
   | CorePred (n1, _, _), _ when Option.is_some (as_user_pred_name n1) -> 1
   | _, CorePred (n2, _, _) when Option.is_some (as_user_pred_name n2) -> -1
   | _, _ -> Stdlib.compare a1 a2

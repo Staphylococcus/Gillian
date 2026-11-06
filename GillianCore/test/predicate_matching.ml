@@ -574,6 +574,57 @@ let source_normalisation_bindings () =
 
 (* Explicit input alternatives and exact learned witnesses are observable
    matching-plan behavior, including when an earlier atom has to wait. *)
+let user_predicate_priority () =
+  let module MP = Gillian.Abstraction.MP in
+  let root = Expr.PVar "root" and value = Expr.LVar "#value" in
+  let owner = Asrt.pred "ZOwner" [root] [value] in
+  let frame = Asrt.pred "AFrame" [root] [] in
+  List.iter (fun (left, right) ->
+      Alcotest.(check int) "user priority is reflexive and symmetric" 0
+        (Asrt.prioritise left right))
+    [owner, owner; frame, frame; owner, frame; frame, owner];
+  expect "stable source order retains duplicate spatial obligations"
+    [owner; frame; owner] (MP.simplify_asrts [owner; frame; owner]);
+  let typed = Asrt.Types [root, Type.ObjectType] in
+  let core = Asrt.CorePred ("Cell", [root], [value]) in
+  let defined = Asrt.definedness ~fact:false value in
+  List.iter (fun (earlier, later) ->
+      Alcotest.(check bool) "other category priorities remain before/after users" true
+        (Asrt.prioritise earlier later < 0 && Asrt.prioritise later earlier > 0))
+    [typed, core; core, owner; owner, defined]
+
+let user_owner_dependencies () =
+  let module MP = Gillian.Abstraction.MP in
+  let root = Expr.PVar "root" and value = Expr.LVar "#value" in
+  let owner = Asrt.pred "ZOwner" [root] [value] in
+  let frame = Asrt.pred "AFrame" [root] [] in
+  let dependent = Asrt.pred "Dependent" [value] [] in
+  let typed = Asrt.Types [value, Type.ObjectType] in
+  let plan atoms =
+    let rec steps = function
+      | MP.ConsumeStep (step, rest) -> step :: steps rest
+      | MP.Finished None -> []
+      | _ -> Alcotest.fail "fixture requires a complete linear plan" in
+    Result.map steps (MP.init (Expr.Set.singleton root) Expr.Set.empty
+      (Hashtbl.create 0) [atoms, (None, None)]) in
+  let check label expected atoms = match plan atoms with
+    | Error _ -> Alcotest.fail (label ^ ": complete plan required")
+    | Ok steps ->
+        expect (label ^ ": every atom in eligible source order") expected
+          (List.map fst steps);
+        let outs = List.assoc owner steps in
+        expect (label ^ ": actual owner output witness retained")
+          [value, Expr.PVar "0"] outs
+  in
+  check "source-first owner" [owner; typed; frame; dependent]
+    [owner; frame; dependent; typed];
+  check "reverse independent source order" [frame; owner; typed; dependent]
+    [frame; owner; dependent; typed];
+  check "earlier dependent waits for its owner" [owner; typed; dependent; frame]
+    [dependent; owner; frame; typed];
+  Alcotest.(check bool) "missing owner cannot invent its output" false
+    (Result.is_ok (plan [typed; dependent]))
+
 let core_input_readiness () =
   let module MP = Gillian.Abstraction.MP in
   let x = Expr.LVar "#input" and y = Expr.LVar "#value" in
@@ -2773,4 +2824,6 @@ let tests =
       ("nounfold output choices retain owned frame", with_total_return nounfold_choice_stays_owned);
       ("explicit nounfold exposes both feasible alternatives", with_total_return nounfold_choice_explicit_alternatives);
       ("ordinary concrete predicate still auto-unfolds", with_total_return ordinary_concrete_summary_unfolds);
+      ("stable user predicate priority preserves spatial multiplicity", with_total_return user_predicate_priority);
+      ("user owner outputs preserve eligibility and source priority", with_total_return user_owner_dependencies);
     ]
