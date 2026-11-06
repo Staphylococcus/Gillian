@@ -2494,7 +2494,9 @@ let optional_input_header ~caller_kind ~timeout_ms ~phase_selection
           | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' | '-' -> true | _ -> false) caller_kind)
      || not (String.starts_with ~prefix:"optional-" caller_kind)
      || int_of_string timeout_ms <= 0 || int_of_string timeout_ms > 5000
-     || phase_selection <> 3
+     || not (phase_selection = 3
+       || (phase_selection = 0 && caller_kind = "optional-isolated-integral-role"
+           && int_of_string timeout_ms <= 1000))
   then invalid_arg "optional input policy";
   Printf.sprintf
     "; Gillian first-optional UNKNOWN native-ast-v1 query=%s caller=%s raw_unknown=true timeout_ms=%s phase_selection=%d ocaml=%s word=%d payload=%s commands=%s\n"
@@ -2627,8 +2629,11 @@ let read_required_unknown_input path =
     if last_option ":timeout" <> Some timeout
        || last_option ":smt.phase_selection" <> Some (string_of_int phase)
     then invalid_arg "native input policy mismatch");
+  let expected_primary = match policy with
+    | Some (_,phase) -> primary_check_command_for_phase phase
+    | None -> primary_check_command in
   (match List.rev commands with
-   | command :: _ when command = primary_check_command -> ()
+   | command :: _ when command = expected_primary -> ()
    | _ -> invalid_arg "native input primary check");
   commands
 

@@ -20811,3 +20811,75 @@ let tests = tests @
        Alcotest.test_case "isolated integral role exact AST eligibility false frame and fallback" `Quick
          (with_total isolated_integral_guards)]
    | _ -> [])
+
+(* Each group runs fresh: replay submits the complete saved native command,
+   then an ordinary observed query confirms the surrounding solver stays usable.
+   These synthetic SAT/UNSAT packets validate only the diagnostic codec. *)
+let isolated_optional_codec want_sat () = with_primary_check_trace (fun () ->
+  let path = Filename.temp_file ~temp_dir:(Sys.getcwd ()) "isolated-optional-" ".input" in
+  Sys.remove path;
+  let sexp = Sexplib.Sexp.of_string in
+  let primary = sexp
+    "(check-sat-using(or-else(try-for(then simplify solve-eqs smt fail-if-undecided)1000)(then simplify solve-eqs fpa2bv smt)))" in
+  let replay () =
+    let env = Unix.environment () |> Array.to_list |> List.filter (fun item ->
+      not (String.starts_with ~prefix:"GILLIAN_" item || String.starts_with ~prefix:"SMT_" item)) in
+    let env = Array.of_list (("GILLIAN_REQUIRED_UNKNOWN_REPLAY=" ^ path) :: env) in
+    let input,output,errors = Unix.open_process_args_full Sys.executable_name [|Sys.executable_name|] env in
+    let status = ref (Unix.WEXITED 127) in
+    let answer = Fun.protect
+      ~finally:(fun () -> status := Unix.close_process_full (input,output,errors))
+      (fun () -> input_line input) in
+    Alcotest.(check bool) "fresh codec replay child exits and is reaped" true (!status = Unix.WEXITED 0);
+    answer in
+  let declarations = [sexp "(declare-const codec_value Int)"] in
+  let assertions = [sexp "(assert (= codec_value 7))"]
+    @ (if want_sat then [] else [sexp "(assert (= codec_value 8))"]) in
+  let save ?(caller="optional-isolated-integral-role") ?(timeout="1000")
+      ?(phase=0) ?(command=primary) () =
+    let saver = Smt.first_optional_unknown_saver () in
+    saver path ~caller_kind:caller ~query:"query_77.smt2" ~timeout_ms:timeout
+      ~phase_selection:phase ~primary_command:command declarations assertions in
+  let read () = let ch=open_in_bin path in
+    Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+  let write data = let ch=open_out_bin path in
+    Fun.protect ~finally:(fun () -> close_out ch) (fun () -> output_string ch data) in
+  Fun.protect ~finally:(fun () -> if Sys.file_exists path then Sys.remove path) (fun () ->
+    Alcotest.(check bool) "exact isolated phase0 packet saved" true (save ());
+    let original = read () in
+    let commands = Smt.read_required_unknown_input path in
+    Alcotest.(check bool) "complete declarations assertions options and actual primary survive" true
+      (List.for_all (fun e -> List.mem e commands) (declarations @ assertions)
+       && List.hd (List.rev commands) = primary
+       && List.mem (sexp "(set-option :timeout 1000)") commands
+       && List.mem (sexp "(set-option :smt.phase_selection 0)") commands);
+    Alcotest.(check string) "actual fresh native replay verdict"
+      ("SMT_NEEDED_INPUT_REPLAY result=" ^ (if want_sat then "sat" else "unsat") ^ " checks=1 proof=false")
+      (replay ());
+    Sys.remove path;
+    List.iter (fun (label,save) ->
+      Alcotest.(check bool) (label ^ " unavailable before write") false (save ());
+      Alcotest.(check bool) (label ^ " creates no packet") false (Sys.file_exists path))
+      ["other phase0 caller",(fun () -> save ~caller:"optional-other" ());
+       "larger phase0 budget",(fun () -> save ~timeout:"1001" ());
+       "unsupported phase",(fun () -> save ~phase:2 ())];
+    write (Str.global_replace (Str.regexp_string "phase_selection=0") "phase_selection=3" original);
+    Alcotest.(check bool) "header phase cannot disagree with command option" true
+      (try ignore (Smt.read_required_unknown_input path); false with Invalid_argument _ -> true);
+    Sys.remove path;
+    Alcotest.(check bool) "synthetic command mismatch is serialized for decoder test" true
+      (save ~command:Smt.primary_check_command ());
+    Alcotest.(check bool) "wrong primary rejects before replay" true
+      (try ignore (Smt.read_required_unknown_input path); false with Invalid_argument _ -> true);
+    ignore (primary_check_native "isolated-codec-followup"
+      (Expr.Set.singleton (Expr.bool true)) (Hashtbl.create 1))))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "isolated phase0 diagnostic codec exact native SAT replay" `Quick
+         (with_total (isolated_optional_codec true));
+       Alcotest.test_case "isolated phase0 diagnostic codec exact native UNSAT replay" `Quick
+         (with_total (isolated_optional_codec false))]
+   | _ -> [])

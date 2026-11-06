@@ -29,7 +29,8 @@ val save_required_unknown_input :
 (** A process-local production instance latches the first actual raw optional
     UNKNOWN before encoding/I/O, even on failure. This factory exposes fresh
     latches for diagnostic codec tests only. Accurate caller/policy header,
-    one complete plain-phase3 packet under64KiB; other policies report
+    one complete plain-phase3 or isolated-integral phase0/1s packet under64KiB;
+    other policies report
     unavailable and still latch. No solver check or proof authority. *)
 val first_optional_unknown_saver : unit ->
   (string -> caller_kind:string -> query:string -> timeout_ms:string -> phase_selection:int ->
