@@ -20501,3 +20501,144 @@ let tests = tests @
        Alcotest.test_case "phase0 formatter user datatype models survive cache and resets" `Quick
          (with_total literal_phase_datatype_models)]
    | _ -> [])
+
+let coherent_formatter_fixture label depth zero =
+  let fs,gamma,index,_,_ = literal_formatter_fixture label zero in
+  let root = "#literal_formatter_" ^ label in
+  let length = Expr.LVar (root ^ "_length")
+  and values = Expr.LVar (root ^ "_values")
+  and current = Expr.LVar (root ^ "_current") in
+  Hashtbl.add gamma (root ^ "_length") Type.NumberType;
+  Hashtbl.add gamma (root ^ "_unconstrained") Type.NumberType;
+  Hashtbl.add gamma (root ^ "_current") Type.Utf16Type;
+  let last = ref index in
+  for _ = 1 to depth do last := bin FPlus !last (Expr.num 1.) done;
+  let lower = bin FLessThan !last length
+  and upper = bin FLessThanEqual length (Expr.num 4294967295.) in
+  let literal = original_core_literal [65;55296;0;56320] in
+  let fs = fs
+    |> Expr.Set.remove (bin Equal (Expr.UnOp (LstLen,values)) (Expr.int 2))
+    |> Expr.Set.add (Expr.UnOp (IsInt,length))
+    |> Expr.Set.add lower |> Expr.Set.add upper
+    |> Expr.Set.add (bin FLessThanEqual (Expr.num 0.) length)
+    |> Expr.Set.add (bin Equal (Expr.UnOp (LstLen,values)) (Expr.UnOp (NumToInt,length)))
+    |> Expr.Set.add (bin ValueEqual current literal)
+    |> Expr.Set.add (bin ValueEqual (bin LstNth values (Expr.int 0)) current) in
+  fs,gamma,index,length,current,literal,lower,upper
+
+let coherent_formatter_models () = with_nonblank_counter_trace (fun () ->
+  let retained = List.map (fun (label,depth,zero) ->
+    let fs,gamma,index,length,current,literal,_,_ = coherent_formatter_fixture label depth zero in
+    let chosen = float_of_int (depth + 1) in
+    let query = fs |> Expr.Set.add (bin ValueEqual index (Expr.num zero))
+      |> Expr.Set.add (bin ValueEqual length (Expr.num chosen)) in
+    let atoms = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    Alcotest.(check bool) (label ^ " whole frame plus exactly two candidates") true
+      (match Smt.literal_formatter_witness_query fs gamma with
+       | Some actual -> Expr.Set.equal actual query | None -> false);
+    let before = nonblank_counter_rows () in
+    let model = Option.get (Smt.literal_formatter_model fs gamma) in
+    ignore (nonblank_counter_observe ~phase_selection:0 label before
+      "optional-literal-formatter" "sat" query gamma);
+    (* An earlier complete witness may win publicly. Do not misattribute that
+       valid model to this formatter branch; the direct attempt above tests it. *)
+    let public,contexts = pending_context_capture (fun () ->
+      Option.get (Smt.check_sat fs gamma)) in
+    Alcotest.(check bool) (label ^ " public native witness completes") true (contexts <> []);
+    Alcotest.(check bool) (label ^ " public witness keeps complete Gamma") true
+      (pending_context_field "original_gamma" (List.hd (List.rev contexts))
+        = `String (Fmt.str "%a" Smt.pp_typenv gamma));
+    let before = nonblank_counter_rows () and files = nonblank_counter_files () in
+    ignore (Smt.check_sat fs gamma);
+    Alcotest.(check bool) (label ^ " original-key cache has no new endpoint") true
+      (before = nonblank_counter_rows () && files = nonblank_counter_files ());
+    nonblank_counter_retained label fs gamma atoms types;
+    let name = function Expr.LVar n -> n | _ -> assert false in
+    let current_literal = match literal with Expr.Lit l -> l | _ -> assert false in
+    model,public,gamma,[name index,Literal.Num zero;
+      name length,Literal.Num chosen;name current,current_literal])
+    ["coherent_zero",0,0.;"coherent_five",5,0.;"alpha_coherent_nine",9,-0.] in
+  List.iter (fun (model,public,gamma,expected) ->
+    primary_check_lift "coherent model after other contexts" model gamma expected;
+    primary_check_lift "coherent cached public model after reset" public gamma expected) retained)
+
+let coherent_formatter_rejections () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,index,length,current,literal,_,_ = coherent_formatter_fixture "reject" 5 0. in
+  let query fs = Option.get (Smt.literal_formatter_witness_query fs gamma) in
+  let attempt label fs wanted =
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " optional native outcome") wanted
+      (Option.is_some (Smt.literal_formatter_model fs gamma));
+    ignore (nonblank_counter_observe ~phase_selection:0 label before
+      "optional-literal-formatter" (if wanted then "sat" else "unsat") (query fs) gamma) in
+  attempt "unchanged false UTF16 frame"
+    (Expr.Set.add (not_ (bin ValueEqual current literal)) fs) false;
+  let excluded = Expr.Set.add (not_ (bin ValueEqual length (Expr.num 6.))) fs in
+  attempt "rejected guess cannot prove original UNSAT" excluded false;
+  let alternative = excluded |> Expr.Set.add (bin ValueEqual index (Expr.num 0.))
+    |> Expr.Set.add (bin ValueEqual length (Expr.num 7.)) in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "original excluded-minimum frame has another real model" true
+    (Option.is_some (Smt.exec_sat ~caller_kind:"control-coherent-other-model" alternative gamma));
+  ignore (nonblank_counter_observe "other full-frame model" before
+    "control-coherent-other-model" "sat" alternative gamma);
+  let competing = fs |> Expr.Set.add (bin FLessThan (Expr.num 8.5) length)
+    |> Expr.Set.add (bin FLessThan length (Expr.num 9.5)) in
+  Alcotest.(check bool) "all strict fractional bounds determine one candidate" true
+    (Expr.Set.equal (query competing)
+      (competing |> Expr.Set.add (bin ValueEqual index (Expr.num 0.))
+       |> Expr.Set.add (bin ValueEqual length (Expr.num 9.))));
+  attempt "competing strict bounds" competing true;
+  let single fs = Expr.Set.add (bin ValueEqual index (Expr.num 0.)) fs in
+  let source_checks = [
+    "missing integral role", Expr.Set.remove (Expr.UnOp (IsInt,length)) fs;
+    "inconsistent bounds", Expr.Set.add (bin FLessThanEqual length (Expr.num 4.)) fs;
+    "closed overflow", Expr.Set.add (bin FLessThan
+      (bin FPlus (Expr.num Float.max_float) (Expr.num Float.max_float)) length) fs;
+    "existing signed zero", Expr.Set.add (bin ValueEqual length (Expr.num (-0.))) fs;
+    "conflicting raw pins", fs |> Expr.Set.add (bin ValueEqual length (Expr.num 0.))
+      |> Expr.Set.add (bin ValueEqual length (Expr.num (-0.)))] in
+  let before = nonblank_counter_rows () in
+  List.iter (fun (label,fs) -> Alcotest.(check bool) (label ^ " retains one-pin path") true
+    (Expr.Set.equal (query fs) (single fs))) source_checks;
+  let guarded_gamma = Hashtbl.copy gamma in
+  let extras = List.init 9 (fun i -> Expr.LVar (Printf.sprintf "#coherent_extra_%d" i)) in
+  let many = List.fold_left (fun fs v ->
+    (match v with Expr.LVar n -> Hashtbl.add guarded_gamma n Type.NumberType | _ -> assert false);
+    fs |> Expr.Set.add (Expr.UnOp (IsInt,v))
+       |> Expr.Set.add (bin FLessThanEqual (Expr.num 0.) v)
+       |> Expr.Set.add (bin FLessThanEqual v (Expr.num 10.))) fs extras in
+  Alcotest.(check bool) "role cap retains original one-pin path" true
+    (Expr.Set.equal (Option.get (Smt.literal_formatter_witness_query many guarded_gamma)) (single many));
+  let x = List.nth extras 0 and y = List.nth extras 1 in
+  let cycle = fs |> Expr.Set.add (Expr.UnOp (IsInt,x)) |> Expr.Set.add (Expr.UnOp (IsInt,y))
+    |> Expr.Set.add (bin FLessThan x y) |> Expr.Set.add (bin FLessThan y x)
+    |> Expr.Set.add (bin FLessThanEqual (Expr.num 0.) x)
+    |> Expr.Set.add (bin FLessThanEqual (Expr.num 0.) y)
+    |> Expr.Set.add (bin FLessThanEqual x (Expr.num 10.))
+    |> Expr.Set.add (bin FLessThanEqual y (Expr.num 10.)) in
+  Alcotest.(check bool) "contradictory cycle abandons whole completion" true
+    (Expr.Set.equal (Option.get (Smt.literal_formatter_witness_query cycle guarded_gamma)) (single cycle));
+  let pair = fs |> Expr.Set.add (Expr.UnOp (IsInt,x)) |> Expr.Set.add (Expr.UnOp (IsInt,y))
+    |> Expr.Set.add (bin FLessThanEqual (Expr.num 0.) x)
+    |> Expr.Set.add (bin FLessThanEqual (Expr.num 0.) y)
+    |> Expr.Set.add (bin FLessThanEqual x (Expr.num 10.))
+    |> Expr.Set.add (bin FLessThanEqual y (Expr.num 10.)) in
+  let forward = Expr.Set.add (bin FLessThan x y) pair
+  and reverse = Expr.Set.add (bin FLessThan y x) pair in
+  Alcotest.(check int) "forward two-role completion can select coherent values" 4
+    (Expr.Set.cardinal (Expr.Set.diff
+      (Option.get (Smt.literal_formatter_witness_query forward guarded_gamma)) forward));
+  Alcotest.(check bool) "alpha-order may conservatively retain one-pin fallback" true
+    (Expr.Set.equal (Option.get (Smt.literal_formatter_witness_query reverse guarded_gamma)) (single reverse));
+  Alcotest.(check bool) "source-only completion guards add no queries" true
+    (before = nonblank_counter_rows ()))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "coherent formatter integral roles full models and original cache" `Quick
+         (with_total coherent_formatter_models);
+       Alcotest.test_case "coherent formatter all bounds raw pins false frame and SAT alternative" `Quick
+         (with_total coherent_formatter_rejections)]
+   | _ -> [])

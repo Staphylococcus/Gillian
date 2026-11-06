@@ -4801,6 +4801,74 @@ let formatted_index_model fs gamma =
    zero leaves both signs possible: this is a guess, never a derived identity.
    Keep every assertion and Gamma binding; only validated native SAT succeeds.
    A rejected/unknown guess leaves the unchanged required query below. *)
+(* Complete an existing bit guess with bounded integral roles, rather than
+   leaving their mixed FP/sequence search unrelated. These are only candidate
+   values: the same full native query must validate them. No state is changed. *)
+let complete_integral_witness fs gamma name value query =
+  let known = Hashtbl.create 8 in
+  let failed = ref false in
+  Hashtbl.add known name value;
+  Expr.Set.iter (function
+    | Expr.BinOp (LVar n,ValueEqual,Lit (Num v))
+    | Expr.BinOp (Lit (Num v),ValueEqual,LVar n)
+      when Float.is_finite v && Hashtbl.find_opt gamma n = Some Type.NumberType ->
+        (match Hashtbl.find_opt known n with
+         | Some old when Int64.bits_of_float old <> Int64.bits_of_float v ->
+             failed := true
+         | _ -> Hashtbl.replace known n v)
+    | _ -> ()) fs;
+  let rec evaluate = function
+    | Expr.Lit (Num v) when Float.is_finite v -> Some v
+    | Expr.LVar n -> Hashtbl.find_opt known n
+    | Expr.BinOp (a,((FPlus | FMinus) as op),b) ->
+        (match evaluate a,evaluate b with
+         | Some a,Some b ->
+             let v = if op = FPlus then a +. b else a -. b in
+             if Float.is_finite v then Some v else (failed := true; None)
+         | _ -> None)
+    | _ -> None in
+  let roles = Expr.Set.fold (fun e roles -> match e with
+    | Expr.UnOp (IsInt,LVar n)
+      when Hashtbl.find_opt gamma n = Some Type.NumberType
+        && not (Hashtbl.mem known n) -> SS.add n roles
+    | _ -> roles) fs SS.empty in
+  if !failed || SS.cardinal roles > 8 then query else
+  let result = ref query in
+  for _ = 1 to 8 do
+    SS.iter (fun n -> if not (Hashtbl.mem known n) then (
+      let lower,upper = Expr.Set.fold (fun e (lo,hi) -> match e with
+        | Expr.BinOp (a,((FLessThan | FLessThanEqual) as op),LVar v) when v = n ->
+            (match evaluate a with
+             | Some a -> (if op = FLessThan then floor a +. 1. else ceil a)::lo,hi
+             | None -> lo,hi)
+        | Expr.BinOp (LVar v,((FLessThan | FLessThanEqual) as op),b) when v = n ->
+            (match evaluate b with
+             | Some b -> lo,(if op = FLessThan then ceil b -. 1. else floor b)::hi
+             | None -> lo,hi)
+        | _ -> lo,hi) fs ([],[]) in
+      match lower,upper with
+      | _::_,_::_ ->
+          let low = List.fold_left max 0. lower
+          and high = List.fold_left min infinity upper in
+          if not (Float.is_finite low && Float.is_finite high)
+             || low > high then failed := true
+          else if high <= 4294967295. then (
+            Hashtbl.add known n low;
+            result := Expr.Set.add
+              (Expr.BinOp (LVar n,ValueEqual,Expr.num low)) !result)
+      | _ -> ())) roles
+  done;
+  (* Later roles can make an earlier symbolic bound concrete. Never keep a
+     partial completion that now violates one of those original bounds. *)
+  Expr.Set.iter (function
+    | Expr.BinOp (a,((FLessThan | FLessThanEqual) as op),b) ->
+        (match evaluate a,evaluate b with
+         | Some a,Some b ->
+             if not (if op = FLessThan then a < b else a <= b) then failed := true
+         | _ -> ())
+    | _ -> ()) fs;
+  if !failed then query else !result
+
 let literal_formatter_witness_query fs gamma =
   if not !Config.Verification.total || !Config.under_approximation then None else
   let bridged = ref SS.empty in
@@ -4847,8 +4915,10 @@ let literal_formatter_witness_query fs gamma =
       let order = String.compare a b in
       if order <> 0 then order else Expr.compare x y) in
   match candidates with
-  | [name,literal] ->
-      Some (Expr.Set.add (Expr.BinOp (LVar name,ValueEqual,literal)) fs)
+  | [name,(Expr.Lit (Num value) as literal)] ->
+      let query = Expr.Set.add (Expr.BinOp (LVar name,ValueEqual,literal)) fs in
+      Some (complete_integral_witness fs gamma name value query)
+  | [_] -> assert false
   | _ -> None
 
 let literal_formatter_model fs gamma =

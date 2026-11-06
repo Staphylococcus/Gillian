@@ -91,7 +91,12 @@ val formatted_index_model :
     directly to a literal or by a finite subtraction chain equal to zero.
     The entire original FS and Gamma remain; the added
     ValueEqual is a search hint, not a consequence (especially for signed zero).
-    Declines ambiguity and existing literal bit pins. *)
+    Up to eight originally integral Number roles can receive coherent natural
+    candidates from their evaluable original bounds, retaining every full
+    constraint and existing raw pin. Unsupported/contradictory completion keeps
+    the original one-pin attempt. Roles are assigned once; name order can
+    conservatively abandon a feasible multi-role completion. This is not a
+    constraint solver. Declines ambiguous/existing literal bit pins. *)
 val literal_formatter_witness_query :
   Expr.Set.t -> (string, Type.t) Hashtbl.t -> Expr.Set.t option
 
