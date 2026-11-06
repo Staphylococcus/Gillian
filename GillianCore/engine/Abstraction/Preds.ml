@@ -220,6 +220,10 @@ let consume_pred
         candidates);
   let syntactic_result = find_pred candidates args Expr.equal in
   match syntactic_result with
+  | true, _, _, syntactic_result when List.length candidates = 1 ->
+      (* Output equality only ranks alternatives here. With one input-matched
+         owner it cannot change selection; Matcher still checks every output. *)
+      frame_off name syntactic_result
   | true, _, o, syntactic_result when o = known_outs_count ->
       frame_off name syntactic_result
   | true, _, o, syntactic_result -> (

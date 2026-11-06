@@ -80,7 +80,7 @@ let semantic_input_and_output_only () =
   expect "semantic input matching is retained" (Some ("Input", [ input ]))
     (Preds.consume_pred ~maintain:false predicates "Input" [ Some alias ]
        (SI.singleton 0) eq);
-  expect "known output with no inputs is checked semantically"
+  expect "sole output owner is selected without ranking alternatives"
     (Some ("Output", [ input ]))
     (Preds.consume_pred ~maintain:false predicates "Output" [ Some alias ]
        SI.empty eq);
@@ -2573,7 +2573,10 @@ let predicate_callback_fixture ~maintain ~output_only () =
   let wanted = Expr.LVar "#callback_requested" in
   let owned = ("Callback", [value]) in
   let frame = ("Unrelated", []) in
-  let before = [owned; frame] in
+  (* Output ranking needs a real choice. Semantic input comparison still uses
+     a singleton whose input does not match syntactically. *)
+  let alternative = ("Callback", [Expr.LVar "#callback_alternative"]) in
+  let before = if output_only then [owned; alternative; frame] else [owned; frame] in
   let predicates = Preds.init before in
   let invoke callback =
     Preds.consume_pred ~maintain predicates "Callback" [Some wanted]
@@ -2614,17 +2617,18 @@ let predicate_callback_internal_error () =
 let require_predicate_callback_fallback total error =
   with_predicate_callback_mode total (fun () ->
       List.iter (fun (maintain, output_only) ->
-          let predicates, before, owned, frame, invoke =
+          let predicates, before, owned, _frame, invoke =
             predicate_callback_fixture ~maintain ~output_only () in
           let calls = ref 0 in
           let actual = invoke (fun _ _ -> incr calls; raise error) in
-          (* Preserve the existing output-only syntactic fallback as well as
-             ordinary input mismatch; this patch changes neither selection. *)
+          (* Ambiguous output ranking retains its existing syntactic fallback;
+             ordinary semantic input mismatch still rejects ownership. *)
           expect "legacy callback fallback result"
             (if output_only then Some owned else None) actual;
-          Alcotest.(check int) "the failing callback really ran" 1 !calls;
+          Alcotest.(check int) "every ambiguous candidate retains callback fallback"
+            (if output_only then 2 else 1) !calls;
           expect "legacy ownership effect is unchanged"
-            (if output_only && not maintain then [frame] else before)
+            (if output_only && not maintain then List.filter ((<>) owned) before else before)
             (Preds.to_list predicates)) predicate_callback_variants)
 
 let predicate_callback_partial_fallback () =
@@ -2671,6 +2675,55 @@ let predicate_callback_selection () =
           expect "semantic maintain/consume effect"
             (if maintain then [other; chosen] else [other])
             (Preds.to_list predicates)) [false; true])
+
+let singleton_output_selection () =
+  with_predicate_callback_mode true (fun () ->
+      List.iter (fun maintain ->
+        List.iter (fun output_only ->
+          List.iter (fun wanted ->
+            let values = if output_only then [Expr.int 2] else [Expr.int 1;Expr.int 2] in
+            let args = if output_only then [wanted] else [Some (Expr.int 1);wanted] in
+            let owner = "Singleton",values and frame = "Frame",[] in
+            let predicates = Preds.init [owner;frame] in
+            let calls = ref 0 in
+            let result = Preds.consume_pred ~maintain predicates "Singleton" args
+                (if output_only then SI.empty else SI.singleton 0)
+                (fun _ _ -> incr calls; Alcotest.fail "one input-matched owner needs no output ranking") in
+            expect "the actual sole owner supplies its unchanged tuple" (Some owner) result;
+            Alcotest.(check int) "no semantic ranking probe" 0 !calls;
+            expect "maintain and exclusive consumption preserve frame"
+              (if maintain then [owner;frame] else [frame]) (Preds.to_list predicates))
+            [None;Some (Expr.int 9);Some (Expr.LVar "#singleton_alias")])
+          [false;true]) [false;true])
+
+let singleton_output_required_error () =
+  List.iter (fun error ->
+    let calls = ref 0 in
+    let module OutputState = struct
+      include RecoveryState
+      let assert_a _ facts =
+        incr calls;
+        expect "the complete actual output equality reaches required checking"
+          [Expr.BinOp (Expr.int 2,ValueEqual,Expr.int 3)] facts;
+        raise error
+    end in
+    let module OutputMatcher = Engine.Matcher.Make (OutputState) in
+    let initial = call_mode_state 1 [[Expr.int 1;Expr.int 2]] in
+    let before = Preds.to_list initial.preds in
+    let state : OutputMatcher.t = {
+      state=RecoveryState.copy initial.state;preds=Preds.copy initial.preds;
+      wands=Engine.Wands.copy initial.wands;pred_defs=initial.pred_defs } in
+    let atom = call_mode_atom [Expr.int 1] [Expr.int 3] in
+    (match OutputMatcher.consume_pred state "CallModePair" [Some (Expr.int 1);Some (Expr.int 3)]
+        ~fold_outs_info:(ReturnSubst.init [],(atom,[]),[Expr.int 3]) with
+    | _ -> Alcotest.fail "required output-check error must escape matching"
+    | exception actual ->
+        Alcotest.(check bool) "the identical required error escapes" true (actual == error));
+    Alcotest.(check int) "required output check was not skipped" 1 !calls;
+    expect "failure cannot alter caller ownership" before (Preds.to_list initial.preds))
+    [PredicateCallbackResult.Exc.Gillian_error
+       (PredicateCallbackResult.Error.OperationError "Incomplete totality proof: SMT returned unknown");
+     PredicateCallbackResult.Exc.internal_error "required output matching failure"]
 
 (* Keep folded output choices owned until an explicit unfold requests their
    alternatives. Use real predicate plans, Matcher production and state queries. *)
@@ -2826,4 +2879,6 @@ let tests =
       ("ordinary concrete predicate still auto-unfolds", with_total_return ordinary_concrete_summary_unfolds);
       ("stable user predicate priority preserves spatial multiplicity", with_total_return user_predicate_priority);
       ("user owner outputs preserve eligibility and source priority", with_total_return user_owner_dependencies);
+      ("singleton owned output needs no alternative ranking", singleton_output_selection);
+      ("singleton required output errors still propagate", with_total_return singleton_output_required_error);
     ]
