@@ -4741,8 +4741,9 @@ let formatted_index_model fs gamma =
     ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
     ~raw_unknown:true query gamma with SMT_unknown -> None
 
-(* A formatter-dependent Number already compared to a finite literal can use
-   that literal's bits as one complete-query search hint. In particular fp.eq
+(* A formatter-dependent Number compared to a finite literal, or whose
+   difference from that literal is compared to numeric zero, can try the
+   literal's bits as one complete-query search hint. In particular fp.eq
    zero leaves both signs possible: this is a guess, never a derived identity.
    Keep every assertion and Gamma binding; only validated native SAT succeeds.
    A rejected/unknown guess leaves the unchanged required query below. *)
@@ -4759,9 +4760,16 @@ let literal_formatter_witness_query fs gamma =
       super#visit_expr () e
   end in
   Expr.Set.iter (visitor#visit_expr ()) fs;
-  let candidates = Expr.Set.fold (fun atom candidates -> match atom with
+  let candidate = function
     | Expr.BinOp (LVar name, Equal, (Lit (Num n) as literal))
-    | Expr.BinOp ((Lit (Num n) as literal), Equal, LVar name)
+    | Expr.BinOp ((Lit (Num n) as literal), Equal, LVar name) ->
+        Some (name,n,literal)
+    | Expr.BinOp (BinOp (LVar name, FMinus, (Lit (Num n) as literal)), Equal, Lit (Num z))
+    | Expr.BinOp (Lit (Num z), Equal, BinOp (LVar name, FMinus, (Lit (Num n) as literal)))
+      when z = 0. -> Some (name,n,literal)
+    | _ -> None in
+  let candidates = Expr.Set.fold (fun atom candidates -> match candidate atom with
+    | Some (name,n,literal)
       when Float.is_finite n && SS.mem name !formatted
         && Hashtbl.find_opt gamma name = Some Type.NumberType ->
         let fixed = Expr.Set.exists (function

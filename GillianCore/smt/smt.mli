@@ -77,8 +77,9 @@ val positive_trace_index_model :
 val formatted_index_model :
   Expr.Set.t -> (string, Type.t) Hashtbl.t -> model option
 
-(** One finite-literal bit candidate for an already-compared, typed Number
-    used by a formatter. The entire original FS and Gamma remain; the added
+(** One finite-literal bit candidate for a typed Number used by a formatter,
+    compared directly to that literal or by [(x - literal) == numericZero].
+    The entire original FS and Gamma remain; the added
     ValueEqual is a search hint, not a consequence (especially for signed zero).
     Declines ambiguity and existing literal bit pins. *)
 val literal_formatter_witness_query :
