@@ -17903,7 +17903,9 @@ let compatible_seed_literal_bounds () = with_nonblank_counter_trace (fun () ->
      "strict_upper",(fun n -> bin FLessThan n (Expr.num (-2.))),None;
      "weak_upper",(fun n -> bin FLessThanEqual n (Expr.num (-2.))),None;
      "right_literal_equality",(fun n -> bin Equal n (Expr.num 3.)),None;
-     "left_literal_equality",(fun n -> bin ValueEqual (Expr.num 3.) n),None];
+     "left_literal_equality",(fun n -> bin ValueEqual (Expr.num 3.) n),None])
+
+let compatible_seed_pairs () = with_nonblank_counter_trace (fun () ->
   List.iter (fun (label,make,seed) ->
     let fs,gamma,n,i,s,t = compatible_seed_fixture label in
     ignore (compatible_seed_run ~seed label (Expr.Set.add (make n i) fs) gamma n i s t))
@@ -20086,4 +20088,12 @@ let tests = tests @
          (with_total bounded_predecessor_native);
        Alcotest.test_case "bounded predecessor omission has required native countermodel" `Quick
          (with_total bounded_predecessor_omission)]
+   | _ -> [])
+
+(* A separate native group keeps the existing per-case endpoint cap. *)
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "finite seed pairs decline strict conflicts and retain compatible models" `Quick
+         (with_total compatible_seed_pairs)]
    | _ -> [])
