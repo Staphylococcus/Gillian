@@ -29,7 +29,8 @@ val save_required_unknown_input :
 (** A process-local production instance latches the first actual raw optional
     UNKNOWN before encoding/I/O, even on failure. This factory exposes fresh
     latches for diagnostic codec tests only. Accurate caller/policy header,
-    one complete packet under64KiB; no solver check or proof authority. *)
+    one complete plain-phase3 packet under64KiB; other policies report
+    unavailable and still latch. No solver check or proof authority. *)
 val first_optional_unknown_saver : unit ->
   (string -> caller_kind:string -> query:string -> timeout_ms:string -> phase_selection:int ->
    primary_command:Sexplib.Sexp.t -> Sexplib.Sexp.t list -> Sexplib.Sexp.t list -> bool)
@@ -94,7 +95,8 @@ val formatted_index_model :
 val literal_formatter_witness_query :
   Expr.Set.t -> (string, Type.t) Hashtbl.t -> Expr.Set.t option
 
-(** One optional native complete-query attempt. Only validated SAT succeeds;
+(** One optional native complete-query attempt under the existing phase0
+    preprocessing pipeline and the same total1s cap. Only validated SAT succeeds;
     UNSAT/UNKNOWN/decline prove nothing about the original query. No cache or
     caller state is changed; other solver/model errors still propagate. *)
 val literal_formatter_model :

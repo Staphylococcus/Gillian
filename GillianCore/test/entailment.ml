@@ -182,6 +182,10 @@ let finite_position () =
         Alcotest.(check bool)
           "single-pair seed failure cannot hide required unknown" true
           (rejected (fun () -> ignore (Smt.is_sat single_pair g)));
+        Alcotest.(check bool)
+          "phase0 required UNKNOWN remains an error" true
+          (rejected (fun () -> ignore (Smt.exec_sat
+            ~caller_kind:"control-phase0-required" ~phase_selection:0 fs g)));
         Alcotest.(check bool) "reason metadata preserves same-session known SAT" true
           (Option.is_some (Smt.exec_sat
             (Expr.Set.singleton (Expr.Lit (Literal.Bool true))) (Hashtbl.create 1)));
@@ -7117,7 +7121,7 @@ let nonblank_counter_types gamma =
   Hashtbl.fold (fun name typ rows -> (name,typ)::rows) gamma []
   |> List.sort Stdlib.compare
 
-let nonblank_counter_observe label before caller result expected gamma =
+let nonblank_counter_observe ?(phase_selection=3) label before caller result expected gamma =
   let rows = nonblank_counter_rows () |> List.filter (fun row ->
     not (List.mem row before) && smt_result_field "caller" row = caller) in
   Alcotest.(check int) (label ^ " one actual native result for " ^ caller)
@@ -7125,7 +7129,7 @@ let nonblank_counter_observe label before caller result expected gamma =
   let row = List.hd rows in
   Alcotest.(check string) (label ^ " actual native result") result
     (smt_result_field "result" row);
-  Alcotest.(check string) (label ^ " native phase policy") "3"
+  Alcotest.(check string) (label ^ " native phase policy") (string_of_int phase_selection)
     (smt_result_field "phase_selection" row);
   let query = smt_result_field "query" row in
   let text = nonblank_counter_read (Filename.concat "gillian_smt_queries" query) in
@@ -10007,7 +10011,7 @@ let primary_check_integer_aliases () = with_primary_check_trace (fun () ->
     (Option.is_some (primary_check_native "integer-alias-countercontrol" fs gamma));
   primary_check_lift "original model after later solver resets" model gamma expected)
 
-let primary_check_typed_aliases () = with_primary_check_trace (fun () ->
+let primary_check_typed_aliases ?(phase_selection=3) () = with_primary_check_trace (fun () ->
   Alcotest.(check bool) "structural preservation guard accepts identical NaN bits" true
     (List.equal Expr.equal [Expr.num nan] [Expr.num nan]);
   Alcotest.(check bool) "structural preservation guard distinguishes signed zeros" false
@@ -10023,14 +10027,16 @@ let primary_check_typed_aliases () = with_primary_check_trace (fun () ->
     let gamma = Hashtbl.create 2 in
     Hashtbl.add gamma xn typ;Hashtbl.add gamma yn typ;
     let fs = Expr.Set.of_list [bin ValueEqual x (Expr.Lit value);bin ValueEqual y x] in
-    let model = match primary_check_native (label ^ "-SAT") fs gamma with
+    let model = match primary_check_native ~phase_selection (label ^ "-SAT") fs gamma with
       | Some model -> model | None -> Alcotest.fail (label ^ " missing native alias model") in
     primary_check_lift label model gamma [xn,value;yn,value];
     Alcotest.(check bool) (label ^ " full alias contradiction native UNSAT") true
-      (Option.is_none (primary_check_native (label ^ "-UNSAT")
+      (Option.is_none (primary_check_native ~phase_selection (label ^ "-UNSAT")
         (Expr.Set.add (not_ (bin ValueEqual y (Expr.Lit value))) fs) gamma));
     primary_check_lift (label ^ " saved model after contradiction reset") model gamma
       [xn,value;yn,value])
+    (List.filter (fun (label,_,_) -> phase_selection <> 0 ||
+      List.mem label ["utf16-raw-units";"positive-zero";"negative-zero";"finite"])
     ["utf16-raw-units",Type.Utf16Type,Literal.Utf16String raw;
      "bool-true",Type.BooleanType,Literal.Bool true;
      "bool-false",Type.BooleanType,Literal.Bool false;
@@ -10039,7 +10045,7 @@ let primary_check_typed_aliases () = with_primary_check_trace (fun () ->
      "finite",Type.NumberType,Literal.Num 42.5;
      "positive-infinity",Type.NumberType,Literal.Num infinity;
      "negative-infinity",Type.NumberType,Literal.Num neg_infinity;
-     "nan",Type.NumberType,Literal.Num nan])
+     "nan",Type.NumberType,Literal.Num nan]))
 
 let primary_check_declarations_and_cache () = with_primary_check_trace (fun () ->
   let make tag value =
@@ -12802,7 +12808,7 @@ let tests =
       Alcotest.test_case "primary preprocessing restores eliminated integer aliases" `Quick
         (with_total primary_check_integer_aliases);
       Alcotest.test_case "primary preprocessing preserves typed native alias models" `Quick
-        (with_total primary_check_typed_aliases);
+        (with_total (primary_check_typed_aliases ~phase_selection:3));
       Alcotest.test_case "primary preprocessing restores declarations resets and cached models" `Quick
         (with_total primary_check_declarations_and_cache);
     ]
@@ -20011,13 +20017,13 @@ let literal_formatter_attempt label fs gamma index literal expected =
   let model,contexts = pending_context_capture (fun () ->
     Smt.literal_formatter_model fs gamma) in
   Alcotest.(check bool) (label ^ " actual optional verdict") expected (Option.is_some model);
-  ignore (nonblank_counter_observe label before "optional-literal-formatter"
+  ignore (nonblank_counter_observe ~phase_selection:0 label before "optional-literal-formatter"
     (if expected then "sat" else "unsat") query gamma);
   Alcotest.(check int) (label ^ " one complete native attempt") 1 (List.length contexts);
   let context = List.hd contexts in
   List.iter (fun (key,want) -> Alcotest.(check bool) (label ^ " policy " ^ key) true
     (pending_context_field key context = want))
-    ["raw_unknown",`Bool true;"timeout_ms",`String "1000";"phase_selection",`Int 3];
+    ["raw_unknown",`Bool true;"timeout_ms",`String "1000";"phase_selection",`Int 0];
   Alcotest.(check bool) (label ^ " native model validation remains enabled") true
     (pending_context_field "model_validate" (pending_context_field "initial_options" context)
       = `String "true");
@@ -20033,7 +20039,7 @@ let literal_formatter_native () = with_nonblank_counter_trace (fun () ->
     let before = nonblank_counter_rows () in
     Alcotest.(check bool) (label ^ " public complete-query dispatch succeeds") true
       (Option.is_some (Smt.check_sat fs gamma));
-    ignore (nonblank_counter_observe (label ^ " public") before "optional-literal-formatter"
+    ignore (nonblank_counter_observe ~phase_selection:0 (label ^ " public") before "optional-literal-formatter"
       "sat" (Expr.Set.add (bin ValueEqual index (Expr.num witness)) fs) gamma);
     let files = nonblank_counter_files () in
     ignore (Smt.check_sat fs gamma);
@@ -20330,7 +20336,7 @@ let literal_cast_native () = with_nonblank_counter_trace (fun () ->
     let before = nonblank_counter_rows () in
     Alcotest.(check bool) (label ^ " public cast-only query") true
       (Option.is_some (Smt.check_sat fs gamma));
-    ignore (nonblank_counter_observe label before "optional-literal-formatter" "sat"
+    ignore (nonblank_counter_observe ~phase_selection:0 label before "optional-literal-formatter" "sat"
       (Expr.Set.add (bin ValueEqual index (Expr.num 3.)) fs) gamma);
     let files = nonblank_counter_files () in
     ignore (Smt.check_sat fs gamma);
@@ -20447,4 +20453,51 @@ let tests = tests @
    | Some _,None -> [
        Alcotest.test_case "first optional UNKNOWN native codec and first-attempt latch" `Quick
          (with_total first_optional_input_codec)]
+   | _ -> [])
+
+(* The actual formatter attempt returns/cache-retains a phase0 model with its
+   materialized user datatype declarations, across a different native context. *)
+let literal_phase_datatype_models () = with_nonblank_counter_trace (fun () ->
+  let make tag value =
+    let fs,gamma,index,_,_ = literal_formatter_fixture ("phase_datatype_" ^ tag) 1. in
+    let datatype_name = "LiteralPhaseContext" ^ tag
+    and constructor_name = "LiteralPhaseBox" ^ tag in
+    let constructor : Constructor.t = {constructor_name;constructor_source_path=None;
+      constructor_loc=None;constructor_num_fields=1;constructor_fields=[Some Type.IntType];
+      constructor_datatype=datatype_name} in
+    let datatype : Datatype.t = {datatype_name;datatype_source_path=None;datatype_loc=None;
+      datatype_constructors=[constructor]} in
+    let table=Hashtbl.create 1 in Hashtbl.add table datatype_name datatype;
+    let env=Prog_env.Datatype_env.make' table in
+    let fs=Expr.Set.add (bin Equal (Expr.LVar ("#phase_box_" ^ tag))
+      (Expr.ConstructorApp(constructor_name,[Expr.int value]))) fs in
+    env,fs,gamma,index in
+  let ea,fa,ga,ia=make "A" 31 and eb,fb,gb,ib=make "B" 47 in
+  let get env fs gamma index label =
+    let before=nonblank_counter_rows () in
+    let model=Prog_env.Datatype_env.using env (fun () -> Option.get (Smt.check_sat fs gamma)) in
+    ignore (nonblank_counter_observe ~phase_selection:0 label before "optional-literal-formatter"
+      "sat" (Expr.Set.add (bin ValueEqual index (Expr.num 1.)) fs) gamma);
+    model in
+  let ma=get ea fa ga ia "phase0 datatype A"
+  and mb=get eb fb gb ib "phase0 datatype B" in
+  let expected index=match index with Expr.LVar n->[n,Literal.Num 1.]|_->assert false in
+  primary_check_lift "phase0 A model after B/reset" ma ga (expected ia);
+  primary_check_lift "phase0 B model after A/reset" mb gb (expected ib);
+  let before=nonblank_counter_rows () and files=nonblank_counter_files () in
+  let cached=Option.get (Smt.check_sat fa ga) in
+  Alcotest.(check bool) "phase0 cache hit outside datatype handler has no native attempt" true
+    (before=nonblank_counter_rows () && files=nonblank_counter_files ());
+  primary_check_lift "phase0 cached A declarations survive B/reset" cached ga (expected ia);
+  let opposite=Expr.Set.add (not_ (bin ValueEqual ia (Expr.num 1.))) fa in
+  Prog_env.Datatype_env.using ea (fun () ->
+    ignore (literal_formatter_attempt "phase0 contradictory datatype frame" opposite ga ia 1. false)))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "phase0 raw UTF16 signed-zero and finite model aliases" `Quick
+         (with_total (primary_check_typed_aliases ~phase_selection:0));
+       Alcotest.test_case "phase0 formatter user datatype models survive cache and resets" `Quick
+         (with_total literal_phase_datatype_models)]
    | _ -> [])

@@ -4855,8 +4855,12 @@ let literal_formatter_model fs gamma =
   match literal_formatter_witness_query fs gamma with
   | None -> None
   | Some query ->
+      (* The existing complete-query preprocessing policy eliminates candidate
+         equalities before the mixed FP/sequence search. This is one native
+         invocation under the same total1s cap, not another query or a proof
+         from the candidate. UNSAT/UNKNOWN still reaches the required fallback. *)
       try run_sat ~caller_kind:"optional-literal-formatter"
-        ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+        ~timeout_ms:(optional_timeout 1000) ~phase_selection:0
         ~raw_unknown:true query gamma
       with SMT_unknown -> None
 
