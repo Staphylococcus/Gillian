@@ -19704,3 +19704,53 @@ let tests = tests @
        Alcotest.test_case "finite bound consistency omission signed zero and other-bound SAT controls" `Quick
          (with_total (fun () -> with_nonblank_counter_trace finite_bound_consistency_models))]
    | None -> [])
+
+(* Exercise the actual definedness caller, including its reduction before
+   assertion. This diagnoses eligibility, not the enclosing root program. *)
+let finite_bound_definedness_path mode = with_nonblank_counter_trace (fun () ->
+  let facts,gamma,value = finite_number_bound_saved_fixture ("domain_path_" ^ mode) in
+  let guard = Expr.LVar "#finite_domain_guard" in
+  Gamma.update gamma "#finite_domain_guard" Type.BooleanType;
+  let pfs = Engine.PFS.of_list facts in
+  let original = Engine.PFS.to_list pfs
+  and types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let cast = Expr.UnOp (NumToInt,value) in
+  let expression = match mode with
+    | "direct" -> cast
+    | "true" -> bin And Expr.true_ (bin Equal cast (Expr.int 0))
+    | "symbolic" -> bin And guard (bin Equal cast (Expr.int 0))
+    | _ -> assert false in
+  let goals = ref [] and before = nonblank_counter_rows () in
+  let (),contexts = pending_context_capture (fun () ->
+    Engine.Totality.check_proof_expression ~context:"finite bound caller path"
+      ~evaluate:(Engine.Reduction.reduce_lexpr ~reduce_lvars:true ~pfs ~gamma)
+      ~assertion:(fun condition ->
+        goals := condition :: !goals;
+        Solver.check_entailment Utils.Containers.SS.empty pfs [condition] gamma)
+      expression) in
+  List.iter (fun upper ->
+    let wanted = finite_number_bound_wanted upper value in
+    let expected = if mode = "symbolic" then bin Impl guard wanted else wanted in
+    Alcotest.(check bool) (mode ^ " exact evaluated finite-bound goal") true
+      (List.exists (Expr.equal expected) !goals)) [false;true];
+  let sufficient = List.filter (fun c -> pending_context_field "caller" c
+    = `String "optional-entailment-finite-number-bound-core") contexts in
+  Alcotest.(check int) (mode ^ " actual caller shortcut count")
+    (if mode = "symbolic" then 0 else 2) (List.length sufficient);
+  finite_number_bound_complete mode before contexts "unsat";
+  Alcotest.(check bool) (mode ^ " caller FS and Number provenance unchanged") true
+    (List.equal Expr.equal original (Engine.PFS.to_list pfs)
+     && types = nonblank_counter_types (Gamma.as_hashtbl gamma));
+  Printf.printf "FINITE_BOUND_DOMAIN_PATH mode=%s sufficient=%d\n%!"
+    mode (List.length sufficient))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | Some _ -> [
+       Alcotest.test_case "finite bound actual definedness direct caller" `Quick
+         (with_total (fun () -> finite_bound_definedness_path "direct"));
+       Alcotest.test_case "finite bound actual definedness known true guard" `Quick
+         (with_total (fun () -> finite_bound_definedness_path "true"));
+       Alcotest.test_case "finite bound actual definedness symbolic guard fallback" `Quick
+         (with_total (fun () -> finite_bound_definedness_path "symbolic"))]
+   | None -> [])
