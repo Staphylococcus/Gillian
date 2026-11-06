@@ -78,7 +78,8 @@ let release_parent = function
 let capture_parent_snapshot (report : Report.t) =
   try
     if report.type_ <> Logging_constants.Content_type.cmd
-       || Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" = None then None
+       || Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" = None
+       || Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_SCOPES_ONLY" = Some "1" then None
     else
       let content = Yojson.Safe.to_string
         (Loggable.loggable_to_yojson report.content) in

@@ -19754,3 +19754,44 @@ let tests = tests @
        Alcotest.test_case "finite bound actual definedness symbolic guard fallback" `Quick
          (with_total (fun () -> finite_bound_definedness_path "symbolic"))]
    | None -> [])
+
+let native_context_scopes_only () = with_nonblank_counter_trace (fun () ->
+  let module L = Logging in
+  let flag = "GILLIAN_NATIVE_SMT_CONTEXT_SCOPES_ONLY" in
+  let saved = Sys.getenv_opt flag in
+  Fun.protect ~finally:(fun () -> Unix.putenv flag (Option.value ~default:"" saved)) (fun () ->
+    List.iter (fun enabled ->
+      Unix.putenv flag (if enabled then "1" else "0");
+      let serialized = ref 0 in
+      let command = L.Loggable.make (fun fmt () -> Fmt.string fmt "command probe")
+        (fun _ -> Ok ())
+        (fun () -> incr serialized; `String "immutable command state") () in
+      let id = L.Specific.normal command L.Logging_constants.Content_type.cmd in
+      Alcotest.(check bool) "only legacy observer forces a filtered command report"
+        (not enabled) (Option.is_some id);
+      let snapshot = L.Parent.with_id id L.Parent.get_snapshot in
+      Alcotest.(check bool) "scope-only capture creates no command-state snapshot"
+        (not enabled) (Option.is_some snapshot);
+      Alcotest.(check int) "scope-only never serializes the symbolic state"
+        (if enabled then 0 else 1) !serialized;
+      let name = if enabled then "#scope_only_enabled" else "#scope_only_legacy" in
+      let value = Expr.LVar name in
+      let gamma = Hashtbl.create 1 in Hashtbl.add gamma name Type.IntType;
+      let fs = Expr.Set.singleton (bin Equal value (Expr.int 7)) in
+      let before = nonblank_counter_rows () in
+      let _,contexts = pending_context_capture (fun () ->
+        Smt.with_native_smt_context
+          (fun () -> `Assoc [("operation",`String "scopes-only-probe")])
+          (fun () ->
+            Alcotest.(check bool) "unchanged required native SAT query" true
+              (Option.is_some (Smt.exec_sat ~caller_kind:"control-scopes-only" fs gamma)))) in
+      List.iter (fun context ->
+        ignore (pending_context_scope "scopes-only-probe" [context]);
+        typed_alias_core_check_gamma "scope-only" [(name,Type.IntType)] context) contexts;
+      finite_number_bound_complete "scope-only" before contexts "sat") [false;true]))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | Some _ -> [Alcotest.test_case "native query scopes avoid implicit command snapshots" `Quick
+       (with_total native_context_scopes_only)]
+   | None -> [])

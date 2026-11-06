@@ -47,7 +47,8 @@ let log_specific lvl ?title ?severity loggable type_ =
   (* Opted-in commands need real parent reports even when the file reporter
      filters full states. Default eligibility and reporter output stay exact. *)
   let direct_command = type_ = Logging_constants.Content_type.cmd
-    && Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" <> None in
+    && Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" <> None
+    && Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_SCOPES_ONLY" <> Some "1" in
   if Mode.should_log lvl && (will_log_on_any_reporter type_ || direct_command) then
     let report =
       Report_builder.make ?title ~content:loggable ~type_ ?severity ()
