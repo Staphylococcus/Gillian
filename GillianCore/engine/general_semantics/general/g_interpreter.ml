@@ -2155,8 +2155,27 @@ struct
                  identity (Store.get store "l") identity (Store.get store "m")
              else ""
            in
+           let recovery_field =
+             if Sys.getenv_opt "GILLIAN_RECOVERY_SELECTION_PROFILE" <> Some "1"
+             then "" else match cmd with
+             | Cmd.LAction (_, "GetCell", [_; field]) ->
+                 let value = match field with
+                   | Expr.PVar name -> Option.map Val.to_expr (Store.get store name)
+                   | Expr.Lit _ -> Some field | _ -> None in
+                 let known = ["value"; "path"; "ancestors"; "copies";
+                   "@class"; "@proto"; "length"] in
+                 let category = match value with
+                   | Some (Expr.Lit (Utf16String key)) ->
+                       List.find_opt (fun name -> Utf16.equal key
+                         (Utf16.of_canonical name)) known
+                       |> Option.value ~default:"literal-other"
+                   | Some (Expr.Lit _) -> "literal-other"
+                   | _ -> "symbolic" in
+                 " fieldCategory=" ^ category
+             | _ -> ""
+           in
            let command =
-             Fmt.str "%s:%d%s stack=%a %a" proc_name i callable pp_str_list
+             Fmt.str "%s:%d%s%s stack=%a %a" proc_name i callable recovery_field pp_str_list
                (take_frames 8 (Call_stack.get_cur_procs cs)) Cmd.pp_indexed cmd
            in
            let command = String.sub command 0 (min 1024 (String.length command)) in

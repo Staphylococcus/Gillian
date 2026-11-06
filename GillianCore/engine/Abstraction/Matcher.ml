@@ -520,10 +520,12 @@ module Make (State : SState.S) :
       SS.cardinal inter
   end
 
+  let recovery_unfold_diagnostics = ref 0
+
   let consume_pred_with_vs
       ~(auto_level : [ `Low | `High ])
       (astate : t)
-      (values : Expr.t list) : abs_t option =
+      (values : Expr.t list) : (abs_t * int) option =
     let { state; preds; pred_defs; _ } = astate in
 
     let wrap_strategy f (name, args) =
@@ -537,8 +539,10 @@ module Make (State : SState.S) :
     in
 
     let apply_strategies (strategies : (string * Expr.t list -> int) list) :
-        (string * Expr.t list) option =
-      List.find_map (Preds.strategic_choice ~consume:true preds) strategies
+        (abs_t * int) option =
+      List.find_mapi (fun index strategy ->
+          Preds.strategic_choice ~consume:true preds strategy
+          |> Option.map (fun chosen -> chosen, index + 1)) strategies
     in
     let open Predicate_selection_strategies in
     let strategies =
@@ -559,9 +563,9 @@ module Make (State : SState.S) :
     lifecycle "selection-after" astate (fun () -> `Assoc [
       "level",`String (match auto_level with `Low -> "Low" | `High -> "High");
       "selected",(match selected with None -> `Null
-        | Some (name,args) when Owned_prefix_lifecycle.focused name ->
+        | Some ((name,args),_) when Owned_prefix_lifecycle.focused name ->
             `List [`String name;`List (List.map Expr.to_yojson args)]
-        | Some (name,_) -> `Assoc ["other_predicate",`String name])]);
+        | Some ((name,_),_) -> `Assoc ["other_predicate",`String name])]);
     selected
 
   let select_guarded_predicate_to_fold (astate : t) (values : Expr.t list) :
@@ -1281,9 +1285,30 @@ module Make (State : SState.S) :
     if !Config.manual_proof then None
     else
       match consume_pred_with_vs ~auto_level astate vs with
-      | Some (pname, v_args) -> (
+      | Some ((pname, v_args), strategy) -> (
           L.verbose (fun m -> m "FOUND STH TO UNFOLD: %s!!!!\n" pname);
-          let rets = unfold (copy_astate astate) pname v_args in
+          let rets = try unfold (copy_astate astate) pname v_args with exn ->
+            let backtrace = Printexc.get_raw_backtrace () in
+            (* Failure-only scalar observation; never evaluate expressions,
+               replay a strategy, print values or change exception identity. *)
+            (try if Sys.getenv_opt "GILLIAN_RECOVERY_SELECTION_PROFILE" = Some "1"
+                    && !recovery_unfold_diagnostics < 8 then (
+               incr recovery_unfold_diagnostics;
+               let pred = Predicate_selection_strategies.get_pred_def
+                 ~pred_defs:astate.pred_defs pname in
+               let shares args = List.exists (fun value ->
+                 match value with Expr.Lit _ -> false
+                   | _ -> List.exists (Expr.equal value) args) vs in
+               let safe_name = if String.length pname > 128 then "<oversize>"
+                 else String.map (function '\n' | '\r' -> '_' | c -> c) pname in
+               L.normal (fun m -> m
+                 "RECOVERY_UNFOLD_FAILURE level=%s predicate=%s strategy=%d values=%d directIn=%b directOut=%b"
+                 (match auto_level with `Low -> "Low" | `High -> "High")
+                 safe_name strategy (List.length vs)
+                 (shares (Pred.in_args pred v_args))
+                 (shares (Pred.out_args pred v_args))))
+             with _ -> ());
+            Printexc.raise_with_backtrace exn backtrace in
           let only_successes, only_errors = Res_list.split rets in
           match only_errors with
           | [] ->
