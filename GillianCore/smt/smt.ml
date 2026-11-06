@@ -4741,7 +4741,7 @@ let formatted_index_model fs gamma =
     ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
     ~raw_unknown:true query gamma with SMT_unknown -> None
 
-(* A formatter-dependent Number compared to a finite literal, or whose
+(* A formatter- or integer-conversion-dependent Number compared to a finite literal, or whose
    finite-literal subtraction chain is compared to numeric zero, can try one
    complete-query search hint. Fold offsets innermost first, preserving the
    original literal bits at depth one. The host-rounded sum is only a guess,
@@ -4751,13 +4751,13 @@ let formatted_index_model fs gamma =
    A rejected/unknown guess leaves the unchanged required query below. *)
 let literal_formatter_witness_query fs gamma =
   if not !Config.Verification.total || !Config.under_approximation then None else
-  let formatted = ref SS.empty in
+  let bridged = ref SS.empty in
   let visitor = object
     inherit [_] Visitors.iter as super
     method! visit_expr () e =
       (match e with
-       | Expr.UnOp (NumberToUtf16, value) ->
-           formatted := SS.union !formatted (Expr.lvars value)
+       | Expr.UnOp ((NumberToUtf16 | NumToInt), value) ->
+           bridged := SS.union !bridged (Expr.lvars value)
        | _ -> ());
       super#visit_expr () e
   end in
@@ -4784,7 +4784,7 @@ let literal_formatter_witness_query fs gamma =
     | _ -> None in
   let candidates = Expr.Set.fold (fun atom candidates -> match candidate atom with
     | Some (name,n,literal)
-      when Float.is_finite n && SS.mem name !formatted
+      when Float.is_finite n && SS.mem name !bridged
         && Hashtbl.find_opt gamma name = Some Type.NumberType ->
         let fixed = Expr.Set.exists (function
           | Expr.BinOp (LVar x, ValueEqual, Lit (Num _))

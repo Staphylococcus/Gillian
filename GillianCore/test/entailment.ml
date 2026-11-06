@@ -19942,7 +19942,8 @@ let tests = tests @
        (with_total native_context_scopes_only)]
    | None -> [])
 
-let literal_formatter_fixture ?(difference=false) ?(tail_offsets=[]) ?(reverse=false) label literal =
+let literal_formatter_fixture ?(difference=false) ?(tail_offsets=[]) ?(reverse=false)
+    ?(integer_index=false) label literal =
   let name = "#literal_formatter_" ^ label in
   let index = Expr.LVar name and keys = Expr.LVar (name ^ "_keys")
   and values = Expr.LVar (name ^ "_values") in
@@ -19956,11 +19957,13 @@ let literal_formatter_fixture ?(difference=false) ?(tail_offsets=[]) ?(reverse=f
         (bin FMinus index (Expr.num literal)) tail_offsets, Expr.num 0.
     else index, Expr.num literal in
   let comparison = if reverse then bin Equal right left else bin Equal left right in
-  let fs = Expr.Set.of_list [comparison;
+  let bridge = if integer_index then
+      [bin ILessThanEqual (Expr.UnOp (NumToInt,index)) (Expr.int 4294967295)]
+    else [not_ (bin SetMem (format 1.) keys);not_ (bin SetMem (format 2.) keys)] in
+  let fs = Expr.Set.of_list ([comparison;
     Expr.UnOp (IsInt,index);bin FLessThanEqual (Expr.num 0.) index;
-    bin FLessThanEqual index (Expr.num 4294967295.);
-    not_ (bin SetMem (format 1.) keys);not_ (bin SetMem (format 2.) keys);
-    bin Equal (Expr.UnOp (LstLen,values)) (Expr.int 2)] in
+    bin FLessThanEqual index (Expr.num 4294967295.)]
+    @ bridge @ [bin Equal (Expr.UnOp (LstLen,values)) (Expr.int 2)]) in
   fs,gamma,index,keys,format
 
 let literal_formatter_attempt label fs gamma index literal expected =
@@ -20279,4 +20282,60 @@ let tests = tests @
    | Some _,None -> [
        Alcotest.test_case "finite seed pairs decline strict conflicts and retain compatible models" `Quick
          (with_total compatible_seed_pairs)]
+   | _ -> [])
+
+(* The same full-query hint at a NumToInt bridge, without any formatter. *)
+let literal_cast_native () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,reverse) ->
+    let fs,gamma,index,_,_ = literal_formatter_fixture ~difference:true
+      ~tail_offsets:[1.;1.] ~reverse ~integer_index:true label 1. in
+    let model = Option.get (literal_formatter_attempt label fs gamma index 3. true) in
+    let name = match index with Expr.LVar name -> name | _ -> assert false in
+    primary_check_lift label model gamma [name,Literal.Num 3.];
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " public cast-only query") true
+      (Option.is_some (Smt.check_sat fs gamma));
+    ignore (nonblank_counter_observe label before "optional-literal-formatter" "sat"
+      (Expr.Set.add (bin ValueEqual index (Expr.num 3.)) fs) gamma);
+    let files = nonblank_counter_files () in
+    ignore (Smt.check_sat fs gamma);
+    Alcotest.(check bool) (label ^ " unchanged original-key cache") true
+      (files = nonblank_counter_files ())) ["cast_three",false;"alpha_cast_three",true];
+  let label = "cast_opposite_zero" in
+  let fs,gamma,index,_,_ = literal_formatter_fixture ~difference:true
+    ~tail_offsets:[0.;0.] ~integer_index:true label 0. in
+  let opposite = Expr.Set.add (not_ (bin ValueEqual index (Expr.num 0.))) fs in
+  ignore (literal_formatter_attempt label opposite gamma index 0. false);
+  let before = nonblank_counter_rows () in
+  let model = Option.get (Smt.check_sat opposite gamma) in
+  ignore (nonblank_counter_observe label before "required-complete" "sat" opposite gamma);
+  primary_check_lift label model gamma ["#literal_formatter_" ^ label,Literal.Num (-0.)];
+  let fs,gamma,index,_,_ = literal_formatter_fixture ~difference:true
+    ~tail_offsets:[1.;1.] ~integer_index:true "cast_false_frame" 1. in
+  let name = match index with Expr.LVar name -> name | _ -> assert false in
+  let false_frame = Expr.Set.add (bin Equal
+    (Expr.UnOp (LstLen,Expr.LVar (name ^ "_values"))) (Expr.int 3)) fs in
+  ignore (literal_formatter_attempt "retained list frame" false_frame gamma index 3. false);
+  Alcotest.(check bool) "full contradictory list frame is required UNSAT" true
+    (Option.is_none (Smt.exec_sat ~caller_kind:"control-literal-cast-frame" false_frame gamma));
+  let before = nonblank_counter_rows () in
+  let no_bridge = Expr.Set.remove (bin ILessThanEqual
+    (Expr.UnOp (NumToInt,index)) (Expr.int 4294967295)) fs in
+  Alcotest.(check bool) "no numeric bridge declines" true
+    (Option.is_none (Smt.literal_formatter_witness_query no_bridge gamma));
+  let other = "#cast_unrelated" in
+  let other_gamma = Hashtbl.copy gamma in
+  Hashtbl.add other_gamma other Type.NumberType;
+  let unrelated = Expr.Set.add (bin ILessThanEqual
+    (Expr.UnOp (NumToInt,Expr.LVar other)) (Expr.int 4294967295)) no_bridge in
+  Alcotest.(check bool) "another variable's cast does not qualify the candidate" true
+    (Option.is_none (Smt.literal_formatter_witness_query unrelated other_gamma));
+  Alcotest.(check bool) "declining cast guards do not dispatch" true
+    (before = nonblank_counter_rows ()))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "literal cast full-frame native model fallback and declines" `Quick
+         (with_total literal_cast_native)]
    | _ -> [])

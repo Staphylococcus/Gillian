@@ -77,7 +77,7 @@ val positive_trace_index_model :
 val formatted_index_model :
   Expr.Set.t -> (string, Type.t) Hashtbl.t -> model option
 
-(** One finite candidate for a typed Number used by a formatter, compared
+(** One finite candidate for a typed Number used by a formatter or integer conversion, compared
     directly to a literal or by a finite subtraction chain equal to zero.
     The entire original FS and Gamma remain; the added
     ValueEqual is a search hint, not a consequence (especially for signed zero).
