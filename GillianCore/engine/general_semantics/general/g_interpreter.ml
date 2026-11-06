@@ -2163,15 +2163,19 @@ struct
                    | Expr.PVar name -> Option.map Val.to_expr (Store.get store name)
                    | Expr.Lit _ -> Some field | _ -> None in
                  let known = ["value"; "path"; "ancestors"; "copies";
-                   "@class"; "@proto"; "length"] in
-                 let category = match value with
+                   "@class"; "@proto"; "length"; "push"; "set"; "has";
+                   "add"; "delete"; "concat"] in
+                 let classify = function
                    | Some (Expr.Lit (Utf16String key)) ->
                        List.find_opt (fun name -> Utf16.equal key
                          (Utf16.of_canonical name)) known
                        |> Option.value ~default:"literal-other"
                    | Some (Expr.Lit _) -> "literal-other"
                    | _ -> "symbolic" in
-                 " fieldCategory=" ^ category
+                 let requested = if proc_name = "getOwnProperty"
+                   then Option.map Val.to_expr (Store.get store "prop") else None in
+                 " fieldCategory=" ^ classify value ^
+                   " requestedProperty=" ^ classify requested
              | _ -> ""
            in
            let command =

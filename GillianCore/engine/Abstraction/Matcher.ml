@@ -1301,12 +1301,16 @@ module Make (State : SState.S) :
                    | _ -> List.exists (Expr.equal value) args) vs in
                let safe_name = if String.length pname > 128 then "<oversize>"
                  else String.map (function '\n' | '\r' -> '_' | c -> c) pname in
+               let trace_mask = if pname = "S05CopyTrace" && List.length v_args = 5
+                 then List.mapi (fun i arg -> if shares [arg] then 1 lsl i else 0) v_args
+                      |> List.fold_left (lor) 0
+                 else 0 in
                L.normal (fun m -> m
-                 "RECOVERY_UNFOLD_FAILURE level=%s predicate=%s strategy=%d values=%d directIn=%b directOut=%b"
+                 "RECOVERY_UNFOLD_FAILURE level=%s predicate=%s strategy=%d values=%d directIn=%b directOut=%b traceInputMask=%d"
                  (match auto_level with `Low -> "Low" | `High -> "High")
                  safe_name strategy (List.length vs)
                  (shares (Pred.in_args pred v_args))
-                 (shares (Pred.out_args pred v_args))))
+                 (shares (Pred.out_args pred v_args)) trace_mask))
              with _ -> ());
             Printexc.raise_with_backtrace exn backtrace in
           let only_successes, only_errors = Res_list.split rets in
