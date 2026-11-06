@@ -169,6 +169,25 @@ module Make (State : SState.S) :
         `List [`String name;`List (List.map Expr.to_yojson args)]) tuples);
         "details",fields ()])
 
+  (* Passive, bounded scalar observation. Never evaluates a proof expression. *)
+  let summary_audit_calls = ref 0
+  let summary_audit_events = ref 0
+  let summary_activation audit branch phase astate =
+    match audit with
+    | None -> ()
+    | Some (id, _) ->
+        if !summary_audit_events < 64 then (
+          incr summary_audit_events;
+          let owners = List.fold_left (fun n (name, _) ->
+            if name = "S05CopyLeafActivation" then n + 1 else n)
+              0 (Preds.to_list astate.preds) in
+          L.normal (fun m -> m
+            "SUMMARY_ACTIVATION id=%d branch=%d phase=%s owners=%d"
+            id branch phase owners))
+        else if !summary_audit_events = 64 then (
+          incr summary_audit_events;
+          L.normal (fun m -> m "SUMMARY_ACTIVATION capped"))
+
   let simplify
       ?(save = false)
       ?(kill_new_lvars : bool option)
@@ -331,6 +350,14 @@ module Make (State : SState.S) :
       (astate : t) : (t * Flag.t, SMatcher.err_t) Res_list.t =
     let open Res_list.Syntax in
     let open Syntaxes.List in
+    let audit =
+      if name = "AP_push" &&
+         Sys.getenv_opt "GILLIAN_SUMMARY_ACTIVATION_PROFILE" = Some "1" then (
+        incr summary_audit_calls;
+        Some (!summary_audit_calls, ref 0))
+      else None
+    in
+    summary_activation audit 0 "entry" astate;
     L.verbose (fun m ->
         m "INSIDE RUN spec of %s (%d more) with the following MP:@\n%a@\n" name
           (List.length more_specs) MP.pp mp);
@@ -369,6 +396,11 @@ module Make (State : SState.S) :
           m "WARNING: Failed to match against the precondition of procedure %s"
             name);
     let** frame_state, subst, posts = res in
+    let audit_branch = match audit with
+      | None -> 0
+      | Some (_, next) -> incr next; !next
+    in
+    summary_activation audit audit_branch "frame" frame_state;
 
     let fl, posts =
       match posts with
@@ -410,6 +442,7 @@ module Make (State : SState.S) :
        lemma_stage name "concrete-unfold";
        match SMatcher.unfold_concrete_preds final_state with
        | Some (_, with_unfolded_concrete) ->
+           summary_activation audit audit_branch "return" with_unfolded_concrete;
            if name = "S05CopyAppendCell" then
              lifecycle "apply-post-concrete-unfold" with_unfolded_concrete (fun () -> `Null);
            Some (Ok (with_unfolded_concrete, fl))
