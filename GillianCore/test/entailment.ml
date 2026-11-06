@@ -20642,3 +20642,52 @@ let tests = tests @
        Alcotest.test_case "coherent formatter all bounds raw pins false frame and SAT alternative" `Quick
          (with_total coherent_formatter_rejections)]
    | _ -> [])
+
+(* Observe the real production boundary, rather than guessing that a leading
+   satisfiability constraint is an entailment goal. *)
+let production_domain_consistency_context () = with_nonblank_counter_trace (fun () ->
+  let huge = Expr.EList (List.init 4096 (fun i -> Expr.int i)) in
+  let excerpt,truncated = Engine.Totality.production_fact_excerpt huge in
+  Alcotest.(check bool) "large provenance formatting stops at384 bytes" true
+    (String.length excerpt <= 384 && truncated);
+  let value = Expr.LVar "#production_context_value"
+  and text = Expr.LVar "#production_context_text" in
+  let gamma = Gamma.init () in
+  Gamma.update gamma "#production_context_text" Type.Utf16Type;
+  let facts = [bin Equal (Expr.UnOp (Utf16Len, text)) (Expr.int 3)] in
+  let declared = bin Equal (Expr.UnOp (TypeOf, value)) (Expr.Lit (Type Type.NumberType)) in
+  let calls = ref 0 and staged = ref [] in
+  let evaluate facts e = Engine.Reduction.reduce_lexpr
+    ~pfs:(Engine.PFS.of_list facts) ~gamma e in
+  let assertion facts e = Solver.check_entailment Utils.Containers.SS.empty
+    (Engine.PFS.of_list facts) [e] gamma in
+  let assume facts ready =
+    incr calls; staged := ready;
+    if Solver.check_satisfiability (ready @ facts) gamma
+    then Some (ready @ facts) else None in
+  let _,contexts = pending_context_capture (fun () ->
+    Engine.Totality.check_assertion_production ~evaluate ~assertion ~assume facts
+      [Asrt.definedness ~fact:true declared;
+       Asrt.definedness ~fact:false (Expr.UnOp (NumberToUtf16, value))]) in
+  Alcotest.(check int) "exactly one original consistency call" 1 !calls;
+  Alcotest.(check bool) "only the independently checked fact is staged" true
+    (List.equal Expr.equal [declared] !staged);
+  let context = pending_context_scope "production-domain-consistency" contexts in
+  Alcotest.(check bool) "origin records actual batch count" true
+    (pending_context_field "staged_fact_count" context = `Int 1);
+  Alcotest.(check bool) "origin records actual staged fact" true
+    (pending_context_field "staged_facts" context =
+      `List [`String (Fmt.str "%a" Expr.pp declared)]);
+  Alcotest.(check bool) "short original fact is not marked truncated" true
+    (pending_context_field "excerpts_truncated" context = `Bool false);
+  let inner = pending_context_scope "satisfiability" contexts in
+  Alcotest.(check bool) "native consistency retains fact plus original frame" true
+    (pending_context_field "original_fs" inner =
+      `List (List.map (fun e -> `String (Fmt.str "%a" Expr.pp e)) (declared :: facts))))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "production domain consistency actual staged fact provenance" `Quick
+         (with_total production_domain_consistency_context)]
+   | _ -> [])

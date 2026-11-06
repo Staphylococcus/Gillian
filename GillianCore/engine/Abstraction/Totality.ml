@@ -344,6 +344,20 @@ let preserve_assertion_domains a =
 
 exception Pending_domain of Expr.t
 
+(* Optional provenance must not render a whole fact or interrupt the check. *)
+let production_fact_excerpt e =
+  let buffer = Buffer.create 128 and remaining = ref 384 in
+  let exception Full in
+  let formatter = Format.make_formatter (fun text offset length ->
+    let amount = min length !remaining in
+    Buffer.add_substring buffer text offset amount;
+    remaining := !remaining - amount;
+    if amount < length then raise Full) (fun () -> ()) in
+  let truncated = try Expr.pp formatter e; Format.pp_print_flush formatter (); false
+    with Full -> true | _ -> Buffer.clear buffer;
+      Buffer.add_string buffer "diagnostic formatting unavailable"; true in
+  (Buffer.contents buffer, truncated)
+
 (* Work on a disposable state. Only independently defined original facts may
    enter the domain context; an unchecked fact cannot justify itself or another
    unchecked fact. A contradictory checked fact is genuine infeasibility. *)
@@ -435,7 +449,18 @@ let check_assertion_production ~evaluate ~assertion ~assume state a =
       else
         (* Batch independently checked facts: no pending fact enters the context,
            and one consistency query suffices for this round. *)
-        match assume state (List.rev ready) with
+        match Smt.with_native_smt_context
+          (fun () ->
+            let staged = List.rev ready in
+            let first = match staged with a :: b :: _ -> [a; b] | xs -> xs in
+            let excerpts = List.map production_fact_excerpt first in
+            `Assoc [
+              ("operation", `String "production-domain-consistency");
+              ("staged_fact_count", `Int (List.length staged));
+              ("excerpts_truncated", `Bool (List.exists snd excerpts));
+              ("staged_facts", `List (List.map
+                (fun (text, _) -> `String text) excerpts)) ])
+          (fun () -> assume state (List.rev ready)) with
         | None -> ()
         | Some state -> establish ~quick:true state (List.rev deferred)
     in
