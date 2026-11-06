@@ -924,8 +924,8 @@ struct
           let saved =
             let vars = Store.lvars old_store in
             (* Only predicate abstraction can rename existing heap locations.
-               Plain execution must not accumulate every allocated location as
-               a permanent proof identity (and print it at every step). *)
+               Plain execution retains its existing logical-variable policy;
+               predicate execution also protects saved abstract locations. *)
             if List.mem !Config.current_exec_mode Exec_mode.exec_with_preds then
               Store.fold old_store
                 (fun _ value saved ->
@@ -933,9 +933,7 @@ struct
                 vars
             else vars
           in
-          let state =
-            if SS.is_empty saved then state else State.add_spec_vars state saved
-          in
+          let state = State.push_call_pins state saved in
           let state' = State.set_store state new_store in
           let cs' =
             (* Note the new loop identifiers *)
@@ -1817,6 +1815,7 @@ struct
               in
               let state' = State.set_store state old_store in
               let state'' = update_store state' x v_ret in
+              let state'' = State.pop_call_pins state'' in
               let iframes =
                 if Exec_mode.is_verification_exec !Config.current_exec_mode then
                   pop_frames to_frame_on iframes
@@ -1886,6 +1885,7 @@ struct
             in
             let state' = State.set_store state old_store in
             let state'' = update_store state' x v_ret in
+            let state'' = State.pop_call_pins state'' in
             let iframes =
               if Exec_mode.is_verification_exec !Config.current_exec_mode then
                 pop_frames to_frame_on iframes

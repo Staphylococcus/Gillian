@@ -274,6 +274,12 @@ module Make (State : SState.S) :
     let state = State.add_spec_vars astate.state vs in
     { astate with state }
 
+  let push_call_pins (astate : t) pins : t =
+    { astate with state = State.push_call_pins astate.state pins }
+
+  let pop_call_pins (astate : t) : t =
+    { astate with state = State.pop_call_pins astate.state }
+
   let get_spec_vars (astate : t) : Var.Set.t = State.get_spec_vars astate.state
 
   let get_lvars (astate : t) : Var.Set.t =

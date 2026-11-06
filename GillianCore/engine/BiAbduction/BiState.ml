@@ -138,6 +138,12 @@ module Make (State : SState.S) = struct
     let state' = State.add_spec_vars state vs in
     { bi_state with state = state' }
 
+  let push_call_pins (bi_state : t) pins : t =
+    { bi_state with state = State.push_call_pins bi_state.state pins }
+
+  let pop_call_pins (bi_state : t) : t =
+    { bi_state with state = State.pop_call_pins bi_state.state }
+
   let get_spec_vars ({ state; _ } : t) : Var.Set.t = State.get_spec_vars state
   let get_lvars ({ state; _ } : t) : Var.Set.t = State.get_lvars state
 

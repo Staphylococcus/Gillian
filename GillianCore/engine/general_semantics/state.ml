@@ -102,7 +102,12 @@ module type S = sig
   (** Add Spec Var *)
   val add_spec_vars : t -> Var.Set.t -> t
 
-  (** Get Spec Vars *)
+  (** Protect identities in one suspended caller store, independently of
+      permanent proof binders. Release only after restoring that caller. *)
+  val push_call_pins : t -> Var.Set.t -> t
+  val pop_call_pins : t -> t
+
+  (** Get permanent proof binders and all active caller protections. *)
   val get_spec_vars : t -> Var.Set.t
 
   (** Get all logical variables *)

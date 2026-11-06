@@ -95,6 +95,19 @@ struct
 
                     let new_store = Store.init (List.combine params args) in
                     let old_store = State.get_store state in
+                    (* Eval creates an ordinary suspended-store frame too. Its
+                       return must release this scope, never an ancestor's. *)
+                    let saved =
+                      let vars = Store.lvars old_store in
+                      if List.mem !Gillian.Utils.Config.current_exec_mode
+                           Gillian.Utils.Exec_mode.exec_with_preds then
+                        Store.fold old_store
+                          (fun _ value saved ->
+                            Gillian.Utils.Containers.SS.union saved
+                              (Expr.alocs (Val.to_expr value))) vars
+                      else vars
+                    in
+                    let state = State.push_call_pins state saved in
                     let state' = State.set_store state new_store in
                     let loop_ids = Call_stack.get_loop_ids cs in
                     let cs' =

@@ -2822,6 +2822,147 @@ let ordinary_concrete_summary_unfolds () =
            (Expr.BinOp (value, Equal, Expr.int 8)))
   | _ -> Alcotest.fail "ordinary concrete predicate must still auto-unfold"
 
+
+module PinMemory = struct
+  include Engine.SMemory.Dummy
+  let mem_constraints _ = []
+  let get_print_info variables _ = variables, Utils.Containers.SS.empty
+  let substitution_in_place ~pfs:_ ~gamma:_ _ heap = [heap,Expr.Set.empty,[]]
+  let assertions ?to_keep:_ _ = []
+  let lvars _ = Utils.Containers.SS.empty
+  let alocs _ = Utils.Containers.SS.empty
+  let clean_up ?keep:_ _ = Expr.Set.empty,Expr.Set.empty
+  let sure_is_nonempty _ = false
+end
+module PinState = Engine.SState.Make (PinMemory)
+module PinPState = Engine.PState.Make (PinState)
+module PinInterpreter = Engine.G_interpreter.Make (Engine.SVal.M)
+  (Engine.SVal.SESubst) (Engine.SStore) (PinPState) (ParserAndCompiler.Dummy)
+  (Engine.External.Dummy (ParserAndCompiler.Dummy.Annot))
+
+(* Caller roots have a dynamic lifetime; proof binders do not. Exercise actual
+   state copies, simplification, JSON reconstruction and protected aliases. *)
+let caller_pin_scopes () =
+  let module S = PinState in
+  let module SS = Utils.Containers.SS in
+  let names xs = SS.of_list xs in
+  let checks label expected state =
+    Alcotest.(check bool) label true
+      (SS.equal (names expected) (S.get_spec_vars state)) in
+  let outer = S.init () |> fun s -> S.add_spec_vars s (names ["#permanent"])
+    |> fun s -> S.push_call_pins s (names ["#outer";"#shared"]) in
+  let nested = S.copy outer
+    |> fun s -> S.push_call_pins s (names ["#inner";"#shared"])
+    |> fun s -> S.add_spec_vars s (names ["#callee_binder";"#inner"]) in
+  checks "inner roots are protected"
+    ["#permanent";"#outer";"#shared";"#inner";"#callee_binder"] nested;
+  Alcotest.(check bool) "inactive-store identities remain live" true
+    (SS.subset (names ["#outer";"#shared"]) (S.get_lvars nested));
+  let restored = match S.of_yojson (S.to_yojson nested) with
+    | Ok s -> s | Error e -> Alcotest.fail e in
+  let returned = S.pop_call_pins restored in
+  checks "nested return keeps outer roots and new permanent binders"
+    ["#permanent";"#outer";"#shared";"#inner";"#callee_binder"] returned;
+  checks "outer return releases only caller roots"
+    ["#permanent";"#inner";"#callee_binder"] (S.pop_call_pins returned);
+  checks "returning a copied branch does not unpin its sibling"
+    ["#permanent";"#outer";"#shared"] outer;
+  let empty = S.push_call_pins outer SS.empty |> S.pop_call_pins in
+  checks "empty call scope does not pop its parent"
+    ["#permanent";"#outer";"#shared"] empty;
+  Alcotest.check_raises "unbalanced pop fails instead of dropping proof roots"
+    (Invalid_argument "pop_call_pins: no suspended caller")
+    (fun () -> ignore (S.pop_call_pins (S.init ())))
+
+let caller_pin_simplification () =
+  let module S = PinState in
+  let module SS = Utils.Containers.SS in
+  let x = Expr.LVar "#saved_caller" in
+  let state = S.push_call_pins (S.init ()) (SS.singleton "#saved_caller") in
+  Engine.PFS.extend (S.get_pfs state) (Expr.BinOp (x,Equal,Expr.int 7));
+  Engine.Type_env.update (S.get_typ_env state) "#saved_caller" Type.IntType;
+  let subst,states = S.simplify ~save:true state in
+  Alcotest.(check bool) "callee simplification cannot rewrite suspended roots" true
+    (ReturnSubst.get subst x = None);
+  match states with
+  | [state] ->
+      Alcotest.(check bool) "the protected binding still denotes its value" true
+        (S.assert_a state [Expr.BinOp (x,Equal,Expr.int 7)]);
+      let returned = S.pop_call_pins state in
+      Alcotest.(check bool) "simplification reconstruction preserved call depth" true
+        (SS.is_empty (S.get_spec_vars returned));
+      let subst,_ = S.simplify ~save:true returned in
+      Alcotest.(check bool) "released root becomes eligible for simplification" true
+        (ReturnSubst.get subst x = Some (Expr.int 7))
+  | _ -> Alcotest.fail "one caller binding must remain feasible"
+
+let caller_pin_alias_rejection () =
+  let module S = PinState in
+  let a = Expr.ALoc "#caller_pin_a" and b = Expr.ALoc "#caller_pin_b" in
+  let state = S.push_call_pins (S.init ())
+    (Utils.Containers.SS.of_list ["#caller_pin_a";"#caller_pin_b"]) in
+  Engine.PFS.extend (S.get_pfs state) (Expr.BinOp (a,Equal,b));
+  let rejected = try ignore (S.simplify ~matching:true state); false with
+    | Utils.Gillian_result.Exc.Gillian_error
+        (Utils.Gillian_result.Error.AnalysisFailures [{msg;_}]) ->
+        msg = "Cannot merge distinct protected heap locations" in
+  Alcotest.(check bool) "scoped protection still rejects aliasing live heap roots"
+    true rejected
+
+let caller_pin_interpreter caught () =
+  let module SS = Utils.Containers.SS in
+  let module Config = Utils.Config in
+  let saved_mode = !Config.current_exec_mode
+  and saved_total = !Config.Verification.total in
+  Fun.protect ~finally:(fun () -> Config.current_exec_mode := saved_mode;
+      Config.Verification.total := saved_total) (fun () ->
+    Config.current_exec_mode := Utils.Exec_mode.Verification;
+    (* FreshSVar is deliberately outside the total proof fragment. This
+       exercises interpreter lifetime semantics; full80 keeps its total gate. *)
+    Config.Verification.total := false;
+    let call name error = Cmd.Call ({Cmd.var_name="answer";
+      fun_name=Expr.string name;args=[];bindings=None},error) in
+    let ret e = Cmd.Assignment (Utils.Names.return_variable,e) in
+    let procedure name params cmds : (Annot.Basic.t,int) Proc.t = {
+      proc_name=name;proc_source_path=None;proc_internal=false;
+      proc_body=Array.of_list (List.mapi (fun i c -> Annot.Basic.make (),Some i,c) cmds);
+      proc_params=params;proc_spec=None;proc_aliases=[];proc_calls=[];
+      proc_display_name=None;proc_hidden=false } in
+    let leaf = procedure "leaf" [] [Cmd.Logic (LCmd.FreshSVar "binder");
+      ret (Expr.PVar "binder");(if caught then Cmd.ReturnError else Cmd.ReturnNormal)] in
+    let middle = procedure "middle" []
+      [Cmd.Assignment ("local",Expr.LVar "#middle_only");
+       call "leaf" (if caught then Some 3 else None);
+       Cmd.Fail ("must use caught-error edge",[]);
+       ret (Expr.PVar "answer");Cmd.ReturnNormal] in
+    let middle = if caught then middle else
+      procedure "middle" [] [Cmd.Assignment ("local",Expr.LVar "#middle_only");
+        call "leaf" None;ret (Expr.PVar "answer");Cmd.ReturnNormal] in
+    let main = procedure "main" ["saved";"saved_location"]
+      [call "middle" None;ret (Expr.EList [Expr.PVar "saved";
+        Expr.PVar "saved_location";Expr.PVar "answer"]);Cmd.ReturnNormal] in
+    let table = Hashtbl.create 3 in
+    List.iter (fun p -> Hashtbl.add table p.Proc.proc_name p) [main;middle;leaf];
+    let empty () = Hashtbl.create 0 in
+    let prog = Prog.make ~imports:[] ~lemmas:(empty ()) ~preds:(empty ())
+      ~funcs:(empty ()) ~datatypes:(empty ()) ~only_specs:(empty ()) ~procs:table
+      ~macros:(empty ()) ~bi_specs:(empty ()) ~proc_names:["main";"middle";"leaf"]
+      ~predecessors:(empty ()) () |> Engine.MP.init_prog in
+    let saved = Expr.LVar "#saved_root" and loc = Expr.ALoc "#saved_location" in
+    let initial = PinPState.init () |> fun s -> PinPState.set_store s
+      (Engine.SStore.init ["saved",saved;"saved_location",loc]) in
+    match PinInterpreter.evaluate_proc Fun.id prog "main" main.proc_params initial with
+    | [Engine.Exec_res.RSucc {flag=Flag.Normal;ret_val=Expr.EList [x;l;binder];final_state;_}] ->
+        Alcotest.(check bool) "actual nested interpreter restores both saved identities" true
+          (Expr.equal x saved && Expr.equal l loc);
+        let expected = Expr.lvars binder in
+        Alcotest.(check bool) "callee-created permanent binder survives every return" true
+          (SS.cardinal expected=1 && SS.equal expected (PinPState.get_spec_vars final_state));
+        Alcotest.check_raises "normal and caught-error returns leave no call scopes"
+          (Invalid_argument "pop_call_pins: no suspended caller")
+          (fun () -> ignore (PinPState.pop_call_pins final_state))
+    | _ -> Alcotest.fail "nested normal/caught-error call must return one result")
+
 let tests =
   List.map (fun (name, test) -> Alcotest.test_case name `Quick test)
     [
@@ -2881,4 +3022,9 @@ let tests =
       ("user owner outputs preserve eligibility and source priority", with_total_return user_owner_dependencies);
       ("singleton owned output needs no alternative ranking", singleton_output_selection);
       ("singleton required output errors still propagate", with_total_return singleton_output_required_error);
+      ("caller pin scopes preserve nested and permanent identities", caller_pin_scopes);
+      ("caller pins protect only their suspended lifetime", with_total_return caller_pin_simplification);
+      ("caller pins preserve protected-location rejection", with_total_return caller_pin_alias_rejection);
+      ("caller pins release after actual nested normal returns", caller_pin_interpreter false);
+      ("caller pins release after actual caught-error return", caller_pin_interpreter true);
     ]

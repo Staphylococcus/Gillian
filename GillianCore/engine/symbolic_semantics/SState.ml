@@ -57,6 +57,7 @@ module Make (SMemory : SMemory.S) :
     pfs : PFS.t;
     gamma : Type_env.t;
     spec_vars : SS.t;
+    caller_pins : SS.t list [@default []];
   }
   [@@deriving yojson]
 
@@ -70,14 +71,17 @@ module Make (SMemory : SMemory.S) :
       ~(pfs : PFS.t)
       ~(gamma : Type_env.t)
       ~(spec_vars : SS.t) : t =
-    { heap; store; pfs; gamma; spec_vars }
+    { heap; store; pfs; gamma; spec_vars; caller_pins = [] }
 
   exception Internal_State_Error of err_t list * t
 
   module ES = Expr.Set
 
+  let get_spec_vars ({ spec_vars; caller_pins; _ } : t) : SS.t =
+    List.fold_left SS.union spec_vars caller_pins
+
   let pp fmt state =
-    let { heap; store; pfs; gamma; spec_vars } = state in
+    let { heap; store; pfs; gamma; _ } = state in
     let pp_heap fmt heap =
       if !Config.no_heap then Fmt.string fmt "NO HEAP PRINTED"
       else SMemory.pp fmt heap
@@ -96,13 +100,13 @@ module Make (SMemory : SMemory.S) :
        @[<v 2>TYPING ENVIRONMENT:@\n\
        %a@]"
       (Fmt.iter ~sep:Fmt.comma SS.iter Fmt.string)
-      spec_vars SStore.pp store pp_heap heap PFS.pp pfs Type_env.pp gamma
+      (get_spec_vars state) SStore.pp store pp_heap heap PFS.pp pfs Type_env.pp gamma
 
   let sure_is_nonempty { heap; _ } = SMemory.sure_is_nonempty heap
   let is_action_total = SMemory.is_action_total
 
   let pp_by_need pvars cmd_lvars cmd_locs fmt state =
-    let { heap = memory; store; pfs; gamma; spec_vars } = state in
+    let { heap = memory; store; pfs; gamma; _ } = state in
 
     let rec get_print_info (lvars : SS.t) (locs : SS.t) : SS.t * SS.t =
       (* let pp_str_list = Fmt.(brackets (list ~sep:comma string)) in
@@ -155,7 +159,7 @@ module Make (SMemory : SMemory.S) :
     (* Locations found in the pfs *)
     let lvars, locs = get_print_info lvars locs in
     (* Filter spec vars *)
-    let spec_vars = SS.filter (fun x -> SS.mem x lvars) spec_vars in
+    let spec_vars = SS.filter (fun x -> SS.mem x lvars) (get_spec_vars state) in
 
     (* TODO: Locations for the heap *)
     (* TODO: Logical variables for the pfs and gamma *)
@@ -191,6 +195,7 @@ module Make (SMemory : SMemory.S) :
       pfs = PFS.init ();
       gamma = Type_env.init ();
       spec_vars = SS.empty;
+      caller_pins = [];
     }
 
   let make_s
@@ -199,33 +204,33 @@ module Make (SMemory : SMemory.S) :
       ~(pfs : PFS.t)
       ~(gamma : Type_env.t)
       ~(spec_vars : SS.t) : t =
-    { heap = SMemory.init init_data; store; pfs; gamma; spec_vars }
+    { heap = SMemory.init init_data; store; pfs; gamma; spec_vars; caller_pins = [] }
 
   let execute_action (action : string) (state : t) (args : vt list) : action_ret
       =
     let open Syntaxes.List in
-    let { heap; store; pfs; gamma; spec_vars } = state in
+    let { heap; store; pfs; gamma; _ } = state in
     let pc = Gpc.make ~matching:false ~pfs ~gamma () in
     let+ Gbranch.{ value; pc } = SMemory.execute_action action heap pc args in
     match value with
     | Ok (new_heap, vs) ->
         let store = SStore.copy store in
         let new_state =
-          { heap = new_heap; store; pfs = pc.pfs; gamma = pc.gamma; spec_vars }
+          { state with heap = new_heap; store; pfs = pc.pfs; gamma = pc.gamma }
         in
         Ok (new_state, vs)
     | Error err -> Error (StateErr.EMem err)
 
   let consume_core_pred core_pred state in_args =
     let open Syntaxes.List in
-    let { heap; store; pfs; gamma; spec_vars } = state in
+    let { heap; store; pfs; gamma; _ } = state in
     let pc = Gpc.make ~matching:true ~pfs ~gamma () in
     let+ Gbranch.{ value; pc } = SMemory.consume core_pred heap pc in_args in
     match value with
     | Ok (new_heap, vs) ->
         let store = SStore.copy store in
         let new_state =
-          { heap = new_heap; store; pfs = pc.pfs; gamma = pc.gamma; spec_vars }
+          { state with heap = new_heap; store; pfs = pc.pfs; gamma = pc.gamma }
         in
         Ok (new_state, vs)
     | Error err -> Error (StateErr.EMem err)
@@ -238,13 +243,13 @@ module Make (SMemory : SMemory.S) :
 
   let produce_core_pred core_pred state args =
     let open Syntaxes.List in
-    let { heap; store; pfs; gamma; spec_vars } = state in
+    let { heap; store; pfs; gamma; _ } = state in
     (* matching false is suspicious here *)
     let pc = Gpc.make ~matching:false ~pfs ~gamma () in
     let+ Gbranch.{ value = new_heap; pc } =
       SMemory.produce core_pred heap pc args
     in
-    { heap = new_heap; store; pfs = pc.pfs; gamma = pc.gamma; spec_vars }
+    { state with heap = new_heap; store; pfs = pc.pfs; gamma = pc.gamma }
 
   let is_overlapping_asrt (a : string) : bool = SMemory.is_overlapping_asrt a
 
@@ -410,8 +415,9 @@ module Make (SMemory : SMemory.S) :
       ?(kill_new_lvars = true)
       ?(matching = false)
       (state : t) : st * t list =
-    let { heap; store; pfs; gamma; spec_vars } = state in
-    let save_spec_vars = (spec_vars, save) in
+    let { heap; store; pfs; gamma; _ } = state in
+    let protected = get_spec_vars state in
+    let save_spec_vars = (protected, save) in
     L.verbose (fun m ->
         m
           "-----------------------------------\n\
@@ -426,7 +432,7 @@ module Make (SMemory : SMemory.S) :
     let subst =
       SSubst.filter subst (fun x _ ->
           match x with
-          | LVar x | PVar x | ALoc x -> not (SS.mem x spec_vars)
+          | LVar x | PVar x | ALoc x -> not (SS.mem x protected)
           | _ -> true)
     in
     (* Sometimes, [simplify_pfs_and_gamma] leaves abstract locations on the
@@ -472,7 +478,7 @@ module Make (SMemory : SMemory.S) :
             in
             if not kill_new_lvars then
               Typing.naively_infer_type_information pfs gamma;
-            [ { heap = mem; store; pfs; gamma; spec_vars } ]
+            [ { state with heap = mem; store; pfs; gamma } ]
         | multi_mems ->
             List.map
               (fun (mem, lpfs, lgamma) ->
@@ -485,11 +491,11 @@ module Make (SMemory : SMemory.S) :
                 if not kill_new_lvars then
                   Typing.naively_infer_type_information bpfs bgamma;
                 {
+                  state with
                   heap = mem;
                   store = SStore.copy store;
                   pfs = bpfs;
                   gamma = bgamma;
-                  spec_vars;
                 })
               multi_mems
       in
@@ -515,14 +521,14 @@ module Make (SMemory : SMemory.S) :
     Reduction.reduce_lexpr ~gamma ~pfs v
 
   let copy (state : t) : t =
-    let { heap; store; pfs; gamma; spec_vars } = state in
+    let { heap; store; pfs; gamma; _ } = state in
     let result =
       {
+        state with
         heap = SMemory.copy heap;
         store = SStore.copy store;
         pfs = PFS.copy pfs;
         gamma = Type_env.copy gamma;
-        spec_vars;
       }
     in
     result
@@ -531,15 +537,23 @@ module Make (SMemory : SMemory.S) :
     let spec_vars = SS.union xs state.spec_vars in
     { state with spec_vars }
 
-  let get_spec_vars ({ spec_vars; _ } : t) : SS.t = spec_vars
+  (* These immutable scopes belong to suspended caller stores. Permanent proof
+     binders added by a callee must survive releasing its call scope. *)
+  let push_call_pins (state : t) (pins : SS.t) : t =
+    { state with caller_pins = pins :: state.caller_pins }
+
+  let pop_call_pins (state : t) : t =
+    match state.caller_pins with
+    | _ :: caller_pins -> { state with caller_pins }
+    | [] -> invalid_arg "pop_call_pins: no suspended caller"
 
   let get_lvars (state : t) : Var.Set.t =
-    let { heap; store; pfs; gamma; spec_vars } = state in
+    let { heap; store; pfs; gamma; _ } = state in
     SMemory.lvars heap
     |> SS.union (SStore.lvars store)
     |> SS.union (PFS.lvars pfs)
     |> SS.union (Type_env.lvars gamma)
-    |> SS.union spec_vars
+    |> SS.union (get_spec_vars state)
 
   let to_assertions ?(to_keep : SS.t option) (state : t) : Asrt.t =
     let { heap; store; pfs; gamma; _ } = state in
@@ -604,7 +618,7 @@ module Make (SMemory : SMemory.S) :
     let subst = SSubst.filter subst (fun x y -> not (Expr.equal x y)) in
     if SSubst.is_empty subst then [ state ]
     else
-      let { heap; store; pfs; gamma; spec_vars } = state in
+      let { heap; store; pfs; gamma; _ } = state in
       SStore.substitution_in_place ~subst_all subst store;
       PFS.substitution subst pfs;
       Typing.substitution_in_place subst gamma;
@@ -613,7 +627,7 @@ module Make (SMemory : SMemory.S) :
       | [ (mem, lpfs, lgamma) ] ->
           let () = Expr.Set.iter (PFS.extend pfs) lpfs in
           let () = List.iter (fun (t, v) -> Type_env.update gamma t v) lgamma in
-          [ { heap = mem; store; pfs; gamma; spec_vars } ]
+          [ { state with heap = mem; store; pfs; gamma } ]
       | multi_mems ->
           List.map
             (fun (mem, lpfs, lgamma) ->
@@ -624,11 +638,11 @@ module Make (SMemory : SMemory.S) :
                 List.iter (fun (t, v) -> Type_env.update bgamma t v) lgamma
               in
               {
+                state with
                 heap = mem;
                 store = SStore.copy store;
                 pfs = bpfs;
                 gamma = bgamma;
-                spec_vars;
               })
             multi_mems
 

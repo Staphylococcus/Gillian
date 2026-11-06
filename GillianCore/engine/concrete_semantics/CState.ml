@@ -121,6 +121,9 @@ end = struct
   let add_spec_vars _ _ =
     raise (Failure "ERROR: add_spec_var called for concrete executions")
 
+  let push_call_pins state _ = state
+  let pop_call_pins state = state
+
   let get_spec_vars _ =
     raise (Failure "ERROR: get_spec_vars called for concrete executions")
 
