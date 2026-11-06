@@ -1530,6 +1530,13 @@ module Make (State : SState.S) :
                 | Abort _ | Vanish -> ac
                 | Success state ->
                     let pf = Expr.BinOp (vd, ValueEqual, od) in
+                    if matching_profile_enabled then (
+                      let name = match fst step with
+                        | Asrt.CorePred (name, _, _) ->
+                            Option.value ~default:name (Asrt.as_user_pred_name name)
+                        | _ -> "-" in
+                      matching_profile
+                        (if Expr.equal vd od then "output-same" else "output-different") name);
                     cons_pure state pf)
               (Success state) vos eos
           in
