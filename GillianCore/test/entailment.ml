@@ -21092,11 +21092,19 @@ let predecessor_seed_rejections () = with_nonblank_counter_trace (fun () ->
     let fs = Expr.Set.add (bin ValueEqual (Expr.LVar name) (Expr.num zero)) fs in
     let model = Option.get (predecessor_seed_attempt label fs gamma index length 5. true) in
     primary_check_lift "existing raw zero is never replaced" model gamma [name,Literal.Num zero]) [0.;-0.];
-  let fs,gamma,index,length,_ = predecessor_seed_fixture "fixed_six" 4 0.
+  let fs,gamma,index,_,_ = predecessor_seed_fixture "fixed_six" 4 0.
     (fun l x -> bin FLessThan l x) in
   let fs = Expr.Set.add (bin ValueEqual index (Expr.num 6.)) fs in
-  ignore (predecessor_seed_attempt "existing fixed assignment takes precedence"
-    fs gamma index length 6. true);
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "fixed assignment with no new root preserves seed decline" true
+    (Option.is_none (Smt.seeded_model fs gamma));
+  Alcotest.(check bool) "fixed assignment adds no optional endpoint" true
+    (before = nonblank_counter_rows ());
+  let atoms = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let model = Option.get (Smt.check_sat fs gamma) in
+  let name = match index with Expr.LVar n -> n | _ -> assert false in
+  primary_check_lift "fixed assignment survives the original fallback" model gamma [name,Literal.Num 6.];
+  nonblank_counter_retained "fixed assignment fallback" fs gamma atoms types;
   let name = "#predecessor_decline" and index = Expr.LVar "#predecessor_decline" in
   let gamma = Hashtbl.create 1 in Hashtbl.add gamma name Type.NumberType;
   let before = nonblank_counter_rows () in
