@@ -4934,6 +4934,37 @@ let literal_formatter_model fs gamma =
         ~raw_unknown:true query gamma
       with SMT_unknown -> None
 
+(* A production consistency batch can introduce one integer role whose only
+   free uses are its integer/type atoms. Check every original atom structurally;
+   a short diagnostic excerpt is never eligibility evidence. Keep the full FS
+   and Gamma and validate one raw+0 candidate natively, not an isolated subset. *)
+let isolated_integral_witness_query fs gamma =
+  if not !Config.Verification.total || !Config.under_approximation then None else
+  let candidates = Expr.Set.fold (fun atom names -> match atom with
+    | Expr.UnOp (IsInt,LVar n)
+      when Hashtbl.find_opt gamma n = Some Type.NumberType -> SS.add n names
+    | _ -> names) fs SS.empty in
+  if SS.is_empty candidates then None else
+  let candidates = Expr.Set.fold (fun atom names ->
+    if SS.is_empty names then names else match atom with
+    | Expr.UnOp (IsInt,LVar _)
+    | Expr.BinOp (UnOp (TypeOf,LVar _),Equal,Lit (Type Type.NumberType))
+    | Expr.BinOp (Lit (Type Type.NumberType),Equal,UnOp (TypeOf,LVar _)) -> names
+    | _ -> SS.diff names (Expr.lvars atom)) fs candidates in
+  match SS.elements candidates with
+  | [name] -> Some (Expr.Set.add
+      (Expr.BinOp (LVar name,ValueEqual,Expr.num 0.)) fs)
+  | _ -> None
+
+let isolated_integral_model fs gamma =
+  match isolated_integral_witness_query fs gamma with
+  | None -> None
+  | Some query ->
+      try run_sat ~caller_kind:"optional-isolated-integral-role"
+        ~timeout_ms:(optional_timeout 1000) ~phase_selection:0
+        ~raw_unknown:true query gamma
+      with SMT_unknown -> None
+
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   let key = formula_key fs gamma in
   match Formula_cache.find_opt sat_cache key with
@@ -4981,7 +5012,9 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
                          | Some _ as witness -> witness
                          | None -> (match literal_formatter_model complete_fs gamma with
                            | Some _ as witness -> witness
-                           | None -> exec_sat complete_fs gamma)))))))
+                           | None -> (match isolated_integral_model complete_fs gamma with
+                             | Some _ as witness -> witness
+                             | None -> exec_sat complete_fs gamma))))))))
       in
       let () =
         L.verbose (fun m ->

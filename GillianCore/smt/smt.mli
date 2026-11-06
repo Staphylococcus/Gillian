@@ -107,6 +107,18 @@ val literal_formatter_witness_query :
 val literal_formatter_model :
   Expr.Set.t -> (string, Type.t) Hashtbl.t -> model option
 
+(** Exactly one Number-typed role with a positive IsInt atom, with no other free uses
+    beyond standalone integer/type atoms, may receive a raw+0 candidate. Every
+    original FS atom and Gamma binding is retained. Pure AST eligibility only;
+    aliases/bounds/compound/negative uses and multiple roles decline. *)
+val isolated_integral_witness_query :
+  Expr.Set.t -> (string, Type.t) Hashtbl.t -> Expr.Set.t option
+
+(** Same full-query phase0/1s model validation as the formatter attempt. Only
+    native SAT returns a model; UNSAT/UNKNOWN leaves the required fallback. *)
+val isolated_integral_model :
+  Expr.Set.t -> (string, Type.t) Hashtbl.t -> model option
+
 (** Native Z3 phase policy controls search order only. Default 3 matches Z3; an
     explicit override is useful for exact solver-defect reproductions. *)
 val exec_sat :

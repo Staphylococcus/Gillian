@@ -186,6 +186,18 @@ let finite_position () =
           "phase0 required UNKNOWN remains an error" true
           (rejected (fun () -> ignore (Smt.exec_sat
             ~caller_kind:"control-phase0-required" ~phase_selection:0 fs g)));
+        let isolated = Expr.LVar "#isolated_unknown_role" in
+        Hashtbl.add g "#isolated_unknown_role" Type.NumberType;
+        let isolated_fs = fs |> Expr.Set.add (Expr.UnOp (IsInt,isolated))
+          |> Expr.Set.add (bin Equal (Expr.UnOp (TypeOf,isolated))
+            (Expr.Lit (Type Type.NumberType))) in
+        Alcotest.(check bool) "isolated resource control is AST eligible" true
+          (Option.is_some (Smt.isolated_integral_witness_query isolated_fs g));
+        Alcotest.(check bool) "isolated optional UNKNOWN supplies no model" false
+          (Option.is_some (Smt.isolated_integral_model isolated_fs g));
+        Alcotest.(check bool) "isolated UNKNOWN retains required rejection" true
+          (rejected (fun () -> ignore (Smt.check_sat isolated_fs g)));
+        Hashtbl.remove g "#isolated_unknown_role";
         Alcotest.(check bool) "reason metadata preserves same-session known SAT" true
           (Option.is_some (Smt.exec_sat
             (Expr.Set.singleton (Expr.Lit (Literal.Bool true))) (Hashtbl.create 1)));
@@ -20690,4 +20702,112 @@ let tests = tests @
    | Some _,None -> [
        Alcotest.test_case "production domain consistency actual staged fact provenance" `Quick
          (with_total production_domain_consistency_context)]
+   | _ -> [])
+
+(* Exact isolation is established over original free-variable AST uses, never
+   inferred from the bounded production-context text sampler. *)
+let isolated_integral_fixture label reverse =
+  let name = "#isolated_" ^ label in
+  let value = Expr.LVar name and text = Expr.LVar (name ^ "_text")
+  and values = Expr.LVar (name ^ "_values") in
+  let gamma = Hashtbl.create 4 in
+  List.iter (fun (name,typ) -> Hashtbl.add gamma name typ)
+    [name,Type.NumberType;name ^ "_text",Type.Utf16Type;
+     name ^ "_values",Type.ListType;name ^ "_unused",Type.BooleanType];
+  let typ = Expr.UnOp (TypeOf,value) and number = Expr.Lit (Type Type.NumberType) in
+  let literal = original_core_literal [0;55296;56320;65535] in
+  let fs = Expr.Set.of_list [Expr.UnOp (IsInt,value);
+    (if reverse then bin Equal number typ else bin Equal typ number);
+    bin ValueEqual text literal;
+    bin ValueEqual values (Expr.EList [text;Expr.num (-0.)]);
+    bin Equal (Expr.UnOp (Utf16Len,text)) (Expr.int 4)] in
+  fs,gamma,value,text,literal
+
+let isolated_integral_models () = with_nonblank_counter_trace (fun () ->
+  let models = List.map (fun (label,reverse) ->
+    let fs,gamma,value,text,literal = isolated_integral_fixture label reverse in
+    let atoms = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let query = Expr.Set.add (bin ValueEqual value (Expr.num 0.)) fs in
+    Alcotest.(check bool) (label ^ " whole FS plus exactly one raw+0 pin") true
+      (match Smt.isolated_integral_witness_query fs gamma with
+       | Some actual -> Expr.Set.equal actual query | None -> false);
+    let before = nonblank_counter_rows () in
+    let model,contexts = pending_context_capture (fun () ->
+      Option.get (Smt.isolated_integral_model fs gamma)) in
+    ignore (nonblank_counter_observe ~phase_selection:0 label before
+      "optional-isolated-integral-role" "sat" query gamma);
+    Alcotest.(check int) (label ^ " one complete native query") 1 (List.length contexts);
+    let context = List.hd contexts in
+    List.iter (fun (key,want) -> Alcotest.(check bool) (label ^ " policy " ^ key) true
+      (pending_context_field key context = want))
+      ["raw_unknown",`Bool true;"timeout_ms",`String "1000";"phase_selection",`Int 0];
+    Alcotest.(check bool) (label ^ " native model validation enabled") true
+      (pending_context_field "model_validate" (pending_context_field "initial_options" context)
+        = `String "true");
+    let public = Option.get (Smt.check_sat fs gamma) in
+    let before = nonblank_counter_rows () and files = nonblank_counter_files () in
+    ignore (Smt.check_sat fs gamma);
+    Alcotest.(check bool) (label ^ " original-key cache has no native endpoint") true
+      (before = nonblank_counter_rows () && files = nonblank_counter_files ());
+    nonblank_counter_retained label fs gamma atoms types;
+    let name = function Expr.LVar n -> n | _ -> assert false in
+    let text = match text,literal with Expr.LVar n,Expr.Lit l -> n,l | _ -> assert false in
+    model,public,gamma,[name value,Literal.Num 0.;text])
+    ["plain",false;"alpha_reverse",true] in
+  List.iter (fun (model,public,gamma,expected) ->
+    primary_check_lift "isolated native model after other contexts" model gamma expected;
+    (* Another earlier full-query model can choose a different integral value;
+       only the direct hinted model is required to bind raw positive zero. *)
+    primary_check_lift "isolated cached full-frame text after reset" public gamma
+      (List.tl expected)) models)
+
+let isolated_integral_guards () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,value,text,literal = isolated_integral_fixture "guards" false in
+  let before = nonblank_counter_rows () in
+  let decline label fs gamma = Alcotest.(check bool) (label ^ " declines before solver I/O") true
+    (Option.is_none (Smt.isolated_integral_witness_query fs gamma)
+     && Option.is_none (Smt.isolated_integral_model fs gamma)) in
+  let alias = Expr.LVar "#isolated_alias" in
+  List.iter (fun (label,atom) -> decline label (Expr.Set.add atom fs) gamma)
+    ["alias",bin Equal value alias;
+     "bound",bin FLessThanEqual (Expr.num 0.) value;
+     "nested arithmetic",bin Equal (bin FPlus value (Expr.num 1.)) (Expr.num 1.);
+     "negative use",not_ (Expr.UnOp (IsInt,value));
+     "compound use",bin Or (Expr.UnOp (IsInt,value)) (Expr.Lit (Bool true));
+     "free quantified use",Expr.ForAll (["#isolated_bound",Some Type.NumberType],
+       bin Equal value (Expr.LVar "#isolated_bound"))];
+  let missing = Hashtbl.copy gamma and wrong = Hashtbl.copy gamma in
+  let name = match value with Expr.LVar n -> n | _ -> assert false in
+  Hashtbl.remove missing name; Hashtbl.replace wrong name Type.IntType;
+  decline "missing Gamma type" fs missing; decline "wrong Gamma type" fs wrong;
+  decline "missing positive integer" (Expr.Set.remove (Expr.UnOp (IsInt,value)) fs) gamma;
+  let two = Hashtbl.copy gamma in Hashtbl.add two "#isolated_second" Type.NumberType;
+  decline "two eligible roles" (Expr.Set.add (Expr.UnOp (IsInt,Expr.LVar "#isolated_second")) fs) two;
+  let shadow = Expr.Set.add (Expr.ForAll ([name,Some Type.NumberType],
+    bin Equal value value)) fs in
+  Alcotest.(check bool) "bound shadow does not constrain free role" true
+    (match Smt.isolated_integral_witness_query shadow gamma with
+     | Some query -> Expr.Set.equal query (Expr.Set.add (bin ValueEqual value (Expr.num 0.)) shadow)
+     | None -> false);
+  Alcotest.(check bool) "all AST controls are query-free" true (before = nonblank_counter_rows ());
+  let false_frame = Expr.Set.add (not_ (bin ValueEqual text literal)) fs in
+  let query = Option.get (Smt.isolated_integral_witness_query false_frame gamma) in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "unrelated false frame cannot supply a hinted model" false
+    (Option.is_some (Smt.isolated_integral_model false_frame gamma));
+  ignore (nonblank_counter_observe ~phase_selection:0 "retained false frame" before
+    "optional-isolated-integral-role" "unsat" query gamma);
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "unchanged required false frame is also UNSAT" false
+    (Option.is_some (Smt.exec_sat ~caller_kind:"control-isolated-false-frame" false_frame gamma));
+  ignore (nonblank_counter_observe "required false frame" before
+    "control-isolated-false-frame" "unsat" false_frame gamma))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "isolated integral role whole frame alpha models and original cache" `Quick
+         (with_total isolated_integral_models);
+       Alcotest.test_case "isolated integral role exact AST eligibility false frame and fallback" `Quick
+         (with_total isolated_integral_guards)]
    | _ -> [])
