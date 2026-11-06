@@ -19618,3 +19618,89 @@ let tests = tests @
            measured_positive_copy_run "#two" "two";
            measured_positive_copy_run "#false" "contradiction")))]
    | _ -> [])
+
+let finite_bound_consistency upper matching =
+  let label = (if upper then "upper" else "lower")
+    ^ (if matching then "_matching" else "_ordinary") in
+  let facts,gamma,value = finite_number_bound_saved_fixture label in
+  let goal = not_ (finite_number_bound_wanted upper value) in
+  let fs = goal :: facts in
+  let types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let before = nonblank_counter_rows () in
+  let result,contexts = pending_context_capture (fun () ->
+    Solver.check_satisfiability ~matching fs gamma) in
+  Alcotest.(check bool) (label ^ " inconsistent complete public query") false result;
+  let selected = List.filter (fun c -> pending_context_field "caller" c
+    = `String "optional-satisfiability-finite-number-bound-core") contexts in
+  Alcotest.(check int) (label ^ " exact native sufficient attempt count")
+    (if matching then 0 else 1) (List.length selected);
+  List.iter (fun context ->
+    let core = Expr.Set.of_list [goal;Expr.UnOp (IsInt,value)] in
+    Alcotest.(check string) (label ^ " two exact original atoms reach native SMT")
+      (zero_decline_compact (typed_alias_core_expected_fs core))
+      (zero_decline_compact (pending_context_field "original_fs" context |> typed_lookup_alias_text));
+    let scope = pending_context_scope "finite-number-bound-satisfiability-core" [context] in
+    let current_types = match pending_context_field "query_gamma_bindings" scope with
+      | `List xs -> List.map (function
+          | `List [`String name; `String typ] ->
+              (match List.find_opt (fun (n,t) -> n = name && Type.str t = typ) types with
+               | Some binding -> binding | None -> Alcotest.fail "unexpected current type")
+          | _ -> Alcotest.fail "malformed current Gamma binding") xs
+      | _ -> Alcotest.fail "missing current Gamma bindings" in
+    typed_alias_core_check_gamma label current_types context;
+    Alcotest.(check bool) (label ^ " no added assumption or alias") true
+      (pending_context_field "original_core" scope =
+        `List (List.map Expr.to_yojson (Expr.Set.elements core)))) selected;
+  List.iter (fun context ->
+    let scope = pending_context_scope "satisfiability" [context] in
+    Alcotest.(check bool) (label ^ " original caller frame preserved") true
+      (pending_context_field "original_fs" scope =
+        `List (List.map (fun e -> `String (Fmt.str "%a" Expr.pp e)) fs)
+       && pending_context_field "matching" scope = `Bool matching)) contexts;
+  finite_number_bound_complete label before contexts "unsat";
+  Alcotest.(check bool) (label ^ " caller Gamma unchanged") true
+    (types = nonblank_counter_types (Gamma.as_hashtbl gamma))
+
+let finite_bound_consistency_models () =
+  let value = Expr.LVar "#finite_consistency_value"
+  and other = Expr.LVar "#finite_consistency_other" in
+  let support = Expr.UnOp (IsInt,value) in
+  let wanted = finite_number_bound_wanted false value in
+  let cases = [
+    "without_integrality",[not_ wanted];
+    "without_failed_goal",[support];
+    "unrelated_integrality",[not_ wanted;Expr.UnOp (IsInt,other)];
+    "other_bound",[not_ (bin FLessThanEqual (Expr.num (-100.)) value);support];
+    "positive_zero",[wanted;support;bin ValueEqual value (Expr.num 0.)];
+    "negative_zero",[wanted;support;bin ValueEqual value (Expr.num (-0.))]
+  ] in
+  List.iter (fun (label,fs) ->
+    let gamma = Gamma.init () in
+    Gamma.update gamma "#finite_consistency_value" Type.NumberType;
+    Gamma.update gamma "#finite_consistency_other" Type.NumberType;
+    let gt = Gamma.as_hashtbl gamma in
+    let types = nonblank_counter_types gt and before = nonblank_counter_rows () in
+    let _,contexts = pending_context_capture (fun () ->
+      Alcotest.(check bool) (label ^ " public consistency must remain SAT") true
+        (Solver.check_satisfiability fs gamma);
+      Alcotest.(check bool) (label ^ " real complete required SAT model") true
+        (Option.is_some (Smt.exec_sat
+          ~caller_kind:("control-finite-bound-consistency-" ^ label)
+          (Expr.Set.of_list fs) gt))) in
+    Alcotest.(check bool) (label ^ " ineligible core is never used") true
+      (not (List.exists (fun c -> pending_context_field "caller" c
+        = `String "optional-satisfiability-finite-number-bound-core") contexts));
+    finite_number_bound_complete label before contexts "sat";
+    Alcotest.(check bool) (label ^ " caller Gamma unchanged") true
+      (types = nonblank_counter_types gt)) cases
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" with
+   | Some _ -> [
+       Alcotest.test_case "finite bound consistency both original cores and matching fallback" `Quick
+         (with_total (fun () -> with_nonblank_counter_trace (fun () ->
+           List.iter (fun (upper,matching) -> finite_bound_consistency upper matching)
+             [false,false;true,false;false,true;true,true])));
+       Alcotest.test_case "finite bound consistency omission signed zero and other-bound SAT controls" `Quick
+         (with_total (fun () -> with_nonblank_counter_trace finite_bound_consistency_models))]
+   | None -> [])

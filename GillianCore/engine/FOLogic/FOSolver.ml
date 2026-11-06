@@ -276,6 +276,26 @@ let positive_finite_numeric_identity_satisfiability
         Some (Expr.Set.add identity fs, [identity], [original], [actual],
           old_premises, premises)
 
+(* A sufficient contradiction consists only of two retained original atoms.
+   Selection is not a proof: native UNSAT is required with the complete current
+   Gamma, and every inconclusive result retains the full required query. *)
+let finite_number_bound_pair ~original_fs ~original_gamma formulae gamma goal =
+  let operand = match goal with
+    | Expr.UnOp (Not, BinOp (Lit (Num lower), FLessThanEqual,
+        (LVar name as value))) when lower = -. Float.max_float -> Some (name,value)
+    | Expr.UnOp (Not, BinOp ((LVar name as value), FLessThanEqual,
+        Lit (Num upper))) when upper = Float.max_float -> Some (name,value)
+    | _ -> None in
+  match operand with
+  | Some (name,value)
+    when Hashtbl.find_opt original_gamma name = Some Type.NumberType
+      && Hashtbl.find_opt gamma name = Some Type.NumberType ->
+      let core = Expr.Set.of_list [goal;Expr.UnOp (IsInt,value)] in
+      if Expr.Set.cardinal core = 2 && Expr.Set.subset core original_fs
+         && Expr.Set.subset core formulae && not (Expr.Set.equal core formulae)
+      then Some core else None
+  | _ -> None
+
 let check_satisfiability
     ?(matching = false)
     ?time:_
@@ -314,7 +334,32 @@ let check_satisfiability
                     ("original_gamma", `String (Fmt.str "%a" Type_env.pp gamma)) ])
                   (fun () -> Smt.is_sat projected (Type_env.as_hashtbl projected_gamma))
           in
-          match positive_finite_numeric_identity_satisfiability
+          let finite_core =
+            if not !Config.Verification.total || !Config.under_approximation
+               || matching then None
+            else
+              let originals = Expr.Set.of_list original_fs in
+              List.find_map
+                (finite_number_bound_pair ~original_fs:originals
+                   ~original_gamma:(Type_env.as_hashtbl original_gamma)
+                   fs (Type_env.as_hashtbl gamma))
+                (Expr.Set.elements fs)
+          in
+          if (match finite_core with
+            | None -> false
+            | Some core -> Smt.with_native_smt_context
+                (fun () -> `Assoc [
+                  ("operation", `String "finite-number-bound-satisfiability-core");
+                  ("original_core", `List (List.map Expr.to_yojson (Expr.Set.elements core)));
+                  ("query_gamma_bindings", `List
+                    (Hashtbl.fold (fun name typ rows ->
+                      `List [`String name; `String (Type.str typ)] :: rows)
+                      (Type_env.as_hashtbl gamma) [] |> List.sort Stdlib.compare)) ])
+                (fun () -> Smt.proves_unsat
+                  ~caller_kind:"optional-satisfiability-finite-number-bound-core"
+                  core (Type_env.as_hashtbl gamma)))
+          then false
+          else match positive_finite_numeric_identity_satisfiability
               original_fs original_gamma fs gamma with
           | None -> solve fs
           | Some (projected,added,original_formatters,formatters,old_premises,premises) ->
@@ -692,32 +737,11 @@ let finite_number_bound_core
      || not (Expr.Set.mem goal formulae)
   then None
   else
-    let operand = match goal, original_right_fs with
-      | Expr.UnOp (Not,
-          (BinOp (Lit (Num lower), FLessThanEqual, (LVar name as value)) as wanted)),
-        [original]
-        when lower = -. Float.max_float && Expr.equal wanted original ->
-          Some (name,value)
-      | Expr.UnOp (Not,
-          (BinOp ((LVar name as value), FLessThanEqual, Lit (Num upper)) as wanted)),
-        [original]
-        when upper = Float.max_float && Expr.equal wanted original ->
-          Some (name,value)
-      | _ -> None in
-    match operand with
-    | Some (name,value)
-      when Hashtbl.find_opt original_gamma name = Some Type.NumberType
-        && Hashtbl.find_opt gamma name = Some Type.NumberType ->
-        let originals = Lazy.force original_left_fs in
-        (match List.find_opt (function
-          | Expr.UnOp (IsInt, same) -> Expr.equal same value
-          | _ -> false) (Expr.Set.elements originals) with
-         | Some support when Expr.Set.mem support formulae ->
-             let core = Expr.Set.of_list [goal;support] in
-             if Expr.Set.cardinal core = 2 && Expr.Set.subset core formulae
-                && not (Expr.Set.equal core formulae)
-             then Some core else None
-         | _ -> None)
+    match goal, original_right_fs with
+    | Expr.UnOp (Not,wanted), [original] when Expr.equal wanted original ->
+        finite_number_bound_pair
+          ~original_fs:(Expr.Set.add goal (Lazy.force original_left_fs))
+          ~original_gamma formulae gamma goal
     | _ -> None
 
 (* Finite integral endpoints plus one original order fact suffice for these
