@@ -2476,6 +2476,41 @@ let reset_solver () =
   let () = RepeatCache.clear () in
   ()
 
+(* One explicit, bounded reproducer after a fatal required UNKNOWN. Copy the
+   concrete native tuple; never re-encode, ask the solver again or replace its
+   error. No all-query context capture is enabled by this opt-in path. *)
+let save_required_unknown_input path ~query ~timeout_ms ~phase_selection
+    ~primary_command declarations assertions =
+  let created = ref false in
+  let note status =
+    try L.normal (fun m -> m "SMT_REQUIRED_UNKNOWN_INPUT query=%s status=%s" query status)
+    with _ -> () in
+  try
+    if path = "" || Filename.is_relative path then invalid_arg "absolute input path";
+    let buffer = Buffer.create 4096 in
+    let formatter = Format.make_formatter
+        (fun text offset length ->
+          if Buffer.length buffer + length > 65536 then raise Exit;
+          Buffer.add_substring buffer text offset length)
+        (fun () -> ()) in
+    Fmt.pf formatter "; Gillian required-complete UNKNOWN query=%s@\n" query;
+    let options = List.map (fun (key,value) -> set_option (":" ^ key) value) z3_config
+        @ [set_option ":timeout" timeout_ms;
+           set_option ":smt.phase_selection" (string_of_int phase_selection)] in
+    Fmt.pf formatter "%a@?"
+      (Fmt.list ~sep:(Fmt.any "\n") Sexplib.Sexp.pp_mach)
+      (options @ declarations @ assertions @ [primary_command]);
+    let channel = open_out_gen [Open_wronly;Open_creat;Open_excl;Open_binary] 0o600 path in
+    created := true;
+    Fun.protect ~finally:(fun () -> close_out channel)
+      (fun () -> output_string channel (Buffer.contents buffer); flush channel);
+    note "saved";
+    true
+  with _ ->
+    if !created then (try Sys.remove path with _ -> ());
+    note "unavailable";
+    false
+
 let exec_sat'
     ~caller_kind
     ~timeout_ms
@@ -2573,10 +2608,15 @@ let exec_sat'
     match result with
     | Unknown ->
         if raw_unknown || !Config.under_approximation then raise SMT_unknown
-        else if !Config.Verification.total then
+        else if !Config.Verification.total then (
+          (match Sys.getenv_opt "GILLIAN_REQUIRED_UNKNOWN_INPUT" with
+           | Some path when path <> "" && caller_kind = "required-complete" ->
+               ignore (save_required_unknown_input path ~query ~timeout_ms
+                 ~phase_selection ~primary_command declarations encoded_assertions)
+           | _ -> ());
           raise
             (Gillian_result.Exc.Gillian_error
-               (OperationError "Incomplete totality proof: SMT returned unknown"))
+               (OperationError "Incomplete totality proof: SMT returned unknown")))
         else
           let additional_data =
             [

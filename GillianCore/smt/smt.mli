@@ -19,6 +19,13 @@ val shutdown_solver : unit -> unit
 val with_native_smt_context :
   (unit -> Yojson.Safe.t) -> (unit -> 'a) -> 'a
 
+(** Diagnostic writer used after a fatal required UNKNOWN. Copies concrete
+    native commands/options without solver calls. Exclusive creation, at most
+    64KiB, no truncation/overwrite; failure never changes the solver verdict. *)
+val save_required_unknown_input :
+  string -> query:string -> timeout_ms:string -> phase_selection:int ->
+  primary_command:Sexplib.Sexp.t -> Sexplib.Sexp.t list -> Sexplib.Sexp.t list -> bool
+
 (** Native model together with its originating datatype declarations, retained
     across solver resets and cache hits. *)
 type model

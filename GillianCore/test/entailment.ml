@@ -103,12 +103,6 @@ let finite_position () =
         in
         Alcotest.(check bool) "normal reduction preserves result" true
           (Expr.equal (Engine.Reduction.reduce_lexpr reduction) expected);
-        Alcotest.(check bool)
-          "optional unknown cannot prove UNSAT" false (Smt.proves_unsat fs g);
-        Alcotest.(check bool)
-          "remembered inconclusive precheck still proves nothing" false
-          (Smt.proves_unsat fs g);
-
         let rejected check =
           try
             check ();
@@ -119,7 +113,39 @@ let finite_position () =
         in
         Alcotest.(check bool)
           "required unknown remains an error" true
-          (rejected (fun () -> ignore (Smt.exec_sat fs g)));
+          (let path = Filename.temp_file ~temp_dir:(Sys.getcwd ()) "required-unknown-" ".smt2" in
+           Sys.remove path;
+           let previous = Sys.getenv_opt "GILLIAN_REQUIRED_UNKNOWN_INPUT" in
+           Unix.putenv "GILLIAN_REQUIRED_UNKNOWN_INPUT" path;
+           Fun.protect ~finally:(fun () ->
+             Unix.putenv "GILLIAN_REQUIRED_UNKNOWN_INPUT" (Option.value previous ~default:"");
+             if Sys.file_exists path then Sys.remove path)
+             (fun () ->
+               Alcotest.(check bool) "optional unknown cannot prove UNSAT" false
+                 (Smt.proves_unsat fs g);
+               Alcotest.(check bool) "remembered inconclusive precheck still proves nothing" false
+                 (Smt.proves_unsat fs g);
+               Alcotest.(check bool) "optional input remains absent" false (Sys.file_exists path);
+               let result = rejected (fun () -> ignore (Smt.exec_sat fs g)) in
+               Alcotest.(check bool) "fatal required input is captured" true (Sys.file_exists path);
+               let channel = open_in_bin path in
+               let script = Fun.protect ~finally:(fun () -> close_in channel)
+                 (fun () -> really_input_string channel (in_channel_length channel)) in
+               Alcotest.(check bool) "fatal input stays complete and bounded" true
+                 (String.length script <= 65536 && String.ends_with ~suffix:"(check-sat)" script);
+               let commands = Sexplib.Sexp.scan_sexps (Lexing.from_string script) in
+               Alcotest.(check int) "fatal input has exactly one original check" 1
+                 (List.length (List.filter ((=) (Sexplib.Sexp.List [Sexplib.Sexp.Atom "check-sat"])) commands));
+               Alcotest.(check bool) "existing input is not overwritten" false
+                 (Smt.save_required_unknown_input path ~query:"control-existing" ~timeout_ms:"1"
+                   ~phase_selection:3 ~primary_command:(Sexplib.Sexp.List [Sexplib.Sexp.Atom "check-sat"]) [] []);
+               let oversized = path ^ ".oversized" in
+               Alcotest.(check bool) "oversized input is not truncated" false
+                 (Smt.save_required_unknown_input oversized ~query:"control-oversized" ~timeout_ms:"1"
+                   ~phase_selection:3 ~primary_command:(Sexplib.Sexp.List [Sexplib.Sexp.Atom "check-sat"])
+                   [] [Sexplib.Sexp.Atom (String.make 65537 'x')]);
+               Alcotest.(check bool) "oversized input leaves no file" false (Sys.file_exists oversized);
+               result));
         Hashtbl.add g "#other_s" Type.Utf16Type;
         Hashtbl.add g "#other_index" Type.NumberType;
         let seeded_fs =
@@ -10040,7 +10066,33 @@ let primary_check_declarations_and_cache () = with_primary_check_trace (fun () -
     (rows = nonblank_counter_rows ()
      && files = (nonblank_counter_files () |> List.sort String.compare));
   primary_check_lift "cached original datatype aliases" cached ga expected_a;
-  primary_check_lift "original direct model remains independent" ma ga expected_a)
+  primary_check_lift "original direct model remains independent" ma ga expected_a;
+  (* This cache-seed native tuple followed a distinct datatype context. Its
+     concrete prelude must still parse and solve in a fresh process. *)
+  let context = Yojson.Safe.from_file (Filename.concat
+      (Option.get (Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR"))
+      (smt_result_field "query" row ^ ".context.json")) in
+  let commands name = match Yojson.Safe.Util.member name context with
+    | `List values -> List.map (function
+        | `String text -> Sexplib.Sexp.of_string text
+        | _ -> Alcotest.fail "malformed concrete command") values
+    | _ -> Alcotest.fail "missing concrete commands" in
+  let assertions = commands "encoded_assertions" and declarations = commands "declarations" in
+  let path = Filename.temp_file ~temp_dir:(Sys.getcwd ()) "native-cache-input-" ".smt2" in
+  Sys.remove path;
+  Fun.protect ~finally:(fun () -> if Sys.file_exists path then Sys.remove path)
+    (fun () ->
+      Alcotest.(check bool) "cached datatype input is complete and bounded" true
+        (Smt.save_required_unknown_input path ~query:"control-datatype-cache"
+          ~timeout_ms:"30000" ~phase_selection:3
+          ~primary_command:(Sexplib.Sexp.List [Sexplib.Sexp.Atom "check-sat"]) declarations assertions);
+      let channel = Unix.open_process_args_in "z3" [|"z3";"-smt2";path|] in
+      let status = ref (Unix.WEXITED 127) in
+      let answer = Fun.protect ~finally:(fun () -> status := Unix.close_process_in channel)
+        (fun () -> input_line channel) in
+      Alcotest.(check string) "fresh cached-prelude replay is SAT" "sat" answer;
+      Alcotest.(check bool) "fresh replay exits without parser/prelude failure" true
+        (!status = Unix.WEXITED 0)))
 
 (* Four complete primary requests share the same typed frame across phases.
    Removing only the arithmetic link admits a concrete countermodel; restoring
