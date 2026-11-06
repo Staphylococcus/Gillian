@@ -769,6 +769,18 @@ let finite_difference_core formulae gamma goal =
   if not !Config.Verification.total || !Config.under_approximation
      || not (Expr.Set.mem goal formulae) then None
   else match goal with
+  | Expr.UnOp
+      (Not, BinOp (Lit (Num lower), FLessThanEqual,
+        BinOp ((LVar name as index), FMinus, Lit (Num step))))
+    when lower = -. Float.max_float && step = 1. && typed name ->
+      (* Measured predecessor definedness: retain the exact failed bound and
+         the original positive counter premise. No cast/domain fact is added;
+         native UNSAT alone licenses the weaker two-atom contradiction. *)
+      let core = Expr.Set.of_list
+        [goal; Expr.BinOp (Expr.num 0., FLessThan, index)] in
+      if Expr.Set.cardinal core = 2 && Expr.Set.subset core formulae
+         && not (Expr.Set.equal core formulae)
+      then Some core else None
   | Expr.UnOp (Not, BinOp
       (BinOp (BinOp ((LVar base as value), FPlus, Lit (Num 1.)),
          FMinus, Lit (Num 1.)), Equal, LVar same))

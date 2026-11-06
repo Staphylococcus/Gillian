@@ -19906,3 +19906,74 @@ let tests = tests @
        Alcotest.test_case "literal formatter signed-zero fallback false frame and declines" `Quick
          (with_total literal_formatter_fallback)]
    | _ -> [])
+
+(* The measured predecessor shape, not a retained full BODY query. *)
+let positive_predecessor_fixture label =
+  let name = "#positive_predecessor_" ^ label in
+  let index = Expr.LVar name and gamma = index_difference_context [name] in
+  let wanted = bin FLessThanEqual (Expr.num (-. Float.max_float))
+    (bin FMinus index (Expr.num 1.)) in
+  let positive = bin FLessThan (Expr.num 0.) index in
+  index,gamma,wanted,positive
+
+let positive_predecessor_native () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,reverse) ->
+    let index,gamma,wanted,positive = positive_predecessor_fixture label in
+    let facts = Expr.Set.of_list [positive;Expr.UnOp (IsInt,index);
+      bin FLessThanEqual index (Expr.num 4294967295.)] in
+    let full = Expr.Set.add (not_ wanted) facts
+    and core = Expr.Set.of_list [not_ wanted;positive] in
+    let types = Gamma.as_hashtbl gamma in
+    Alcotest.(check bool) (label ^ " exact original two-atom subset") true
+      (match Solver.finite_difference_core full types (not_ wanted) with
+       | Some selected -> Expr.Set.equal selected core | None -> false);
+    let before = strict_successor_public ~reverse label true facts wanted gamma in
+    let row = nonblank_counter_observe label before
+      "optional-entailment-finite-difference-core" "unsat" core types in
+    Alcotest.(check bool) (label ^ " unchanged optional UNKNOWN and time policy") true
+      (smt_result_field "raw_unknown" row = "true"
+       && smt_result_field "timeout_ms" row = "5000");
+    Alcotest.(check int) (label ^ " actual sufficient core without fallback") 1
+      (List.length (symbolic_prefix_new_rows before));
+    let decline reason fs types goal =
+      Alcotest.(check bool) (label ^ reason) true
+        (Option.is_none (Solver.finite_difference_core fs types goal)) in
+    decline " whole/core is not a weakening" core types (not_ wanted);
+    decline " missing positivity" (Expr.Set.remove positive full) types (not_ wanted);
+    decline " missing goal" facts types (not_ wanted);
+    let missing = Hashtbl.copy types in Hashtbl.remove missing
+      (match index with Expr.LVar n -> n | _ -> assert false);
+    decline " missing Number type" full missing (not_ wanted);
+    let wrong = Hashtbl.copy types in Hashtbl.replace wrong
+      (match index with Expr.LVar n -> n | _ -> assert false) Type.IntType;
+    decline " wrong type" full wrong (not_ wanted);
+    List.iter (fun (bound,step) ->
+      let changed = not_ (bin FLessThanEqual (Expr.num bound)
+        (bin FMinus index (Expr.num step))) in
+      decline " different goal/offset" (Expr.Set.add changed facts) types changed)
+      [(-100.),1.;(-. Float.max_float),2.])
+    ["measured",false;"alpha_reordered",true])
+
+let positive_predecessor_omission () = with_nonblank_counter_trace (fun () ->
+  let index,gamma,wanted,_ = positive_predecessor_fixture "omission" in
+  let full = Expr.Set.of_list [not_ wanted;
+    bin ValueEqual index (Expr.num neg_infinity)] in
+  let types = Gamma.as_hashtbl gamma in
+  let before = nonblank_counter_rows () in
+  let model = match Smt.exec_sat full types with
+    | Some model -> model | None -> Alcotest.fail "omitted positivity needs native countermodel" in
+  ignore (nonblank_counter_observe "omitted positivity" before
+    "required-complete" "sat" full types);
+  let name = match index with Expr.LVar n -> n | _ -> assert false in
+  primary_check_lift "omitted positivity" model types [name,Literal.Num neg_infinity];
+  ignore (strict_successor_public "omitted positivity public fallback" false
+    (Expr.Set.remove (not_ wanted) full) wanted gamma))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "positive predecessor original finite core through public entailment" `Quick
+         (with_total positive_predecessor_native);
+       Alcotest.test_case "positive predecessor omission has required native countermodel" `Quick
+         (with_total positive_predecessor_omission)]
+   | _ -> [])
