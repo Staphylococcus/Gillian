@@ -19795,3 +19795,114 @@ let tests = tests @
    | Some _ -> [Alcotest.test_case "native query scopes avoid implicit command snapshots" `Quick
        (with_total native_context_scopes_only)]
    | None -> [])
+
+let literal_formatter_fixture label literal =
+  let name = "#literal_formatter_" ^ label in
+  let index = Expr.LVar name and keys = Expr.LVar (name ^ "_keys")
+  and values = Expr.LVar (name ^ "_values") in
+  let gamma = Hashtbl.create 4 in
+  List.iter (fun (name,typ) -> Hashtbl.add gamma name typ)
+    [name,Type.NumberType;name ^ "_keys",Type.SetType;
+     name ^ "_values",Type.ListType;name ^ "_unused",Type.BooleanType];
+  let format step = Expr.UnOp (NumberToUtf16,bin FPlus index (Expr.num step)) in
+  let fs = Expr.Set.of_list [bin Equal index (Expr.num literal);
+    Expr.UnOp (IsInt,index);bin FLessThanEqual (Expr.num 0.) index;
+    bin FLessThanEqual index (Expr.num 4294967295.);
+    not_ (bin SetMem (format 1.) keys);not_ (bin SetMem (format 2.) keys);
+    bin Equal (Expr.UnOp (LstLen,values)) (Expr.int 2)] in
+  fs,gamma,index,keys,format
+
+let literal_formatter_attempt label fs gamma index literal expected =
+  let atoms = Expr.Set.elements fs and types = nonblank_counter_types gamma
+  and before = nonblank_counter_rows () in
+  let query = Expr.Set.add (bin ValueEqual index (Expr.num literal)) fs in
+  Alcotest.(check bool) (label ^ " adds exactly the bit candidate to full FS") true
+    (match Smt.literal_formatter_witness_query fs gamma with
+     | Some actual -> Expr.Set.equal actual query | None -> false);
+  let model,contexts = pending_context_capture (fun () ->
+    Smt.literal_formatter_model fs gamma) in
+  Alcotest.(check bool) (label ^ " actual optional verdict") expected (Option.is_some model);
+  ignore (nonblank_counter_observe label before "optional-literal-formatter"
+    (if expected then "sat" else "unsat") query gamma);
+  Alcotest.(check int) (label ^ " one complete native attempt") 1 (List.length contexts);
+  let context = List.hd contexts in
+  List.iter (fun (key,want) -> Alcotest.(check bool) (label ^ " policy " ^ key) true
+    (pending_context_field key context = want))
+    ["raw_unknown",`Bool true;"timeout_ms",`String "1000";"phase_selection",`Int 3];
+  Alcotest.(check bool) (label ^ " native model validation remains enabled") true
+    (pending_context_field "model_validate" (pending_context_field "initial_options" context)
+      = `String "true");
+  nonblank_counter_retained label fs gamma atoms types;
+  model
+
+let literal_formatter_native () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,literal) ->
+    let fs,gamma,index,_,_ = literal_formatter_fixture label literal in
+    let fs = if label = "two" then fs
+      |> Expr.Set.remove (bin Equal index (Expr.num literal))
+      |> Expr.Set.add (bin Equal (Expr.num literal) index) else fs in
+    let model = Option.get (literal_formatter_attempt label fs gamma index literal true) in
+    let name = match index with LVar name -> name | _ -> assert false in
+    primary_check_lift label model gamma [name,Literal.Num literal];
+    let before = nonblank_counter_rows () in
+    Alcotest.(check bool) (label ^ " public complete-query dispatch succeeds") true
+      (Option.is_some (Smt.check_sat fs gamma));
+    ignore (nonblank_counter_observe (label ^ " public") before "optional-literal-formatter"
+      "sat" (Expr.Set.add (bin ValueEqual index (Expr.num literal)) fs) gamma);
+    let files = nonblank_counter_files () in
+    ignore (Smt.check_sat fs gamma);
+    Alcotest.(check bool) (label ^ " original-key cache adds no native query") true
+      (files = nonblank_counter_files ())) ["zero",0.;"negative_zero",-0.;"two",2.])
+
+let literal_formatter_fallback () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,index,_,_ = literal_formatter_fixture "opposite_zero" 0. in
+  let opposite = Expr.Set.add (not_ (bin ValueEqual index (Expr.num 0.))) fs in
+  ignore (literal_formatter_attempt "opposite zero" opposite gamma index 0. false);
+  let before = nonblank_counter_rows () in
+  let model = Option.get (Smt.check_sat opposite gamma) in
+  ignore (nonblank_counter_observe "signed-zero required fallback" before
+    "required-complete" "sat" opposite gamma);
+  primary_check_lift "required negative-zero model" model gamma
+    ["#literal_formatter_opposite_zero",Literal.Num (-0.)];
+  let fs,gamma,index,keys,format = literal_formatter_fixture "false_frame" 0. in
+  let false_frame = Expr.Set.add (bin SetMem (format 1.) keys) fs in
+  ignore (literal_formatter_attempt "unchanged false UTF16 frame" false_frame gamma index 0. false);
+  Alcotest.(check bool) "full contradictory frame is required native UNSAT" true
+    (Option.is_none (Smt.exec_sat ~caller_kind:"control-literal-formatter-frame" false_frame gamma));
+  let before = nonblank_counter_rows () in
+  let decline label fs gamma = Alcotest.(check bool) label true
+    (Option.is_none (Smt.literal_formatter_witness_query fs gamma)) in
+  let fs,gamma,index,_,_ = literal_formatter_fixture "decline" 0. in
+  let missing = Hashtbl.copy gamma in Hashtbl.remove missing "#literal_formatter_decline";
+  decline "original Number type required" fs missing;
+  let wrong = Hashtbl.copy gamma in
+  Hashtbl.replace wrong "#literal_formatter_decline" Type.StringType;
+  decline "coercible String is not a Number witness" fs wrong;
+  decline "nonfinite literal is ineligible"
+    (fs |> Expr.Set.remove (bin Equal index (Expr.num 0.))
+        |> Expr.Set.add (bin Equal index (Expr.num infinity))) gamma;
+  let unformatted = Expr.Set.filter (fun e ->
+    let present = ref false in
+    let visitor = object
+      inherit [_] Visitors.iter as super
+      method! visit_expr () e =
+        (match e with Expr.UnOp (NumberToUtf16,_) -> present := true | _ -> ());
+        super#visit_expr () e
+    end in
+    visitor#visit_expr () e; not !present) fs in
+  decline "actual formatter use required" unformatted gamma;
+  decline "existing bit pin is left unchanged"
+    (Expr.Set.add (bin ValueEqual index (Expr.num (-0.))) fs) gamma;
+  decline "opposite literal bits make the candidate ambiguous"
+    (Expr.Set.add (bin Equal index (Expr.num (-0.))) fs) gamma;
+  Alcotest.(check bool) "declining guards never dispatch a native guess" true
+    (before = nonblank_counter_rows ()))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "literal formatter full-frame native model and original cache" `Quick
+         (with_total literal_formatter_native);
+       Alcotest.test_case "literal formatter signed-zero fallback false frame and declines" `Quick
+         (with_total literal_formatter_fallback)]
+   | _ -> [])

@@ -64,6 +64,19 @@ val positive_trace_index_model :
 val formatted_index_model :
   Expr.Set.t -> (string, Type.t) Hashtbl.t -> model option
 
+(** One finite-literal bit candidate for an already-compared, typed Number
+    used by a formatter. The entire original FS and Gamma remain; the added
+    ValueEqual is a search hint, not a consequence (especially for signed zero).
+    Declines ambiguity and existing literal bit pins. *)
+val literal_formatter_witness_query :
+  Expr.Set.t -> (string, Type.t) Hashtbl.t -> Expr.Set.t option
+
+(** One optional native complete-query attempt. Only validated SAT succeeds;
+    UNSAT/UNKNOWN/decline prove nothing about the original query. No cache or
+    caller state is changed; other solver/model errors still propagate. *)
+val literal_formatter_model :
+  Expr.Set.t -> (string, Type.t) Hashtbl.t -> model option
+
 (** Native Z3 phase policy controls search order only. Default 3 matches Z3; an
     explicit override is useful for exact solver-defect reproductions. *)
 val exec_sat :

@@ -4594,6 +4594,51 @@ let formatted_index_model fs gamma =
     ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
     ~raw_unknown:true query gamma with SMT_unknown -> None
 
+(* A formatter-dependent Number already compared to a finite literal can use
+   that literal's bits as one complete-query search hint. In particular fp.eq
+   zero leaves both signs possible: this is a guess, never a derived identity.
+   Keep every assertion and Gamma binding; only validated native SAT succeeds.
+   A rejected/unknown guess leaves the unchanged required query below. *)
+let literal_formatter_witness_query fs gamma =
+  if not !Config.Verification.total || !Config.under_approximation then None else
+  let formatted = ref SS.empty in
+  let visitor = object
+    inherit [_] Visitors.iter as super
+    method! visit_expr () e =
+      (match e with
+       | Expr.UnOp (NumberToUtf16, value) ->
+           formatted := SS.union !formatted (Expr.lvars value)
+       | _ -> ());
+      super#visit_expr () e
+  end in
+  Expr.Set.iter (visitor#visit_expr ()) fs;
+  let candidates = Expr.Set.fold (fun atom candidates -> match atom with
+    | Expr.BinOp (LVar name, Equal, (Lit (Num n) as literal))
+    | Expr.BinOp ((Lit (Num n) as literal), Equal, LVar name)
+      when Float.is_finite n && SS.mem name !formatted
+        && Hashtbl.find_opt gamma name = Some Type.NumberType ->
+        let fixed = Expr.Set.exists (function
+          | Expr.BinOp (LVar x, ValueEqual, Lit (Num _))
+          | Expr.BinOp (Lit (Num _), ValueEqual, LVar x) -> x = name
+          | _ -> false) fs in
+        if fixed then candidates else (name,literal) :: candidates
+    | _ -> candidates) fs [] |> List.sort_uniq (fun (a,x) (b,y) ->
+      let order = String.compare a b in
+      if order <> 0 then order else Expr.compare x y) in
+  match candidates with
+  | [name,literal] ->
+      Some (Expr.Set.add (Expr.BinOp (LVar name,ValueEqual,literal)) fs)
+  | _ -> None
+
+let literal_formatter_model fs gamma =
+  match literal_formatter_witness_query fs gamma with
+  | None -> None
+  | Some query ->
+      try run_sat ~caller_kind:"optional-literal-formatter"
+        ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
+        ~raw_unknown:true query gamma
+      with SMT_unknown -> None
+
 let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
   let key = formula_key fs gamma in
   match Formula_cache.find_opt sat_cache key with
@@ -4639,7 +4684,9 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
                        | Some _ as witness -> witness
                        | None -> (match formatted_index_model complete_fs gamma with
                          | Some _ as witness -> witness
-                         | None -> exec_sat complete_fs gamma))))))
+                         | None -> (match literal_formatter_model complete_fs gamma with
+                           | Some _ as witness -> witness
+                           | None -> exec_sat complete_fs gamma)))))))
       in
       let () =
         L.verbose (fun m ->
