@@ -173,7 +173,7 @@ module Make (State : SState.S) :
   let summary_audit_calls = ref 0
   let summary_audit_events = ref 0
   let summary_activation audit branch phase astate =
-    match audit with
+    try match audit with
     | None -> ()
     | Some (id, _) ->
         if !summary_audit_events < 64 then (
@@ -187,6 +187,7 @@ module Make (State : SState.S) :
         else if !summary_audit_events = 64 then (
           incr summary_audit_events;
           L.normal (fun m -> m "SUMMARY_ACTIVATION capped"))
+    with _ -> ()
 
   let simplify
       ?(save = false)
@@ -351,11 +352,17 @@ module Make (State : SState.S) :
     let open Res_list.Syntax in
     let open Syntaxes.List in
     let audit =
-      if name = "AP_push" &&
-         Sys.getenv_opt "GILLIAN_SUMMARY_ACTIVATION_PROFILE" = Some "1" then (
+      try if name = "AP_push" &&
+         Sys.getenv_opt "GILLIAN_SUMMARY_ACTIVATION_PROFILE" = Some "1" &&
+         (match List.rev args with
+          | (Expr.LVar value | Expr.PVar value) :: _ ->
+              Type_env.get (State.get_typ_env astate.state) value = Some Type.Utf16Type
+          | Expr.Lit (Literal.Utf16String _) :: _ -> true
+          | _ -> false) then (
         incr summary_audit_calls;
         Some (!summary_audit_calls, ref 0))
       else None
+      with _ -> None
     in
     summary_activation audit 0 "entry" astate;
     L.verbose (fun m ->
