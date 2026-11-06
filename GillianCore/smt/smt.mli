@@ -26,7 +26,16 @@ val save_required_unknown_input :
   string -> query:string -> timeout_ms:string -> phase_selection:int ->
   primary_command:Sexplib.Sexp.t -> Sexplib.Sexp.t list -> Sexplib.Sexp.t list -> bool
 
-(** Load only a bounded, ABI/integrity/shape-checked private native input.
+(** A process-local production instance latches the first actual raw optional
+    UNKNOWN before encoding/I/O, even on failure. This factory exposes fresh
+    latches for diagnostic codec tests only. Accurate caller/policy header,
+    one complete packet under64KiB; no solver check or proof authority. *)
+val first_optional_unknown_saver : unit ->
+  (string -> caller_kind:string -> query:string -> timeout_ms:string -> phase_selection:int ->
+   primary_command:Sexplib.Sexp.t -> Sexplib.Sexp.t list -> Sexplib.Sexp.t list -> bool)
+
+(** Load only a bounded, ABI/integrity/shape-checked private required or
+    accurately labelled first-optional native input.
     Replay submits the stored sequence once to a fresh solver; its raw status
     is diagnostic only and never proof acceptance. *)
 val read_required_unknown_input : string -> Sexplib.Sexp.t list

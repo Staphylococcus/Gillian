@@ -2487,14 +2487,28 @@ let required_input_header query payload_digest commands_digest =
     "; Gillian required-complete UNKNOWN native-ast-v1 query=%s ocaml=%s word=%d payload=%s commands=%s\n"
     query Sys.ocaml_version Sys.word_size payload_digest commands_digest
 
-let save_required_unknown_input path ~query ~timeout_ms ~phase_selection
+let optional_input_header ~caller_kind ~timeout_ms ~phase_selection
+    query payload_digest commands_digest =
+  if caller_kind = "" || String.length caller_kind > 128
+     || not (String.for_all (function
+          | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' | '-' -> true | _ -> false) caller_kind)
+     || not (String.starts_with ~prefix:"optional-" caller_kind)
+     || int_of_string timeout_ms <= 0 || int_of_string timeout_ms > 5000
+     || phase_selection <> 3
+  then invalid_arg "optional input policy";
+  Printf.sprintf
+    "; Gillian first-optional UNKNOWN native-ast-v1 query=%s caller=%s raw_unknown=true timeout_ms=%s phase_selection=%d ocaml=%s word=%d payload=%s commands=%s\n"
+    query caller_kind timeout_ms phase_selection Sys.ocaml_version Sys.word_size
+    payload_digest commands_digest
+
+let save_unknown_input ~header ~event path ~query ~timeout_ms ~phase_selection
     ~primary_command declarations assertions =
   let created = ref false in
   let stage = ref "path" and too_large = ref false in
   let note status =
     let reason = if status = "saved" then "" else
       " reason=" ^ (if !too_large then "size" else !stage) in
-    try L.normal (fun m -> m "SMT_REQUIRED_UNKNOWN_INPUT query=%s status=%s%s" query status reason)
+    try L.normal (fun m -> m "%s query=%s status=%s%s" event query status reason)
     with _ -> () in
   try
     if path = "" || Filename.is_relative path || String.length query > 128
@@ -2507,7 +2521,7 @@ let save_required_unknown_input path ~query ~timeout_ms ~phase_selection
            set_option ":smt.phase_selection" (string_of_int phase_selection)] in
     let commands = options @ declarations @ assertions @ [primary_command] in
     let empty_digest = String.make 64 '0' in
-    let header_bytes = String.length (required_input_header query empty_digest empty_digest) in
+    let header_bytes = String.length (header query empty_digest empty_digest) in
     let buffer = Bytes.create (65536 - header_bytes) in
     let length = try Marshal.to_buffer buffer 0 (Bytes.length buffer) commands [] with
       | Failure message when message = "Marshal.to_buffer: buffer overflow" -> too_large := true; raise Exit in
@@ -2515,7 +2529,7 @@ let save_required_unknown_input path ~query ~timeout_ms ~phase_selection
     let decoded : sexp list = Marshal.from_string payload 0 in
     if Marshal.total_size (Bytes.unsafe_of_string payload) 0 <> length || decoded <> commands
     then invalid_arg "native input roundtrip";
-    let header = required_input_header query (required_input_digest payload)
+    let header = header query (required_input_digest payload)
         (required_commands_digest commands) in
     if String.length header + length > 65536 then (too_large := true; raise Exit);
     stage := "open";
@@ -2531,6 +2545,24 @@ let save_required_unknown_input path ~query ~timeout_ms ~phase_selection
     note "unavailable";
     false
 
+let save_required_unknown_input =
+  save_unknown_input ~header:required_input_header ~event:"SMT_REQUIRED_UNKNOWN_INPUT"
+
+(* The latch precedes even validation/formatting/open failure. A later UNKNOWN
+   must never replace the first attempted input. No additional native check. *)
+let first_optional_unknown_saver () =
+  let attempted = ref false in
+  fun path ~caller_kind ~query ~timeout_ms ~phase_selection
+      ~primary_command declarations assertions ->
+    if !attempted then false else (
+      attempted := true;
+      save_unknown_input
+        ~header:(optional_input_header ~caller_kind ~timeout_ms ~phase_selection)
+        ~event:"SMT_FIRST_OPTIONAL_UNKNOWN_INPUT" path ~query ~timeout_ms
+        ~phase_selection ~primary_command declarations assertions)
+
+let save_first_optional_unknown_input = first_optional_unknown_saver ()
+
 (* Only private, source-bound native inputs are replayed. Validate the complete
    outer payload before unmarshalling, then its plain sexp shape and command
    fingerprint. The public proof path never calls this diagnostic loader. *)
@@ -2542,13 +2574,19 @@ let read_required_unknown_input path =
       really_input_string channel length) in
   let newline = String.index data '\n' in
   let header = String.sub data 0 newline in
-  let query, version, word, payload_digest, commands_digest =
-    Scanf.sscanf header
+  let _query, version, word, payload_digest, commands_digest, canonical_header, policy =
+    if String.starts_with ~prefix:"; Gillian first-optional " header then
+      Scanf.sscanf header
+        "; Gillian first-optional UNKNOWN native-ast-v1 query=%s caller=%s raw_unknown=true timeout_ms=%s phase_selection=%d ocaml=%s word=%d payload=%s commands=%s%!"
+        (fun q c t p v w d h -> q,v,w,d,h,
+          optional_input_header ~caller_kind:c ~timeout_ms:t ~phase_selection:p q d h,
+          Some (t,p))
+    else Scanf.sscanf header
       "; Gillian required-complete UNKNOWN native-ast-v1 query=%s ocaml=%s word=%d payload=%s commands=%s%!"
-      (fun q v w p c -> q,v,w,p,c) in
+      (fun q v w p c -> q,v,w,p,c,required_input_header q p c,None) in
   let payload = String.sub data (newline+1) (String.length data-newline-1) in
   if version <> Sys.ocaml_version || word <> Sys.word_size
-     || header ^ "\n" <> required_input_header query payload_digest commands_digest
+     || header ^ "\n" <> canonical_header
      || required_input_digest payload <> payload_digest
   then invalid_arg "native input ABI/integrity";
   let bytes = Bytes.unsafe_of_string payload in
@@ -2581,6 +2619,14 @@ let read_required_unknown_input path =
   list 0 raw;
   let commands : sexp list = Obj.obj raw in
   if required_commands_digest commands <> commands_digest then invalid_arg "native input commands";
+  (match policy with None -> () | Some (timeout,phase) ->
+    let last_option name = List.find_map (function
+      | Sexplib.Sexp.List [Sexplib.Sexp.Atom "set-option";
+          Sexplib.Sexp.Atom key; Sexplib.Sexp.Atom value] when key = name -> Some value
+      | _ -> None) (List.rev commands) in
+    if last_option ":timeout" <> Some timeout
+       || last_option ":smt.phase_selection" <> Some (string_of_int phase)
+    then invalid_arg "native input policy mismatch");
   (match List.rev commands with
    | command :: _ when command = primary_check_command -> ()
    | _ -> invalid_arg "native input primary check");
@@ -2698,6 +2744,12 @@ let exec_sat'
   let ret =
     match result with
     | Unknown ->
+        (if raw_unknown then
+           match Sys.getenv_opt "GILLIAN_FIRST_OPTIONAL_UNKNOWN_INPUT" with
+           | Some path when path <> "" ->
+               ignore (save_first_optional_unknown_input path ~caller_kind ~query
+                 ~timeout_ms ~phase_selection ~primary_command declarations encoded_assertions)
+           | _ -> ());
         if raw_unknown || !Config.under_approximation then raise SMT_unknown
         else if !Config.Verification.total then (
           (match Sys.getenv_opt "GILLIAN_REQUIRED_UNKNOWN_INPUT" with

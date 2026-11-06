@@ -116,17 +116,35 @@ let finite_position () =
           (let path = Filename.temp_file ~temp_dir:(Sys.getcwd ()) "required-unknown-" ".smt2" in
            Sys.remove path;
            let previous = Sys.getenv_opt "GILLIAN_REQUIRED_UNKNOWN_INPUT" in
+           let optional_path = path ^ ".optional" in
+           let previous_optional = Sys.getenv_opt "GILLIAN_FIRST_OPTIONAL_UNKNOWN_INPUT" in
            Unix.putenv "GILLIAN_REQUIRED_UNKNOWN_INPUT" path;
+           Unix.putenv "GILLIAN_FIRST_OPTIONAL_UNKNOWN_INPUT" optional_path;
            Fun.protect ~finally:(fun () ->
              Unix.putenv "GILLIAN_REQUIRED_UNKNOWN_INPUT" (Option.value previous ~default:"");
+             Unix.putenv "GILLIAN_FIRST_OPTIONAL_UNKNOWN_INPUT" (Option.value previous_optional ~default:"");
+             if Sys.file_exists optional_path then Sys.remove optional_path;
              if Sys.file_exists path then Sys.remove path)
              (fun () ->
                Alcotest.(check bool) "optional unknown cannot prove UNSAT" false
                  (Smt.proves_unsat fs g);
+               Alcotest.(check bool) "first actual optional UNKNOWN is captured" true
+                 (Sys.file_exists optional_path);
+               let optional = Smt.read_required_unknown_input optional_path in
+               Alcotest.(check bool) "actual optional timeout remains1ms" true
+                 (List.mem (Sexplib.Sexp.of_string "(set-option :timeout 1)") optional);
+               Alcotest.(check int) "actual optional input has one original check" 1
+                 (List.length (List.filter ((=) Smt.primary_check_command) optional));
+               let fingerprint () = let ch=open_in_bin optional_path in
+                 Fun.protect ~finally:(fun () -> close_in ch)
+                   (fun () -> really_input_string ch (in_channel_length ch)) in
+               let first_input = fingerprint () in
                Alcotest.(check bool) "remembered inconclusive precheck still proves nothing" false
                  (Smt.proves_unsat fs g);
                Alcotest.(check bool) "optional input remains absent" false (Sys.file_exists path);
                let result = rejected (fun () -> ignore (Smt.exec_sat fs g)) in
+               Alcotest.(check bool) "later UNKNOWN never replaces first optional input" true
+                 (fingerprint () = first_input);
                Alcotest.(check bool) "fatal required input is captured" true (Sys.file_exists path);
                let channel = open_in_bin path in
                let script = Fun.protect ~finally:(fun () -> close_in channel)
@@ -10120,6 +10138,23 @@ let primary_check_declarations_and_cache () = with_primary_check_trace (fun () -
       Alcotest.(check string) "fresh complete native AST replay is SAT"
         "SMT_NEEDED_INPUT_REPLAY result=sat checks=1 proof=false" (replay ());
       let original=read () in
+      (* Synthetic optional headers exercise the same complete commands and
+         one-check replay, including the stored1s policy; no UNKNOWN is claimed. *)
+      let optional assertions =
+        let save = Smt.first_optional_unknown_saver () in
+        save path ~caller_kind:"optional-codec-replay" ~query:"query_7.smt2"
+          ~timeout_ms:"1000" ~phase_selection:3 ~primary_command:primary declarations assertions in
+      Sys.remove path;
+      Alcotest.(check bool) "optional cached datatype packet is complete" true
+        (optional (assertions @ [signed_zero]));
+      Alcotest.(check string) "optional complete native AST replay is one SAT check"
+        "SMT_NEEDED_INPUT_REPLAY result=sat checks=1 proof=false" (replay ());
+      Sys.remove path;
+      Alcotest.(check bool) "optional false packet is complete" true
+        (optional (assertions @ [signed_zero;Sexplib.Sexp.of_string "(assert false)"]));
+      Alcotest.(check string) "optional complete native AST replay is one UNSAT check"
+        "SMT_NEEDED_INPUT_REPLAY result=unsat checks=1 proof=false" (replay ());
+      write original;
       let changed=Bytes.of_string original in
       let i=Bytes.length changed-1 in Bytes.set changed i (Char.chr (Char.code (Bytes.get changed i) lxor 1));
       write (Bytes.to_string changed);
@@ -20338,4 +20373,78 @@ let tests = tests @
    | Some _,None -> [
        Alcotest.test_case "literal cast full-frame native model fallback and declines" `Quick
          (with_total literal_cast_native)]
+   | _ -> [])
+
+(* Codec/latch controls are synthetic inputs, not UNKNOWN or proof verdicts.
+   The separate1ms group2 exercises the real optional/required UNKNOWN path. *)
+let first_optional_input_codec () = with_primary_check_trace (fun () ->
+  Alcotest.(check bool) "ordinary solver path stays actual native SAT" true
+    (Option.is_some (Smt.exec_sat (Expr.Set.singleton (Expr.bool true)) (Hashtbl.create 1)));
+  let path = Filename.temp_file ~temp_dir:(Sys.getcwd ()) "first-optional-" ".input" in
+  Sys.remove path;
+  let primary_command = Smt.primary_check_command in
+  let call saver path query assertions = saver path ~caller_kind:"optional-codec-control"
+      ~query ~timeout_ms:"1000" ~phase_selection:3 ~primary_command [] assertions in
+  let read () = let ch=open_in_bin path in
+    Fun.protect ~finally:(fun () -> close_in ch)
+      (fun () -> really_input_string ch (in_channel_length ch)) in
+  let write text = let ch=open_out_bin path in
+    Fun.protect ~finally:(fun () -> close_out ch) (fun () -> output_string ch text) in
+  Fun.protect ~finally:(fun () -> if Sys.file_exists path then Sys.remove path)
+    (fun () ->
+      let saver = Smt.first_optional_unknown_saver () in
+      Alcotest.(check bool) "first complete synthetic input is saved" true
+        (call saver path "query_7.smt2" [Sexplib.Sexp.of_string "(assert true)"]);
+      let original = read () in
+      Alcotest.(check bool) "optional header keeps actual caller raw policy and1s" true
+        (String.starts_with ~prefix:("; Gillian first-optional UNKNOWN native-ast-v1 query=query_7.smt2 " ^
+          "caller=optional-codec-control raw_unknown=true timeout_ms=1000 phase_selection=3 ") original);
+      let commands = Smt.read_required_unknown_input path in
+      Alcotest.(check int) "optional packet has exactly one original check" 1
+        (List.length (List.filter ((=) primary_command) commands));
+      Alcotest.(check bool) "optional native commands preserve policy and assertion" true
+        (List.mem (Sexplib.Sexp.of_string "(set-option :timeout 1000)") commands
+         && List.mem (Sexplib.Sexp.of_string "(assert true)") commands);
+      Sys.remove path;
+      Alcotest.(check bool) "successful first attempt never retries even after removal" false
+        (call saver path "query_8.smt2" []);
+      Alcotest.(check bool) "no later replacement exists" false (Sys.file_exists path);
+      List.iter (fun (label,first_path,assertions) ->
+        let saver = Smt.first_optional_unknown_saver () in
+        Alcotest.(check bool) (label ^ " first attempt is unavailable") false
+          (call saver first_path "query_7.smt2" assertions);
+        Alcotest.(check bool) (label ^ " unavailable first attempt still latches") false
+          (call saver path "query_8.smt2" []);
+        Alcotest.(check bool) (label ^ " no later file") false (Sys.file_exists path))
+        ["invalid-path","relative.input",[];
+         "open-failure",Filename.concat path "missing.input",[];
+         "oversized",path,[Sexplib.Sexp.Atom (String.make 65537 'x')]];
+      write original;
+      let existing = Smt.first_optional_unknown_saver () in
+      Alcotest.(check bool) "exclusive-open refuses existing input" false
+        (call existing path "query_8.smt2" []);
+      Alcotest.(check string) "existing bytes unchanged" original (read ());
+      Sys.remove path;
+      Alcotest.(check bool) "exclusive-open failure also latches" false
+        (call existing path "query_9.smt2" []);
+      let policy = Smt.first_optional_unknown_saver () in
+      Alcotest.(check bool) "invalid actual policy fails before write" false
+        (policy path ~caller_kind:"required-complete" ~query:"query_7.smt2"
+          ~timeout_ms:"1000" ~phase_selection:3 ~primary_command [] []);
+      Alcotest.(check bool) "format failure also latches" false (call policy path "query_8.smt2" []);
+      let changed = Str.global_replace (Str.regexp_string "timeout_ms=1000") "timeout_ms=999" original in
+      write changed;
+      Alcotest.(check bool) "header and actual command policy must agree" true
+        (try ignore (Smt.read_required_unknown_input path); false with Invalid_argument _ -> true);
+      let bytes = Bytes.of_string original in
+      let i=Bytes.length bytes-1 in Bytes.set bytes i (Char.chr (Char.code (Bytes.get bytes i) lxor 1));
+      write (Bytes.to_string bytes);
+      Alcotest.(check bool) "optional corrupt payload rejects before decode" true
+        (try ignore (Smt.read_required_unknown_input path); false with Invalid_argument _ -> true)))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "first optional UNKNOWN native codec and first-attempt latch" `Quick
+         (with_total first_optional_input_codec)]
    | _ -> [])
