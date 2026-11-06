@@ -2960,7 +2960,23 @@ let seeded_model fs gamma =
                 violates bound op value
             | _ -> false) fs
       | _ -> false) (Expr.Set.diff query fs) in
-    if conflicting then None else try
+    (* The generic zero/zero hint can also contradict an original x < y.
+       Read only explicit finite Number bindings from this complete candidate;
+       a contradiction declines the hint, never decides the original query.
+       Keep conservative numeric +/-0 handling and unsupported expressions. *)
+    let values = Expr.Set.fold (fun atom acc -> match atom with
+      | Expr.BinOp (LVar name, (Equal | ValueEqual), Lit (Num value))
+      | Expr.BinOp (Lit (Num value), (Equal | ValueEqual), LVar name)
+        when Hashtbl.find_opt gamma name = Some Type.NumberType
+          && Float.is_finite value -> (name,value) :: acc
+      | _ -> acc) query [] in
+    let conflicting_pair = Expr.Set.exists (function
+      | Expr.BinOp (LVar left, op, LVar right) ->
+          (match List.assoc_opt left values, List.assoc_opt right values with
+           | Some x, Some y -> violates x op y
+           | _ -> false)
+      | _ -> false) fs in
+    if conflicting || conflicting_pair then None else try
       run_sat ~caller_kind:"optional-seeded-model" ~timeout_ms:(optional_timeout 1000) ~phase_selection:3
         ~raw_unknown:true query gamma
     with SMT_unknown -> None

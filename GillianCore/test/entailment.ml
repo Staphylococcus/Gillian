@@ -17891,13 +17891,26 @@ let compatible_seed_literal_bounds () = with_nonblank_counter_trace (fun () ->
      "strict_upper",(fun n -> bin FLessThan n (Expr.num (-2.))),None;
      "weak_upper",(fun n -> bin FLessThanEqual n (Expr.num (-2.))),None;
      "right_literal_equality",(fun n -> bin Equal n (Expr.num 3.)),None;
-     "left_literal_equality",(fun n -> bin ValueEqual (Expr.num 3.) n),None])
+     "left_literal_equality",(fun n -> bin ValueEqual (Expr.num 3.) n),None];
+  List.iter (fun (label,make,seed) ->
+    let fs,gamma,n,i,s,t = compatible_seed_fixture label in
+    ignore (compatible_seed_run ~seed label (Expr.Set.add (make n i) fs) gamma n i s t))
+    ["seeded_left_less",(fun n i -> bin FLessThan n i),None;
+     "seeded_right_less",(fun n i -> bin FLessThan i n),None;
+     "compatible_weak_pair",(fun n i -> bin FLessThanEqual n i),Some "sat";
+     "compatible_equal_pair",(fun n i -> bin Equal n i),Some "sat"])
 
 let compatible_seed_contradiction_fallback () = with_nonblank_counter_trace (fun () ->
   let fs,gamma,n,i,s,t = compatible_seed_fixture "contradiction" in
   let impossible = fs |> Expr.Set.add (bin FLessThan (Expr.num 2.) n)
     |> Expr.Set.add (bin FLessThanEqual n (Expr.num 2.)) in
   ignore (compatible_seed_run ~seed:None ~final:"unsat" "original-whole-contradiction"
+    impossible gamma n i s t);
+  let fs,gamma,n,i,s,t = compatible_seed_fixture "retained_utf16" in
+  let impossible = fs |> Expr.Set.add (bin FLessThan n i)
+    |> Expr.Set.add (bin Equal s (Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical "A"))))
+    |> Expr.Set.add (bin Equal (Expr.UnOp (Utf16Len,s)) (Expr.int 0)) in
+  ignore (compatible_seed_run ~seed:None ~final:"unsat" "retained-UTF16-contradiction"
     impossible gamma n i s t);
   let fs,gamma,n,i,s,t = compatible_seed_fixture "unsupported" in
   let fs = Expr.Set.add (bin FLessThan (Expr.num 2.) (bin FPlus n (Expr.num 1.))) fs in
@@ -17909,7 +17922,16 @@ let compatible_seed_signed_zeros () = with_nonblank_counter_trace (fun () ->
   List.iter (fun (label,zero) ->
     ignore (compatible_seed_run ~bits:zero label
       (Expr.Set.add (bin ValueEqual n (Expr.num zero)) fs) gamma n i s t))
-    ["compatible-positive-zero",0.;"compatible-negative-zero",-.0.])
+    ["compatible-positive-zero",0.;"compatible-negative-zero",-.0.];
+  let fs,gamma,n,i,s,t = compatible_seed_fixture "negative_zero_fallback" in
+  let limit = Expr.LVar "#compatible_seed_positive_limit" in
+  Hashtbl.add gamma "#compatible_seed_positive_limit" Type.NumberType;
+  let fs = fs |> Expr.Set.add (bin ValueEqual n (Expr.num (-.0.)))
+    |> Expr.Set.add (Expr.UnOp (IsInt,limit))
+    |> Expr.Set.add (bin FLessThan n limit)
+    |> Expr.Set.add (bin FLessThanEqual limit (Expr.num 3.)) in
+  ignore (compatible_seed_run ~seed:None ~bits:(-.0.) "raw-negative-zero-full-fallback"
+    fs gamma n i s t))
 
 let tests = tests @
   (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
