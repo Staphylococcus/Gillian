@@ -43,6 +43,13 @@ val integer_order_core :
 val finite_difference_core :
   Expr.Set.t -> (string, Type.t) Hashtbl.t -> Expr.t -> Expr.Set.t option
 
+(** Bounded connected component of exact scalar numeric atoms. Selection is
+    only a weakening; it changes no input and requires native UNSAT. *)
+val numeric_component_core :
+  existentials:Containers.SS.t ->
+  original_gamma:(string, Type.t) Hashtbl.t ->
+  Expr.Set.t -> (string, Type.t) Hashtbl.t -> Expr.t -> Expr.Set.t option
+
 (** Pure original-fact selector/projection for the guarded sequence-count
     obligation. Selection proves nothing; the caller must still obtain actual
     native UNSAT. Neither source formulae nor either Gamma is mutated. *)

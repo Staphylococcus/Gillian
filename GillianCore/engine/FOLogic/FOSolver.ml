@@ -1072,6 +1072,43 @@ let reduce_original_nonnegative_cast_goals
         | _ -> goal)
       right_fs
 
+(* A connected component within the scalar numeric weakening, not a closure
+   of the mixed-theory query. Retain exact atoms and the failed goal; native
+   UNSAT alone licenses success. SAT/UNKNOWN keep every existing fallback. *)
+let numeric_component_core ~existentials ~original_gamma formulae gamma goal =
+  let typed name =
+    Hashtbl.find_opt original_gamma name = Some Type.NumberType
+    && Hashtbl.find_opt gamma name = Some Type.NumberType
+  in
+  let rec scalar = function
+    | Expr.Lit (Num _ | Bool _) -> true
+    | LVar name -> typed name
+    | UnOp ((Not | IsInt | FUnaryMinus), e) -> scalar e
+    | BinOp (a, (Equal | ValueEqual | FLessThan | FLessThanEqual
+                 | FPlus | FMinus | FTimes | FDiv | FMod | And | Or | Impl), b) ->
+        scalar a && scalar b
+    | _ -> false
+  in
+  if not !Config.Verification.total || !Config.under_approximation
+     || not (SS.is_empty existentials) || not (Expr.Set.mem goal formulae)
+     || SS.is_empty (Expr.lvars goal) || not (scalar goal)
+  then None
+  else
+    let pool = Expr.Set.filter scalar formulae in
+    let rec close passes names =
+      let core = Expr.Set.filter (fun atom ->
+        let vars = Expr.lvars atom in
+        SS.is_empty vars || not (SS.is_empty (SS.inter names vars))) pool in
+      let next = Expr.Set.fold (fun atom names ->
+        SS.union names (Expr.lvars atom)) core names in
+      if SS.equal names next then
+        if Expr.Set.mem goal core && not (Expr.Set.equal core formulae)
+        then Some core else None
+      else if passes = 1 then None
+      else close (passes - 1) next
+    in
+    close 8 (Expr.lvars goal)
+
 let check_entailment_simplified
     ?(matching = false)
     (existentials : SS.t)
@@ -1673,6 +1710,18 @@ let check_entailment_simplified
         then None
         else if length_zero_proved () then None
         else if utf16_code_order_proved () then None
+        else if
+          (match numeric_component_core
+              ~existentials:finite_bound_original_existentials
+              ~original_gamma:sequence_projection_original_gamma
+              formulae gamma_tbl right_f with
+           | Some core when not (List.exists (Expr.Set.equal core)
+                                  [contained; numeric; focused]) ->
+               Smt.proves_unsat
+                 ~caller_kind:"optional-entailment-numeric-component"
+                 core gamma_tbl
+           | _ -> false)
+        then None
         else if
           contained_omission
           (* Pure-Number goals need their numeric bridge premises. Keep the
