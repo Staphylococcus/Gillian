@@ -16131,7 +16131,7 @@ let zero_decline_complete label before contexts result expected gamma =
   Alcotest.(check bool) (label ^ " no retired optional-seeded-model dispatch") true
     (not (List.exists (fun c -> pending_context_field "caller" c
       = `String "optional-seeded-model") contexts));
-  List.iter (fun context ->
+  let check_dump context =
     let text key = pending_context_field key context |> typed_lookup_alias_text in
     let query = text "query" in
     let actual_dump = "GIL query:\nFS: " ^ text "original_fs"
@@ -16140,10 +16140,22 @@ let zero_decline_complete label before contexts result expected gamma =
     Alcotest.(check string) (label ^ " actual dump joins its own exact sidecar")
       (zero_decline_compact actual_dump)
       (zero_decline_compact
-        (nonblank_counter_read (Filename.concat "gillian_smt_queries" query)))) contexts;
+        (nonblank_counter_read (Filename.concat "gillian_smt_queries" query))) in
+  List.iter check_dump contexts;
   let selected = List.filter (fun c -> pending_context_field "caller" c
     = `String "required-complete") contexts in
-  Alcotest.(check int) (label ^ " one actual full fallback") 1 (List.length selected);
+  (* A later validated full-query hint may settle the public call. In that
+     case test the unhinted formula separately; do not assert a route that the
+     public solver did not take. Its own contexts were checked above. *)
+  let selected = if selected <> [] then selected else (
+    let before = nonblank_counter_rows () in
+    let model,full = pending_context_capture (fun () -> Smt.exec_sat expected gamma) in
+    Alcotest.(check bool) (label ^ " separate unhinted model status")
+      (result = "sat") (Option.is_some model);
+    positive_finite_identity_observe (label ^ " separate-unhinted") before full result;
+    List.iter check_dump full;
+    full) in
+  Alcotest.(check int) (label ^ " one actual unhinted full check") 1 (List.length selected);
   let context = List.hd selected in
   Alcotest.(check string) (label ^ " every original native atom and no hints")
     (zero_decline_compact (typed_alias_core_expected_fs expected))
