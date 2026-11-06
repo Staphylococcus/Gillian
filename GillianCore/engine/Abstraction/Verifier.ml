@@ -522,7 +522,7 @@ struct
       in
       let new_spec = { spec with spec_sspecs } in
       L.verbose (fun m -> m "Simplified SPECS:@\n@[%a@]@\n" Spec.pp new_spec);
-      (tests, new_spec)
+      (List.rev tests, new_spec)
 
   let testify_lemma
       ?entry_rank
