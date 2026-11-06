@@ -2476,9 +2476,17 @@ let reset_solver () =
   let () = RepeatCache.clear () in
   ()
 
-(* One explicit, bounded reproducer after a fatal required UNKNOWN. Copy the
-   concrete native tuple; never re-encode, ask the solver again or replace its
-   error. No all-query context capture is enabled by this opt-in path. *)
+(* One complete native command input, preserving the materialized AST's sharing.
+   No compression or GIL reconstruction; the header and payload share 64KiB. *)
+let required_input_digest text = Digest.BLAKE256.(to_hex (string text))
+let required_commands_digest commands =
+  required_input_digest (Sexplib.Sexp.to_string_mach (List commands))
+
+let required_input_header query payload_digest commands_digest =
+  Printf.sprintf
+    "; Gillian required-complete UNKNOWN native-ast-v1 query=%s ocaml=%s word=%d payload=%s commands=%s\n"
+    query Sys.ocaml_version Sys.word_size payload_digest commands_digest
+
 let save_required_unknown_input path ~query ~timeout_ms ~phase_selection
     ~primary_command declarations assertions =
   let created = ref false in
@@ -2489,33 +2497,110 @@ let save_required_unknown_input path ~query ~timeout_ms ~phase_selection
     try L.normal (fun m -> m "SMT_REQUIRED_UNKNOWN_INPUT query=%s status=%s%s" query status reason)
     with _ -> () in
   try
-    if path = "" || Filename.is_relative path then invalid_arg "absolute input path";
+    if path = "" || Filename.is_relative path || String.length query > 128
+       || not (String.for_all (function
+            | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' | '-' | '.' -> true | _ -> false) query)
+    then invalid_arg "native input path/query";
     stage := "format";
-    let buffer = Buffer.create 4096 in
-    let formatter = Format.make_formatter
-        (fun text offset length ->
-          if Buffer.length buffer + length > 65536 then (too_large := true; raise Exit);
-          Buffer.add_substring buffer text offset length)
-        (fun () -> ()) in
-    Fmt.pf formatter "; Gillian required-complete UNKNOWN query=%s@\n" query;
     let options = List.map (fun (key,value) -> set_option (":" ^ key) value) z3_config
         @ [set_option ":timeout" timeout_ms;
            set_option ":smt.phase_selection" (string_of_int phase_selection)] in
-    Fmt.pf formatter "%a@?"
-      (Fmt.list ~sep:(Fmt.any "\n") Sexplib.Sexp.pp_mach)
-      (options @ declarations @ assertions @ [primary_command]);
+    let commands = options @ declarations @ assertions @ [primary_command] in
+    let empty_digest = String.make 64 '0' in
+    let header_bytes = String.length (required_input_header query empty_digest empty_digest) in
+    let buffer = Bytes.create (65536 - header_bytes) in
+    let length = try Marshal.to_buffer buffer 0 (Bytes.length buffer) commands [] with
+      | Failure message when message = "Marshal.to_buffer: buffer overflow" -> too_large := true; raise Exit in
+    let payload = Bytes.sub_string buffer 0 length in
+    let decoded : sexp list = Marshal.from_string payload 0 in
+    if Marshal.total_size (Bytes.unsafe_of_string payload) 0 <> length || decoded <> commands
+    then invalid_arg "native input roundtrip";
+    let header = required_input_header query (required_input_digest payload)
+        (required_commands_digest commands) in
+    if String.length header + length > 65536 then (too_large := true; raise Exit);
     stage := "open";
     let channel = open_out_gen [Open_wronly;Open_creat;Open_excl;Open_binary] 0o600 path in
     created := true;
     stage := "write";
     Fun.protect ~finally:(fun () -> close_out channel)
-      (fun () -> output_string channel (Buffer.contents buffer); flush channel);
+      (fun () -> output_string channel header; output_string channel payload; flush channel);
     note "saved";
     true
   with _ ->
     if !created then (try Sys.remove path with _ -> ());
     note "unavailable";
     false
+
+(* Only private, source-bound native inputs are replayed. Validate the complete
+   outer payload before unmarshalling, then its plain sexp shape and command
+   fingerprint. The public proof path never calls this diagnostic loader. *)
+let read_required_unknown_input path =
+  let channel = open_in_bin path in
+  let data = Fun.protect ~finally:(fun () -> close_in channel) (fun () ->
+      let length = in_channel_length channel in
+      if length <= 0 || length > 65536 then invalid_arg "native input64KiB cap";
+      really_input_string channel length) in
+  let newline = String.index data '\n' in
+  let header = String.sub data 0 newline in
+  let query, version, word, payload_digest, commands_digest =
+    Scanf.sscanf header
+      "; Gillian required-complete UNKNOWN native-ast-v1 query=%s ocaml=%s word=%d payload=%s commands=%s%!"
+      (fun q v w p c -> q,v,w,p,c) in
+  let payload = String.sub data (newline+1) (String.length data-newline-1) in
+  if version <> Sys.ocaml_version || word <> Sys.word_size
+     || header ^ "\n" <> required_input_header query payload_digest commands_digest
+     || required_input_digest payload <> payload_digest
+  then invalid_arg "native input ABI/integrity";
+  let bytes = Bytes.unsafe_of_string payload in
+  if String.length payload < 20 || Bytes.get_int32_be bytes 0 <> Int32.of_string "0x8495a6be"
+     || Int32.to_int (Bytes.get_int32_be bytes 4) <> String.length payload - 20
+     || Int32.to_int (Bytes.get_int32_be bytes 16) < 0
+     || Int32.to_int (Bytes.get_int32_be bytes 16) > 524288
+     || Marshal.total_size bytes 0 <> String.length payload
+  then invalid_arg "native input bounded payload";
+  let raw : Obj.t = Marshal.from_string payload 0 in
+  let nodes = ref 0 in
+  let touch depth =
+    incr nodes;
+    if depth > 2048 || !nodes > 1000000 then invalid_arg "native input shape budget" in
+  let rec list depth value =
+    touch depth;
+    if Obj.is_int value then (
+      if (Obj.obj value : int) <> 0 then invalid_arg "native input list")
+    else if Obj.tag value = 0 && Obj.size value = 2 then (
+      sexp depth (Obj.field value 0); list depth (Obj.field value 1))
+    else invalid_arg "native input list"
+  and sexp depth value =
+    touch depth;
+    if Obj.is_int value || Obj.size value <> 1 then invalid_arg "native input sexp";
+    match Obj.tag value with
+    | 0 -> let atom = Obj.field value 0 in
+        if Obj.is_int atom || Obj.tag atom <> Obj.string_tag then invalid_arg "native input atom"
+    | 1 -> list (depth+1) (Obj.field value 0)
+    | _ -> invalid_arg "native input sexp" in
+  list 0 raw;
+  let commands : sexp list = Obj.obj raw in
+  if required_commands_digest commands <> commands_digest then invalid_arg "native input commands";
+  (match List.rev commands with
+   | command :: _ when command = primary_check_command -> ()
+   | _ -> invalid_arg "native input primary check");
+  commands
+
+let replay_required_unknown_input path =
+  let open Sexplib.Sexp in
+  let commands = read_required_unknown_input path in
+  (match !terminal_solver_owner with
+   | None -> () | Some _ -> invalid_arg "native input requires a fresh solver");
+  let primary, setup = match List.rev commands with
+    | primary :: setup -> primary, List.rev setup | [] -> assert false in
+  List.iter (function
+    | List (Atom ("set-option" | "declare-const" | "declare-fun" | "define-fun"
+        | "define-fun-rec" | "define-funs-rec" | "declare-sort" | "define-sort"
+        | "declare-datatype" | "declare-datatypes" | "assert") :: _) -> ()
+    | _ -> invalid_arg "native input setup command") setup;
+  init_solver ();
+  List.iter cmd setup;
+  match primary_check !solver primary with Sat -> "sat" | Unsat -> "unsat" | Unknown -> "unknown"
 
 let exec_sat'
     ~caller_kind
@@ -4895,8 +4980,10 @@ let lift_model
 (* Standalone preparation controls link the real verifier but must never start
    SMT. Close the untouched solver before module initialization can spawn it;
    existing terminal guards reject any later initialization or solver access.
+   Diagnostic input replay validates before starting its single fresh solver.
    Ordinary verifier startup retains the original eager initialization. *)
 let () =
   if Sys.getenv_opt "GILLIAN_PREPARATION_CONTROLS_NO_SOLVER" = Some "1" then
     shutdown_solver ()
+  else if Sys.getenv_opt "GILLIAN_REQUIRED_UNKNOWN_REPLAY" <> None then ()
   else init_solver ()

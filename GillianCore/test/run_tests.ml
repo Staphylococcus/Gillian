@@ -132,6 +132,11 @@ let terminal_solver_probe mode =
   | _ -> assert false
 
 let () =
-  match Sys.getenv_opt "GILLIAN_SMT_TERMINAL_PROBE" with
-  | None -> Alcotest.run "Gillian" test_suites
-  | Some mode -> terminal_solver_probe mode
+  match Sys.getenv_opt "GILLIAN_REQUIRED_UNKNOWN_REPLAY" with
+  | Some path ->
+      let result = Smt.replay_required_unknown_input path in
+      Printf.printf "SMT_NEEDED_INPUT_REPLAY result=%s checks=1 proof=false\n%!" result
+  | None ->
+      match Sys.getenv_opt "GILLIAN_SMT_TERMINAL_PROBE" with
+      | None -> Alcotest.run "Gillian" test_suites
+      | Some mode -> terminal_solver_probe mode

@@ -132,11 +132,9 @@ let finite_position () =
                let script = Fun.protect ~finally:(fun () -> close_in channel)
                  (fun () -> really_input_string channel (in_channel_length channel)) in
                Alcotest.(check bool) "fatal input stays complete and bounded" true
-                 (String.length script <= 65536 && String.ends_with ~suffix:"(check-sat)" script);
-               Alcotest.(check bool) "fatal input has the complete native header" true
-                 (String.starts_with ~prefix:"; Gillian required-complete UNKNOWN query=query_" script
-                  && String.ends_with ~suffix:".smt2" (List.hd (String.split_on_char '\n' script)));
-               let commands = Sexplib.Sexp.scan_sexps (Lexing.from_string script) in
+                 (String.length script <= 65536 &&
+                  String.starts_with ~prefix:"; Gillian required-complete UNKNOWN native-ast-v1 query=query_" script);
+               let commands = Smt.read_required_unknown_input path in
                Alcotest.(check int) "fatal input has exactly one original check" 1
                  (List.length (List.filter ((=) (Sexplib.Sexp.List [Sexplib.Sexp.Atom "check-sat"])) commands));
                Alcotest.(check bool) "existing input is not overwritten" false
@@ -10086,21 +10084,64 @@ let primary_check_declarations_and_cache () = with_primary_check_trace (fun () -
         | _ -> Alcotest.fail "malformed concrete command") values
     | _ -> Alcotest.fail "missing concrete commands" in
   let assertions = commands "encoded_assertions" and declarations = commands "declarations" in
-  let path = Filename.temp_file ~temp_dir:(Sys.getcwd ()) "native-cache-input-" ".smt2" in
+  let path = Filename.temp_file ~temp_dir:(Sys.getcwd ()) "native-cache-input-" ".input" in
   Sys.remove path;
+  let primary = Sexplib.Sexp.List [Sexplib.Sexp.Atom "check-sat"] in
+  let signed_zero = Sexplib.Sexp.of_string
+      "(assert (not (= (_ +zero 11 53) (_ -zero 11 53))))" in
+  let save assertions = Smt.save_required_unknown_input path ~query:"control-datatype-cache"
+      ~timeout_ms:"30000" ~phase_selection:3 ~primary_command:primary declarations assertions in
+  let replay () =
+    let env = Unix.environment () |> Array.to_list |> List.filter (fun item ->
+        not (String.starts_with ~prefix:"GILLIAN_" item || String.starts_with ~prefix:"SMT_" item)) in
+    let env = Array.of_list (("GILLIAN_REQUIRED_UNKNOWN_REPLAY=" ^ path) :: env) in
+    let input,output,errors = Unix.open_process_args_full Sys.executable_name [|Sys.executable_name|] env in
+    let status = ref (Unix.WEXITED 127) in
+    let answer = Fun.protect
+        ~finally:(fun () -> status := Unix.close_process_full (input,output,errors))
+        (fun () -> input_line input) in
+    Alcotest.(check bool) "fresh native input child exits and is reaped" true (!status = Unix.WEXITED 0);
+    answer in
+  let read () = let channel=open_in_bin path in
+    Fun.protect ~finally:(fun () -> close_in channel)
+      (fun () -> really_input_string channel (in_channel_length channel)) in
+  let write data = let channel=open_out_bin path in
+    Fun.protect ~finally:(fun () -> close_out channel) (fun () -> output_string channel data) in
   Fun.protect ~finally:(fun () -> if Sys.file_exists path then Sys.remove path)
     (fun () ->
-      Alcotest.(check bool) "cached datatype input is complete and bounded" true
-        (Smt.save_required_unknown_input path ~query:"control-datatype-cache"
-          ~timeout_ms:"30000" ~phase_selection:3
-          ~primary_command:(Sexplib.Sexp.List [Sexplib.Sexp.Atom "check-sat"]) declarations assertions);
-      let channel = Unix.open_process_args_in "z3" [|"z3";"-smt2";path|] in
-      let status = ref (Unix.WEXITED 127) in
-      let answer = Fun.protect ~finally:(fun () -> status := Unix.close_process_in channel)
-        (fun () -> input_line channel) in
-      Alcotest.(check string) "fresh cached-prelude replay is SAT" "sat" answer;
-      Alcotest.(check bool) "fresh replay exits without parser/prelude failure" true
-        (!status = Unix.WEXITED 0)))
+      Alcotest.(check bool) "cached datatype native AST stays complete and bounded" true
+        (save (assertions @ [signed_zero]));
+      let commands = Smt.read_required_unknown_input path in
+      let suffix = declarations @ assertions @ [signed_zero;primary] in
+      let rec drop n xs = if n=0 then xs else drop (n-1) (List.tl xs) in
+      Alcotest.(check bool) "native declarations/assertions/order and zero signs are exact" true
+        (List.length commands >= List.length suffix &&
+         drop (List.length commands-List.length suffix) commands = suffix);
+      Alcotest.(check string) "fresh complete native AST replay is SAT"
+        "SMT_NEEDED_INPUT_REPLAY result=sat checks=1 proof=false" (replay ());
+      let original=read () in
+      let changed=Bytes.of_string original in
+      let i=Bytes.length changed-1 in Bytes.set changed i (Char.chr (Char.code (Bytes.get changed i) lxor 1));
+      write (Bytes.to_string changed);
+      Alcotest.(check bool) "changed payload is rejected before decoding" true
+        (try ignore(Smt.read_required_unknown_input path); false with Invalid_argument _ -> true);
+      write (String.sub original 0 (String.length original-1));
+      Alcotest.(check bool) "truncated payload is rejected" true
+        (try ignore(Smt.read_required_unknown_input path); false with Invalid_argument _ -> true);
+      Sys.remove path;
+      Alcotest.(check bool) "native false assertion control is captured" true
+        (save (assertions @ [signed_zero;Sexplib.Sexp.of_string "(assert false)"]));
+      Alcotest.(check string) "fresh native false assertion is UNSAT"
+        "SMT_NEEDED_INPUT_REPLAY result=unsat checks=1 proof=false" (replay ());
+      Sys.remove path;
+      let shared=Sexplib.Sexp.of_string "(assert true)" in
+      let repeated=List.init 10000 (fun _ -> shared) in
+      Alcotest.(check bool) "shared native AST fits when its text exceeds64KiB" true
+        (String.length (Sexplib.Sexp.to_string_mach (Sexplib.Sexp.List repeated)) > 65536 &&
+         Smt.save_required_unknown_input path ~query:"control-sharing" ~timeout_ms:"30000"
+           ~phase_selection:3 ~primary_command:primary [] repeated);
+      Alcotest.(check int) "sharing preserves every original assertion" 10000
+        (Smt.read_required_unknown_input path |> List.filter ((=) shared) |> List.length)))
 
 (* Four complete primary requests share the same typed frame across phases.
    Removing only the arithmetic link admits a concrete countermodel; restoring

@@ -19,12 +19,18 @@ val shutdown_solver : unit -> unit
 val with_native_smt_context :
   (unit -> Yojson.Safe.t) -> (unit -> 'a) -> 'a
 
-(** Diagnostic writer used after a fatal required UNKNOWN. Copies concrete
-    native commands/options without solver calls. Exclusive creation, at most
-    64KiB, no truncation/overwrite; failure never changes the solver verdict. *)
+(** One complete native command AST with ordinary object sharing. Header,
+    integrity digests and payload together stay within64KiB. No compression,
+    solver call, truncation or overwrite; failure preserves the native error. *)
 val save_required_unknown_input :
   string -> query:string -> timeout_ms:string -> phase_selection:int ->
   primary_command:Sexplib.Sexp.t -> Sexplib.Sexp.t list -> Sexplib.Sexp.t list -> bool
+
+(** Load only a bounded, ABI/integrity/shape-checked private native input.
+    Replay submits the stored sequence once to a fresh solver; its raw status
+    is diagnostic only and never proof acceptance. *)
+val read_required_unknown_input : string -> Sexplib.Sexp.t list
+val replay_required_unknown_input : string -> string
 
 (** Native model together with its originating datatype declarations, retained
     across solver resets and cache hits. *)
