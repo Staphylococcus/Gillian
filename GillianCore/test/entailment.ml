@@ -20883,3 +20883,107 @@ let tests = tests @
        Alcotest.test_case "isolated phase0 diagnostic codec exact native UNSAT replay" `Quick
          (with_total (isolated_optional_codec false))]
    | _ -> [])
+
+let negated_bound_fixture label lower upper guard zero =
+  let fs,gamma,index,keys,format = literal_formatter_fixture label zero in
+  let cursor_name = "#literal_formatter_" ^ label ^ "_cursor" in
+  let cursor = Expr.LVar cursor_name in
+  Hashtbl.add gamma cursor_name Type.NumberType;
+  let fs = Expr.Set.add (Expr.UnOp (IsInt,cursor)) fs in
+  let fs = match lower with None -> fs | Some n ->
+    Expr.Set.add (bin FLessThanEqual (Expr.num n) cursor) fs in
+  let fs = match upper with None -> fs | Some n ->
+    Expr.Set.add (bin FLessThanEqual cursor (Expr.num n)) fs in
+  Expr.Set.add (guard cursor) fs,gamma,index,cursor,keys,format
+
+let negated_bound_attempt label fs gamma index cursor zero chosen expected =
+  let atoms = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let query = fs |> Expr.Set.add (bin ValueEqual index (Expr.num zero))
+    |> Expr.Set.add (bin ValueEqual cursor (Expr.num chosen)) in
+  Alcotest.(check bool) (label ^ " full FS plus exact finite candidates") true
+    (match Smt.literal_formatter_witness_query fs gamma with
+     | Some actual -> Expr.Set.equal actual query | None -> false);
+  let before = nonblank_counter_rows () in
+  let model = Smt.literal_formatter_model fs gamma in
+  Alcotest.(check bool) (label ^ " native whole-frame result") expected (Option.is_some model);
+  ignore (nonblank_counter_observe ~phase_selection:0 label before
+    "optional-literal-formatter" (if expected then "sat" else "unsat") query gamma);
+  nonblank_counter_retained label fs gamma atoms types;
+  model
+
+let negated_bound_models () = with_nonblank_counter_trace (fun () ->
+  let models = List.map (fun (label,lower,upper,guard,chosen,range) ->
+    let fs,gamma,index,cursor,_,_ = negated_bound_fixture label lower upper guard 0. in
+    let model = Option.get (negated_bound_attempt label fs gamma index cursor 0. chosen true) in
+    let public = Option.get (Smt.check_sat fs gamma) in
+    let before = nonblank_counter_rows () and files = nonblank_counter_files () in
+    ignore (Smt.check_sat fs gamma);
+    Alcotest.(check bool) (label ^ " original cache adds no endpoint") true
+      (before = nonblank_counter_rows () && files = nonblank_counter_files ());
+    let name = function Expr.LVar n -> n | _ -> assert false in
+    model,public,gamma,[name index,Literal.Num 0.;name cursor,Literal.Num chosen],name cursor,range)
+    ["exit_cursor",Some 2.,Some 4.,(fun x -> not_ (bin FLessThan x (Expr.num 4.))),4.,(4.,4.);
+     "strict_lower",Some 0.,Some 8.,(fun x -> not_ (bin FLessThanEqual x (Expr.num 2.5))),3.,(3.,8.);
+     "weak_upper",Some 2.,None,(fun x -> not_ (bin FLessThan (Expr.num 4.5) x)),2.,(2.,4.);
+     "strict_upper",Some 2.,None,(fun x -> not_ (bin FLessThanEqual (Expr.num 4.) x)),2.,(2.,3.)] in
+  List.iter (fun (model,public,gamma,expected,cursor,(low,high)) ->
+    primary_check_lift "negated finite candidate after other native contexts" model gamma expected;
+    (* Earlier full-query models may choose any admissible integral value.
+       Recover the cached model after other contexts, without fixing that choice. *)
+    let recovered = Hashtbl.create 1 in
+    Smt.lift_model public gamma (Hashtbl.add recovered) (Expr.Set.singleton (Expr.LVar cursor));
+    Alcotest.(check bool) "cached public model obeys original finite bounds" true
+      (match Hashtbl.find_opt recovered cursor with
+       | Some (Expr.Lit (Num n)) -> Float.is_finite n && n = floor n && low <= n && n <= high
+       | _ -> false)) models)
+
+let negated_bound_rejections () = with_nonblank_counter_trace (fun () ->
+  let fs,gamma,index,cursor,keys,format = negated_bound_fixture "negative_frames"
+    (Some 2.) (Some 4.) (fun x -> not_ (bin FLessThan x (Expr.num 4.))) 0. in
+  ignore (negated_bound_attempt "unchanged false UTF16/key frame"
+    (Expr.Set.add (bin SetMem (format 1.) keys) fs) gamma index cursor 0. 4. false);
+  let fs2,gamma2,index2,cursor2,_,_ = negated_bound_fixture "excluded_minimum"
+    (Some 2.) (Some 8.) (fun x -> not_ (bin FLessThanEqual x (Expr.num 2.))) 0. in
+  let excluded = Expr.Set.add (not_ (bin ValueEqual cursor2 (Expr.num 3.))) fs2 in
+  ignore (negated_bound_attempt "excluded candidate is not original UNSAT"
+    excluded gamma2 index2 cursor2 0. 3. false);
+  let alternative = excluded |> Expr.Set.add (bin ValueEqual index2 (Expr.num 0.))
+    |> Expr.Set.add (bin ValueEqual cursor2 (Expr.num 4.)) in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) "excluded candidate has another complete native model" true
+    (Option.is_some (Smt.exec_sat ~caller_kind:"control-negated-other-model" alternative gamma2));
+  ignore (nonblank_counter_observe "negated alternative" before
+    "control-negated-other-model" "sat" alternative gamma2);
+  let signed,g,idx,cur,_,_ = negated_bound_fixture "signed_zero"
+    (Some 0.) (Some 0.) (fun x -> not_ (bin FLessThan x (Expr.num 0.))) (-0.) in
+  let signed = Expr.Set.add (bin ValueEqual cur (Expr.num (-0.))) signed in
+  let model = Option.get (negated_bound_attempt "existing raw negative-zero pin"
+    signed g idx cur (-0.) (-0.) true) in
+  let cur_name = match cur with Expr.LVar n -> n | _ -> assert false in
+  primary_check_lift "preserved raw negative-zero cursor" model g [cur_name,Literal.Num (-0.)];
+  let public = Option.get (Smt.check_sat signed g) in
+  primary_check_lift "public preserved raw-negative-zero cursor" public g [cur_name,Literal.Num (-0.)];
+  let before = nonblank_counter_rows () in
+  let one_pin fs = Expr.Set.add (bin ValueEqual index (Expr.num 0.)) fs in
+  let unchanged label fs = Alcotest.(check bool) (label ^ " keeps original one-pin fallback") true
+    (match Smt.literal_formatter_witness_query fs gamma with
+     | Some q -> Expr.Set.equal q (one_pin fs) | None -> false) in
+  unchanged "contradictory negated upper bound" (Expr.Set.add
+    (not_ (bin FLessThan (Expr.num 1.5) cursor)) fs);
+  List.iter (fun value ->
+    let base = fs |> Expr.Set.remove (bin FLessThanEqual cursor (Expr.num 4.))
+      |> Expr.Set.remove (not_ (bin FLessThan cursor (Expr.num 4.)))
+      |> Expr.Set.add (not_ (bin FLessThan (Expr.num value) cursor)) in
+    unchanged "nonfinite endpoint contributes no bound" base)
+    [Float.nan;Float.infinity;Float.neg_infinity];
+  Alcotest.(check bool) "pure bounds guards add no solver invocation" true
+    (before = nonblank_counter_rows ()))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "coherent candidates all four negated finite bounds models and cache" `Quick
+         (with_total negated_bound_models);
+       Alcotest.test_case "negated finite candidate false frames signed zeros nonfinite and contradictions" `Quick
+         (with_total negated_bound_rejections)]
+   | _ -> [])

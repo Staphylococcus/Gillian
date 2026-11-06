@@ -4832,6 +4832,15 @@ let complete_integral_witness fs gamma name value query =
              if Float.is_finite v then Some v else (failed := true; None)
          | _ -> None)
     | _ -> None in
+  (* Reverse negated comparisons only to choose finite candidate values.
+     This is not an FP identity in the presence of NaN, and never rewrites FS.
+     Evaluation below admits only finite operands; native SAT checks every
+     unchanged original atom, including the negated exit guard. *)
+  let comparison = function
+    | Expr.BinOp (a,((FLessThan | FLessThanEqual) as op),b) -> Some (a,op,b)
+    | Expr.UnOp (Not,Expr.BinOp (a,FLessThan,b)) -> Some (b,FLessThanEqual,a)
+    | Expr.UnOp (Not,Expr.BinOp (a,FLessThanEqual,b)) -> Some (b,FLessThan,a)
+    | _ -> None in
   let roles = Expr.Set.fold (fun e roles -> match e with
     | Expr.UnOp (IsInt,LVar n)
       when Hashtbl.find_opt gamma n = Some Type.NumberType
@@ -4841,12 +4850,12 @@ let complete_integral_witness fs gamma name value query =
   let result = ref query in
   for _ = 1 to 8 do
     SS.iter (fun n -> if not (Hashtbl.mem known n) then (
-      let lower,upper = Expr.Set.fold (fun e (lo,hi) -> match e with
-        | Expr.BinOp (a,((FLessThan | FLessThanEqual) as op),LVar v) when v = n ->
+      let lower,upper = Expr.Set.fold (fun e (lo,hi) -> match comparison e with
+        | Some (a,op,Expr.LVar v) when v = n ->
             (match evaluate a with
              | Some a -> (if op = FLessThan then floor a +. 1. else ceil a)::lo,hi
              | None -> lo,hi)
-        | Expr.BinOp (LVar v,((FLessThan | FLessThanEqual) as op),b) when v = n ->
+        | Some (Expr.LVar v,op,b) when v = n ->
             (match evaluate b with
              | Some b -> lo,(if op = FLessThan then ceil b -. 1. else floor b)::hi
              | None -> lo,hi)
@@ -4865,8 +4874,8 @@ let complete_integral_witness fs gamma name value query =
   done;
   (* Later roles can make an earlier symbolic bound concrete. Never keep a
      partial completion that now violates one of those original bounds. *)
-  Expr.Set.iter (function
-    | Expr.BinOp (a,((FLessThan | FLessThanEqual) as op),b) ->
+  Expr.Set.iter (fun atom -> match comparison atom with
+    | Some (a,op,b) ->
         (match evaluate a,evaluate b with
          | Some a,Some b ->
              if not (if op = FLessThan then a < b else a <= b) then failed := true

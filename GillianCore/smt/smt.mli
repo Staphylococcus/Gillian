@@ -93,7 +93,8 @@ val formatted_index_model :
     The entire original FS and Gamma remain; the added
     ValueEqual is a search hint, not a consequence (especially for signed zero).
     Up to eight originally integral Number roles can receive coherent natural
-    candidates from their evaluable original bounds, retaining every full
+    candidates from their evaluable finite original bounds, including negated
+    comparisons for candidate choice only, retaining every full
     constraint and existing raw pin. Unsupported/contradictory completion keeps
     the original one-pin attempt. Roles are assigned once; name order can
     conservatively abandon a feasible multi-role completion. This is not a
