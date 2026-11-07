@@ -2233,7 +2233,7 @@ struct
 
   let evaluate_cmd = Evaluate_cmd.eval_cmd
 
-  let callable_failure_context_count = ref 0
+  let failure_parent_context_count = ref 0
 
   let simplify state =
     snd (State.simplify ~save:true ~kill_new_lvars:true state)
@@ -2628,7 +2628,8 @@ struct
         (* Failure-only source attribution; read the existing stack/annotation,
            never evaluate an expression or inspect a heap/store. *)
         (try
-           if proc = "i__isCallable" && !callable_failure_context_count < 8
+           if (proc = "i__isCallable" || proc = "i__toStringComputed")
+              && !failure_parent_context_count < 8
               && Sys.getenv_opt "GILLIAN_RECOVERY_SELECTION_PROFILE" = Some "1"
            then match callstack with
              | frame :: (_ :: _ as parent) ->
@@ -2637,10 +2638,12 @@ struct
                  let origin = Fmt.str "%a" Location.pp_log_opt
                      (Annot.get_origin_loc annot) in
                  let origin = String.sub origin 0 (min 512 (String.length origin)) in
-                 incr callable_failure_context_count;
+                 incr failure_parent_context_count;
+                 let marker = if proc = "i__isCallable" then
+                     "CALLABLE_FAILURE_PARENT" else "CONVERSION_FAILURE_PARENT" in
                  L.normal (fun m -> m
-                   "CALLABLE_FAILURE_PARENT caller=%s command=%d origin=%s"
-                   caller frame.call_index origin)
+                   "%s caller=%s command=%d origin=%s"
+                   marker caller frame.call_index origin)
              | _ -> ()
          with _ -> ());
         let result =
