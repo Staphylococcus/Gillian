@@ -338,15 +338,21 @@ let raw_argument_metadata () =
     [" raw_args(raw_item,n)"; " raw_args(n,n)"; " raw_args(n,ret)";
      " raw_args(n,\"a,b\")"; " raw_args()"]
 
-let compile_arguments ?(total=false) procedure source =
+let compile_arguments ?(total=false) ?origin procedure source =
   let module Front=Js2jsil_lib.JS2JSIL_Compiler in
+  let module Origin=Js2jsil_lib.ES2015Frontend in
   let previous_mode = !Gillian.Utils.Config.current_exec_mode in
   let previous_total = !Gillian.Utils.Config.Verification.total in
+  let previous_profile = !Origin.profile in
   Fun.protect ~finally:(fun () ->
+      Origin.reset_origins (); Origin.profile := previous_profile;
       Gillian.Utils.Config.current_exec_mode := previous_mode;
       Gillian.Utils.Config.Verification.total := previous_total)
     (fun () ->
       assert (Option.is_none !Js2jsil_lib.ES2015Frontend.profile);
+      (match origin with None -> () | Some envelope ->
+        Origin.profile := Some "trusted-unit-bridge";
+        ignore (Origin.decode_parameter_origins "unit-source" envelope));
       Hashtbl.clear Front.cc_tbl; Hashtbl.clear Front.fun_tbl;
       Hashtbl.clear Front.old_fun_tbl; Hashtbl.clear Front.vis_tbl;
       Js2jsil_lib.JS2JSIL_Helpers.reset_generators ();
@@ -354,6 +360,7 @@ let compile_arguments ?(total=false) procedure source =
       Gillian.Utils.Config.Verification.total := total;
       let ast=JS_Parser.parse_string_exn source in
       let program,_,_=Front.js2jsil ~filename:"arguments.js" ast true in
+      Origin.finish_origins ();
       (Option.get (Jsil_syntax.EProg.get_proc program procedure)).body |> Array.to_list)
 
 let own_arguments total () =
@@ -381,6 +388,60 @@ let sloppy_arguments () =
     with Js2jsil_lib.ES2015Frontend.Frontend_error message ->
       String.equal message "Verification supports own arguments reads only in strict functions" in
   Alcotest.(check bool) "unsupported mapped arguments reject" true rejected
+
+let origin_envelope ?(id="own") ?(params=["a"]) source =
+  Yojson.Safe.to_string (`Assoc ["sourceSHA256",`String "unit-source";
+    "source",`String source; "unmappedArguments",`List [`Assoc [
+      "id",`String id; "nonSimpleParameters",`Bool true;
+      "implicitArguments",`Bool true; "originalStrict",`Bool false;
+      "loweredParameters",`List (List.map (fun p -> `String p) params)]]])
+
+let origin_arguments () =
+  let module Origin=Js2jsil_lib.ES2015Frontend in
+  let source="/** @id own */ function own(a) { var b=arguments.length>1?arguments[1]:{}; return a; }" in
+  let rows=compile_arguments ~origin:(origin_envelope source) "own" source in
+  Alcotest.(check int) "origin uses its accurate unmapped allocator" 1
+    (List.length (List.filter (function
+      | _,_,Jsil_syntax.LabCmd.LCall (_,Lit (String "create_unmapped_arguments_object"),[_],None,None) -> true
+      | _ -> false) rows));
+  let rejected label run =
+    let did_reject=try run (); false with Origin.Frontend_error _ -> true in
+    Alcotest.(check bool) label true did_reject in
+  rejected "different lowered parameters reject" (fun () ->
+      ignore (compile_arguments ~origin:(origin_envelope ~params:["other"] source) "own" source));
+  rejected "unmatched identity rejects" (fun () ->
+      ignore (compile_arguments ~origin:(origin_envelope ~id:"other" source) "own" source));
+  rejected "strictness cannot silently consume a sloppy origin" (fun () ->
+      ignore (compile_arguments ~origin:(origin_envelope source) "own" ("'use strict';\n"^source)));
+  ignore (Origin.decode_parameter_origins "unit-source" (origin_envelope source));
+  Alcotest.(check bool) "metadata without active source profile has no authority" false
+    (Origin.unmapped_arguments "own" ["a"]);
+  rejected "different source unit rejects" (fun () ->
+      ignore (Origin.decode_parameter_origins "other-source" (origin_envelope source)));
+  Alcotest.(check bool) "rejected envelope clears prior eligibility" true (!Origin.parameter_origins=[]);
+  rejected "malformed envelope rejects" (fun () -> ignore (Origin.decode_parameter_origins "unit-source" "{"));
+  let envelope=Yojson.Safe.from_string (origin_envelope source) in
+  let duplicate=match envelope with `Assoc fields ->
+    `Assoc (List.map (fun (key,value) -> key, match key,value with
+      | "unmappedArguments", `List rows -> `List (rows@rows) | _ -> value) fields)
+    | _ -> assert false in
+  rejected "duplicate origins reject" (fun () ->
+      ignore (Origin.decode_parameter_origins "unit-source" (Yojson.Safe.to_string duplicate)));
+  ignore (Origin.decode_parameter_origins "unit-source" (origin_envelope source));
+  ignore (Origin.transform ~path:"unused" "var unchanged=1;");
+  Alcotest.(check bool) "next ordinary unit clears prior metadata" true (!Origin.parameter_origins=[]);
+  Origin.profile := Some "trusted-unit-bridge";
+  ignore (Origin.decode_parameter_origins "unit-source" (origin_envelope source));
+  ignore (Origin.unmapped_arguments "own" ["a"]);
+  rejected "repeated origin use rejects" (fun () -> ignore (Origin.unmapped_arguments "own" ["a"]));
+  Origin.reset_origins (); Origin.profile := None;
+  ignore (Origin.decode_parameter_origins "unit-source" (origin_envelope source));
+  let path=Filename.temp_file "parameter-origin-parse-failure-" ".js" in
+  Fun.protect ~finally:(fun () -> Sys.remove path) (fun () ->
+      let channel=open_out path in output_string channel "function {"; close_out channel;
+      let parsed=Js2jsil_lib.JS2GIL_ParserAndCompiler.parse_and_compile_js path in
+      Alcotest.(check bool) "parse failure rejects" true (Result.is_error parsed));
+  Alcotest.(check bool) "parse failure clears all origin authority" true (!Origin.parameter_origins=[])
 
 let () =
   Alcotest.run "JSIL procedure variants"
@@ -411,5 +472,6 @@ let () =
         [ Alcotest.test_case "partial verification materializes arguments" `Quick (own_arguments false);
           Alcotest.test_case "total verification materializes arguments" `Quick (own_arguments true);
           Alcotest.test_case "nested lexical ownership" `Quick nested_arguments;
-          Alcotest.test_case "mapped arguments reject" `Quick sloppy_arguments ] );
+          Alcotest.test_case "mapped arguments reject" `Quick sloppy_arguments;
+          Alcotest.test_case "source-bound non-simple arguments" `Quick origin_arguments ] );
     ]

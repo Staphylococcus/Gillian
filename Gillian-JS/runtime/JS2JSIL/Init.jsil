@@ -806,3 +806,12 @@ proc create_arguments_object (argList) {
         return;
 	elab: throw
 };
+
+(* Non-simple parameter origins use modern unmapped arguments. The legacy
+   allocator remains unchanged; remove its extra own caller before escape.
+   Symbol.iterator remains outside the existing no-Symbol runtime model. *)
+proc create_unmapped_arguments_object (argList) {
+        ret := "create_arguments_object" (argList);
+        delete (ret, "caller");
+        return
+};

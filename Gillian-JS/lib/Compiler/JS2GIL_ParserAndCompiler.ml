@@ -181,6 +181,7 @@ let create_compilation_result path prog tl_prog =
   }
 
 let parse_and_compile_js path =
+  Fun.protect ~finally:ES2015Frontend.reset_origins (fun () ->
   if Option.is_some !checked_spec_overlay && !burn_jsil then
     overlay_error "cannot be combined with --burn-jsil"
   else if Option.is_some !checked_spec_overlay &&
@@ -199,6 +200,7 @@ let parse_and_compile_js path =
       JS2JSIL_Compiler.js2jsil ~filename:path js_prog
         (Exec_mode.is_verification_exec !Config.current_exec_mode)
     in
+    let () = ES2015Frontend.finish_origins () in
     let ext_prog =
       if !Config.unfolding then JSIL_PostParser.post_parse_eprog ext_prog
       else ext_prog
@@ -229,7 +231,7 @@ let parse_and_compile_js path =
       let msg =
         Fmt.str "\nParser post-processing threw an EarlyError: %s\n" e
       in
-      Gillian_result.compilation_error msg
+      Gillian_result.compilation_error msg)
 
 (*
   | _ ->

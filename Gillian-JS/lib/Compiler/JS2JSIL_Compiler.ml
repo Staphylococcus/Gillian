@@ -7066,7 +7066,7 @@ let generate_proc ?use_cc e fid params strictness vis_fid spec : EProc.t =
   *)
   let x_argList_pre = fresh_var () in
   let x_argList_act = fresh_var () in
-  let cmds_arg_obj =
+  let cmds_arg_obj allocator_name =
     [
       (Annot.Basic.make_basic ~origin_loc (), None, LArguments x_argList_pre);
       ( Annot.Basic.make_basic ~origin_loc (),
@@ -7078,7 +7078,7 @@ let generate_proc ?use_cc e fid params strictness vis_fid spec : EProc.t =
         None,
         LCall
           ( var_args,
-            Lit (String createArgsName),
+            Lit (String allocator_name),
             [ PVar x_argList_act ],
             None,
             None ) );
@@ -7090,8 +7090,8 @@ let generate_proc ?use_cc e fid params strictness vis_fid spec : EProc.t =
   in
   (* Own arguments reads also occur in ordinary ES5, including already-lowered
      default parameters. Verification must execute their real initializer,
-     independently of the frontend profile. This helper implements unmapped
-     strict arguments; reject mapped/sloppy reads rather than omit the object. *)
+     independently of the frontend profile. Sloppy mapped reads remain rejected;
+     a source-bound non-simple parameter origin uses its own unmapped allocator. *)
   let own_arguments_reads =
     JS_Utils.js_fold
       (fun exp depth _ children ->
@@ -7112,11 +7112,15 @@ let generate_proc ?use_cc e fid params strictness vis_fid spec : EProc.t =
       Exec_mode.is_verification_exec !Config.current_exec_mode
       && own_arguments_reads
     then (
-      if not strictness then
-        ES2015Frontend.fail
-          "Verification supports own arguments reads only in strict functions";
-      cmds_arg_obj)
-    else if_verification [] cmds_arg_obj
+      let allocator_name =
+        if strictness then createArgsName
+        else if ES2015Frontend.unmapped_arguments fid params then
+          "create_unmapped_arguments_object"
+        else ES2015Frontend.fail
+          "Verification supports own arguments reads only in strict functions"
+      in
+      cmds_arg_obj allocator_name)
+    else if_verification [] (cmds_arg_obj createArgsName)
   in
 
   (* x_sc_0 = x_scope @ {{ x_er }} *)
