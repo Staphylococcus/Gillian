@@ -1179,6 +1179,52 @@ let selected_roundtrip () =
      [loc; length_key; selected_value]);
   check "metadata remains owned" (Heap.get_met restored loc_name = Some metadata)
 
+(* No concrete key list or top-level nth equality supplies the chosen index.
+   The compound formula entails index one, after disproving candidate zero. *)
+let compound_selected_context ?(capped = true) ?(typed = true)
+    ?(other_list = false) () =
+  let c = sequence_context () in
+  let other = Expr.LVar "#compound_other_keys" in
+  Gillian.Symbolic.Type_env.update c.gamma "#compound_other_keys" Type.ListType;
+  let names = if other_list then other else sequence_keys in
+  let at i = Expr.BinOp (names, LstNth, Expr.int i) in
+  let equal i = Expr.BinOp (at i, Equal, length_key) in
+  let facts = [Expr.BinOp (Expr.int 2, ILessThanEqual, UnOp (LstLen, sequence_keys));
+    Expr.BinOp (equal 0, Or, equal 1); Expr.UnOp (Not, equal 0)] in
+  let facts = if other_list then
+    Expr.BinOp (Expr.int 2, ILessThanEqual, UnOp (LstLen, other)) :: facts else facts in
+  let facts = if capped then
+    Expr.BinOp (UnOp (LstLen, sequence_keys), ILessThanEqual, Expr.int 8) :: facts
+    else facts in
+  let facts = if typed then
+    Expr.BinOp (UnOp (TypeOf, BinOp (sequence_values, LstNth, Expr.one_i)),
+      Equal, Lit (Type ListType)) :: facts else facts in
+  List.iter (Gillian.Symbolic.Pure_context.extend c.pfs) facts;
+  c
+
+let selected_compound_roundtrip () =
+  let c = compound_selected_context () in
+  let original = sequence_make c in
+  let before = snapshot original in
+  let remainder, outputs = consume_selected c original length_key in
+  let descriptor = Gillian.Logic.Reduction.reduce_lexpr ~pfs:c.pfs ~gamma:c.gamma
+    (Expr.BinOp (sequence_values, LstNth, Expr.one_i)) in
+  check "bounded entailment discovers the actual index and paired descriptor"
+    (outputs = [Expr.one_i; sequence_keys; sequence_values; descriptor]);
+  check "compound selection preserves input branch" (snapshot original = before);
+  check "compound selection consumes complete ownership" (Heap.get_ordered remainder loc_name = None);
+  let restored = produce_selected c remainder length_key outputs in
+  check "compound roundtrip retains the exact complete order and values"
+    (snd (consume ~context:c restored) = [sequence_keys; sequence_values])
+
+let selected_compound_rejections () =
+  List.iter (fun c -> reject_selected_consume c (sequence_make c) length_key)
+    [compound_selected_context ~capped:false ();
+     compound_selected_context ~typed:false ();
+     compound_selected_context ~other_list:true ()];
+  let c = compound_selected_context () in
+  reject_selected_consume c (Heap.init ()) length_key
+
 let selected_bounds () =
   List.iter (fun c -> reject_selected_consume c (sequence_make c) length_key)
     [selected_context ~lower:false (); selected_context ~upper:false ()]
@@ -1386,6 +1432,8 @@ let () =
             ("named access cannot split ownership", named_sequence_no_split);
             ("named equality cannot supply ownership", named_sequence_no_ownership);
             ("selected whole-resource real roundtrip", selected_roundtrip);
+            ("selected bounded compound roundtrip", selected_compound_roundtrip);
+            ("selected bounded compound rejection guards", selected_compound_rejections);
             ("selected witness bounds", selected_bounds);
             ("selection cannot borrow another key list", selected_wrong_list);
             ("selection requires identity type and ownership", selected_missing_facts);

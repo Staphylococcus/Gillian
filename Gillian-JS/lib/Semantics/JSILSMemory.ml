@@ -927,9 +927,37 @@ module M = struct
            Expr.BinOp (descriptor, ValueEqual, BinOp (values, LstNth, index)) ]
          gamma
 
+  (* A bounded complete resource can prove a named selection even when the
+     key equality is embedded in a compound formula. Enumerate candidates only;
+     prove both nth domains before inspecting either key or descriptor. This is
+     a discovery fallback, not a new source of ownership or assumed witnesses. *)
+  let bounded_selected_index pfs gamma keys values prop =
+    let proves facts =
+      (* Refuting a candidate bound can make already-defined nth terms partial
+         inside the entailment simplifier. Ask required SMT about the complete
+         counterquery instead; no fact is dropped and UNKNOWN still raises. *)
+      let counterquery = Expr.Set.of_list
+        (Expr.negate (Expr.conjunct facts) :: PFS.to_list pfs) in
+      Option.is_none (Smt.check_sat counterquery (Type_env.as_hashtbl gamma))
+    in
+    if not (FOSolver.check_entailment Containers.SS.empty pfs
+      [Expr.BinOp (UnOp (LstLen, keys), ILessThanEqual, Expr.int 8)] gamma)
+    then None
+    else List.find_map (fun i ->
+      let index = Expr.int i in
+      if proves [Expr.BinOp (Expr.zero_i, ILessThanEqual, index);
+                 Expr.BinOp (index, ILessThan, UnOp (LstLen, keys));
+                 Expr.BinOp (index, ILessThan, UnOp (LstLen, values))]
+         && proves [Expr.BinOp (BinOp (keys, LstNth, index), Equal, prop)]
+      then Some index else None) (List.init 8 Fun.id)
+
+  let selected_fields_rejection stage =
+    try L.normal (fun m -> m "SELECTED_FIELDS_REJECTION stage=%s" stage)
+    with _ -> ()
+
   let get_selected_fields heap pfs gamma loc prop : action_ret =
     match ordered_fields_snapshot heap pfs gamma loc with
-    | Error errors -> Error errors
+    | Error errors -> selected_fields_rejection "snapshot"; Error errors
     | Ok (name, _, keys, values) ->
         let index = match ordered_cell_index pfs gamma keys values prop with
           | Some _ as index -> index
@@ -940,8 +968,12 @@ module M = struct
                   else None)
                 (List.mapi (fun index key -> index, key) names))
         in
+        let index = match index with
+          | Some _ -> index
+          | None -> bounded_selected_index pfs gamma keys values prop
+        in
         (match index with
-        | None -> ordered_fields_error loc
+        | None -> selected_fields_rejection "index"; ordered_fields_error loc
         | Some index ->
             let descriptor = Reduction.reduce_lexpr ~pfs ~gamma
                 (Expr.BinOp (values, LstNth, index)) in
@@ -949,7 +981,7 @@ module M = struct
             then Ok [ (heap,
                 [ Expr.loc_from_loc_name name; prop; index; keys; values; descriptor ],
                 [], []) ]
-            else ordered_fields_error loc)
+            else (selected_fields_rejection "validation"; ordered_fields_error loc))
 
   let set_selected_fields heap pfs gamma loc prop index keys values descriptor =
     if selected_fields_valid pfs gamma prop index keys values descriptor then
