@@ -931,15 +931,61 @@ module M = struct
      key equality is embedded in a compound formula. Enumerate candidates only;
      prove both nth domains before inspecting either key or descriptor. This is
      a discovery fallback, not a new source of ownership or assumed witnesses. *)
-  let bounded_selected_index pfs gamma keys values prop =
-    let proves facts =
-      (* Refuting a candidate bound can make already-defined nth terms partial
-         inside the entailment simplifier. Ask required SMT about the complete
-         counterquery instead; no fact is dropped and UNKNOWN still raises. *)
-      let counterquery = Expr.Set.of_list
-        (Expr.negate (Expr.conjunct facts) :: PFS.to_list pfs) in
-      Option.is_none (Smt.check_sat counterquery (Type_env.as_hashtbl gamma))
+  let selected_singletons gamma expression =
+    (* The raw encoder does not wrap singleton-typed variables. Replace only
+       their free occurrences by the exact value required by the caller's
+       original Gamma. Keep all formulas and protect every binding construct;
+       do not run partial-list reduction on the counterquery. *)
+    let types = Type_env.as_hashtbl gamma in
+    let add bound names = List.fold_left (fun s x -> Containers.SS.add x s) bound names in
+    let rec normalize bound expression =
+      let before = function
+        | Expr.LVar name as e when not (Containers.SS.mem name bound) ->
+            let literal = match Hashtbl.find_opt types name with
+              | Some Type.NoneType -> Some Literal.Nono
+              | Some Type.NullType -> Some Literal.Null
+              | Some Type.EmptyType -> Some Literal.Empty
+              | Some Type.UndefinedType -> Some Literal.Undefined
+              | _ -> None in
+            (Some (Option.fold ~none:e ~some:(fun l -> Expr.Lit l) literal), false)
+        | Expr.Exists (bs, body) ->
+            (Some (Expr.Exists (bs, normalize (add bound (List.map fst bs)) body)), false)
+        | Expr.ForAll (bs, body) ->
+            (Some (Expr.ForAll (bs, normalize (add bound (List.map fst bs)) body)), false)
+        | Expr.Cases (value, cases) ->
+            (Some (Expr.Cases (normalize bound value, List.map
+              (fun (name, bs, body) -> name, bs, normalize (add bound bs) body) cases)), false)
+        | e -> (Some e, true)
+      in
+      Option.get (Expr.map_opt before None expression)
     in
+    normalize Containers.SS.empty expression
+
+  let selected_fields_proves pfs gamma facts =
+    (* Refuting a candidate bound can make already-defined nth terms partial
+       inside the entailment simplifier. Ask required SMT about the complete
+       counterquery instead; no fact is dropped and UNKNOWN still raises. *)
+    let counterquery = Expr.Set.of_list (List.map (selected_singletons gamma)
+      (Expr.negate (Expr.conjunct facts) :: PFS.to_list pfs)) in
+    Option.is_none (Smt.check_sat counterquery (Type_env.as_hashtbl gamma))
+
+  (* A real insertion records its position, which can remain symbolic even on
+     a bounded callable. Treat that expression only as a candidate: prove its
+     type, both current-list domains and the actual current selected key. *)
+  let inserted_selected_index pfs gamma keys values prop =
+    match keys with
+    | Expr.NOp (LstInsert, [_; index; _]) ->
+        let proves = selected_fields_proves pfs gamma in
+        if proves [Expr.BinOp (UnOp (TypeOf, index), Equal, Lit (Type IntType));
+                   Expr.BinOp (Expr.zero_i, ILessThanEqual, index);
+                   Expr.BinOp (index, ILessThan, UnOp (LstLen, keys));
+                   Expr.BinOp (index, ILessThan, UnOp (LstLen, values))]
+           && proves [Expr.BinOp (BinOp (keys, LstNth, index), Equal, prop)]
+        then Some index else None
+    | _ -> None
+
+  let bounded_selected_index pfs gamma keys values prop =
+    let proves = selected_fields_proves pfs gamma in
     if not (FOSolver.check_entailment Containers.SS.empty pfs
       [Expr.BinOp (UnOp (LstLen, keys), ILessThanEqual, Expr.int 8)] gamma)
     then None
@@ -970,7 +1016,9 @@ module M = struct
         in
         let index = match index with
           | Some _ -> index
-          | None -> bounded_selected_index pfs gamma keys values prop
+          | None -> (match inserted_selected_index pfs gamma keys values prop with
+              | Some _ as index -> index
+              | None -> bounded_selected_index pfs gamma keys values prop)
         in
         (match index with
         | None -> selected_fields_rejection "index"; ordered_fields_error loc

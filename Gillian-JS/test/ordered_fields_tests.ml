@@ -1225,6 +1225,67 @@ let selected_compound_rejections () =
   let c = compound_selected_context () in
   reject_selected_consume c (Heap.init ()) length_key
 
+let selected_appended_abstract () =
+  let c = sequence_context () in
+  Gillian.Symbolic.Type_env.update c.gamma "#before_errors" Type.NoneType;
+  Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (LVar "#before_errors", Equal, Lit Literal.Nono));
+  let prop = ukey "errors" in
+  List.iter (Gillian.Symbolic.Pure_context.extend c.pfs)
+    [Expr.UnOp (LstAllUtf16, sequence_keys);
+     Expr.UnOp (Not, BinOp (sequence_keys, LstContains, prop));
+     Expr.BinOp (UnOp (LstLen, sequence_keys), ILessThanEqual, Expr.int 7)];
+  let original = sequence_make c in
+  let desc = Expr.EList [ukey "d"; Expr.num 3.; Expr.bool true; Expr.bool true; Expr.bool true] in
+  let args = [loc; prop; desc] in
+  check "absent callable key passes actual program guard"
+    (Legacy.prepare_total_action setCell original c.pfs c.gamma args = args);
+  let inserted = match Legacy.execute_action setCell original c.pfs c.gamma args with
+    | Ok [(inserted, [], facts, [])] ->
+        List.iter (Gillian.Symbolic.Pure_context.extend c.pfs) facts; inserted
+    | _ -> Alcotest.fail "actual insertion failed" in
+  let before = snapshot inserted in
+  let remainder, outputs = consume_selected c inserted prop in
+  check "appended key has the exact dynamic old-list length"
+    (Gillian.Logic.FOSolver.is_equal ~pfs:c.pfs ~gamma:c.gamma
+      (List.hd outputs) (Expr.UnOp (LstLen, sequence_keys)));
+  check "selection after insertion preserves input branch" (snapshot inserted = before);
+  reject_selected_produce c remainder prop
+    (Expr.BinOp (List.hd outputs, IPlus, Expr.one_i) :: List.tl outputs);
+  reject_selected_produce c remainder prop
+    [List.hd outputs; List.nth outputs 1; List.nth outputs 2; Expr.EList []];
+  reject_selected_consume c (Heap.init ()) prop;
+  let restored = produce_selected c remainder prop outputs in
+  check "restored insertion keeps the actual new ordered sequence"
+    (Heap.get_ordered restored loc_name = Heap.get_ordered inserted loc_name)
+
+let selected_singleton_context () =
+  List.iter (fun (typ, literal) ->
+    let c = pc () in
+    let x = Expr.LVar "#singleton" in
+    Gillian.Symbolic.Type_env.update c.gamma "#singleton" typ;
+    Gillian.Symbolic.Pure_context.extend c.pfs (Expr.BinOp (x, Equal, Lit literal));
+    let before = Fmt.str "%a" Gillian.Symbolic.Type_env.pp c.gamma in
+    let proves facts = Legacy.selected_fields_proves c.pfs c.gamma facts in
+    check "exact singleton remains proved" (proves [Expr.BinOp (x, Equal, Lit literal)]);
+    let wrong = if literal = Literal.Nono then Literal.Null else Literal.Nono in
+    check "distinct singleton cannot be proved" (not (proves [Expr.BinOp (x, Equal, Lit wrong)]));
+    check "whole consistent frame cannot prove false" (not (proves [Expr.false_]));
+    check "quantifier shadows caller singleton type"
+      (not (proves [Expr.ForAll (["#singleton",Some Type.IntType],
+        Expr.BinOp (x, Equal, Lit literal))]));
+    check "normalization does not alter caller Gamma"
+      (before = Fmt.str "%a" Gillian.Symbolic.Type_env.pp c.gamma);
+    let branch = Expr.Cases (x,["C",["#singleton"],x]) in
+    check "case binder remains free of caller replacement"
+      (Legacy.selected_singletons c.gamma branch =
+       Expr.Cases (Lit literal,["C",["#singleton"],x]));
+    let exists = Expr.Exists (["#singleton",Some Type.IntType],x) in
+    check "existential binder remains unchanged"
+      (Legacy.selected_singletons c.gamma exists = exists)
+  ) [Type.NoneType,Literal.Nono;Type.NullType,Literal.Null;
+     Type.EmptyType,Literal.Empty;Type.UndefinedType,Literal.Undefined]
+
 let selected_bounds () =
   List.iter (fun c -> reject_selected_consume c (sequence_make c) length_key)
     [selected_context ~lower:false (); selected_context ~upper:false ()]
@@ -1434,6 +1495,8 @@ let () =
             ("selected whole-resource real roundtrip", selected_roundtrip);
             ("selected bounded compound roundtrip", selected_compound_roundtrip);
             ("selected bounded compound rejection guards", selected_compound_rejections);
+            ("selected actual insertion after abstract prefix", selected_appended_abstract);
+            ("selected full-query singleton contexts and binders", selected_singleton_context);
             ("selected witness bounds", selected_bounds);
             ("selection cannot borrow another key list", selected_wrong_list);
             ("selection requires identity type and ownership", selected_missing_facts);
