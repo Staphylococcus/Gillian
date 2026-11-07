@@ -73,6 +73,22 @@ module Make
     let docv = "LEMMA_NAME" in
     Arg.(value & opt_all string [] & info [ "lemma" ] ~doc ~docv)
 
+  let proof_final_local =
+    let parse text = match String.split_on_char ':' text with
+      | [proc;source;target] when proc <> "" && source <> "" &&
+          String.length target > 1 && target.[0] = '#' ->
+          Ok (proc,source,target)
+      | _ -> Error (`Msg "Expected PROC:LOCAL:#WITNESS")
+    in
+    let print fmt (proc,source,target) =
+      Format.fprintf fmt "%s:%s:%s" proc source target in
+    let doc = "Export an existing final local as a fresh public POST witness. " ^
+      "Requires a selected, complete, verified normal body under --total; " ^
+      "adds only checked verification equalities, never caller assumptions. " ^
+      "Incremental/cached verification is not allowed." in
+    Arg.(value & opt_all (conv (parse,print)) [] &
+      info ["proof-final-local"] ~doc ~docv:"PROC:LOCAL:#WITNESS")
+
   let no_unfold =
     let doc = "Disable automatic unfolding of non-recursive predicates." in
     Arg.(value & flag & info [ "no-unfold" ] ~doc)
@@ -120,6 +136,13 @@ module Make
 
   let verify files already_compiled outfile_opt no_unfold incremental =
     Gillian_result.try_ @@ fun () ->
+    let* () =
+      if !Config.Verification.proof_final_locals <> [] &&
+         ((not !Config.Verification.total) || incremental) then
+        Gillian_result.operation_error
+          "Final-local bindings require fresh total verification."
+      else Ok ()
+    in
     let* () =
       if
         !Config.Verification.proof_dependencies <> []
@@ -194,6 +217,7 @@ module Make
       closed_entry
       closed_initializers
       proof_dependencies
+      proof_final_locals
       () =
     (* Attention: if you plan to add UX verification, you must be careful about predicates.
        In our current formalism, they must be stricly exact. *)
@@ -202,6 +226,7 @@ module Make
     let () = Config.Verification.closed_entry := closed_entry in
     let () = Config.Verification.closed_initializers := Containers.SS.of_list closed_initializers in
     let () = Config.Verification.proof_dependencies := proof_dependencies in
+    let () = Config.Verification.proof_final_locals := proof_final_locals in
     let () = Config.stats := stats in
     let () = Config.lemma_proof := not no_lemma_proof in
     let () = Config.current_exec_mode := Verification in
@@ -225,7 +250,8 @@ module Make
     Term.(
       const verify_once $ files $ already_compiled $ output_gil $ no_unfold
       $ stats $ no_lemma_proof $ manual $ incremental $ proc_arg $ lemma_arg
-      $ procs_only $ total $ closed_entry $ closed_initializer $ proof_dependency)
+      $ procs_only $ total $ closed_entry $ closed_initializer $ proof_dependency
+      $ proof_final_local)
 
   let verify_info =
     let doc = "Verifies a file of the target language" in

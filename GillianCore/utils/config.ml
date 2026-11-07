@@ -129,6 +129,8 @@ module Verification = struct
     Fun.protect ~finally:(fun () -> closed_entry_heap_abstracted := previous) f
 
   let proof_dependencies = ref ([] : (string * string) list)
+  (* Verification-only final Store exports. Never caller facts or cached input. *)
+  let proof_final_locals = ref ([] : (string * string * string) list)
   let procs_to_verify = ref ([] : string list)
   let lemmas_to_verify = ref ([] : string list)
   let things_to_verify = ref All

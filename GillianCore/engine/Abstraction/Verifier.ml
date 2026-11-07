@@ -108,6 +108,7 @@ struct
     pre_state : SPState.t;
     post_mp : MP.t;
     verifier_scope : Spec.verifier_scope_binding option;
+    final_locals : Spec.verifier_scope_binding list;
     post_loc : Location.t option;
     flag : Flag.t option;
     entry_rank : Expr.t option;
@@ -126,6 +127,10 @@ struct
   let global_results = VerificationResults.make ()
   let start_time = ref (Unix.gettimeofday ())
 
+  let check_final_locals case bindings =
+    try Spec.validate_final_locals case bindings
+    with Invalid_argument why -> Totality.unsupported why
+
   let reset () =
     VerificationResults.reset global_results;
     SAInterpreter.reset_call_graph ()
@@ -133,6 +138,7 @@ struct
   let testify
       ?preparation_origin
       ?verifier_scope
+      ?(final_locals = [])
       ?entry_rank
       ~(init_data : SPState.init_data)
       (func_or_lemma_name : string)
@@ -259,6 +265,14 @@ struct
           (Spec.map_verifier_scope (SSubst.subst_in_expr subst ~partial:true))
           verifier_scope
       in
+      let final_locals = List.map
+          (Spec.map_verifier_scope (SSubst.subst_in_expr subst ~partial:true))
+          final_locals in
+      if final_locals <> [] then
+        check_final_locals
+          (Spec.s_init ?ss_verifier_scope:verifier_scope
+            (SPState.to_assertions ss_pre, snd pre) posts None
+            (Option.get flag) to_verify) final_locals;
       let verification_posts =
         match verifier_scope with
         | None -> posts
@@ -267,6 +281,7 @@ struct
               (Spec.s_init ?ss_verifier_scope:verifier_scope pre posts None
                  (Option.get flag) to_verify)
       in
+      let verification_posts = Spec.final_local_posts final_locals verification_posts in
       if not to_verify then
         let pre' =
           MP.retain_precondition_guards ~original:(fst pre)
@@ -293,6 +308,9 @@ struct
           | None -> known_matchables
           | Some source -> Expr.Set.add (PVar source) known_matchables
         in
+        let known_matchables = List.fold_left
+          (fun known binding -> Expr.Set.add binding.Spec.vsb_source known)
+          known_matchables final_locals in
         let existentials =
           Option.fold ~none:Expr.Set.empty
             ~some:(fun (_, exs) ->
@@ -360,6 +378,7 @@ struct
                 pre_state = ss_pre;
                 post_mp;
                 verifier_scope;
+                final_locals;
                 flag;
                 entry_rank;
                 spec_vars;
@@ -439,10 +458,16 @@ struct
       (id : int)
       (sspec : Spec.st) : (t option * Spec.st option) list =
     let ( let+ ) x f = List.map f x in
+    let final_locals = List.filter_map (fun (proc,source,target) ->
+      if proc = name then Some Spec.{vsb_source=Expr.PVar source;
+                                    vsb_target=Expr.LVar target}
+      else None) !Config.Verification.proof_final_locals in
+    check_final_locals sspec final_locals;
     let+ stest, sspec' =
       testify
         ?preparation_origin:(Preparation_provenance.origin "procedure" name sspec)
         ?verifier_scope:sspec.ss_verifier_scope
+        ~final_locals
         ?entry_rank:
           (if !Config.Verification.total then sspec.ss_variant else None)
         ~init_data spec_name preds pred_ins name params id sspec.ss_pre
@@ -639,8 +664,11 @@ struct
     (* Never seed an absent final-store PVar or let this check vanish in the
        ordinary simplification/matching None path. Defined undefined is present. *)
     let bindings = SStore.bindings (SPState.get_store final_state) in
-    match Spec.require_verifier_scope_source test.verifier_scope
-            ~mem:(fun source -> List.mem_assoc source bindings) with
+    let mem source = List.mem_assoc source bindings in
+    let sources = match Spec.require_verifier_scope_source test.verifier_scope ~mem with
+      | Error _ as error -> error
+      | Ok () -> Spec.require_final_local_sources test.final_locals ~mem in
+    match sources with
     | Error msg ->
         VerificationResults.set_result global_results test.name test.id false;
         L.normal (fun m -> m "VERIFICATION FAILURE: %s" msg);
@@ -796,6 +824,7 @@ struct
           let () =
             SStore.filter_map_inplace store (fun x v ->
                 if x = Names.return_variable || Some x = scope_source
+                   || List.exists (fun b -> b.Spec.vsb_source = Expr.PVar x) test.final_locals
                    || List.mem x test.params then Some v
                 else None)
           in
@@ -1227,6 +1256,14 @@ struct
         Totality.unsupported (name ^ " closed initializer must be selected and proved in this run.");
       check_closed_entry_shape prog (Prog.get_proc_exn prog name))
       !Config.Verification.closed_initializers;
+    List.iter (fun (name,_,_) ->
+      if not !Config.Verification.total || not (SS.mem name pnames_to_verify) then
+        Totality.unsupported "final-local bindings require a selected total procedure.";
+      let proc = Prog.get_proc_exn prog name in
+      let spec = Totality.spec proc in
+      if spec.spec_incomplete || not spec.spec_to_verify then
+        Totality.unsupported "final-local bindings require a complete verified body.")
+      !Config.Verification.proof_final_locals;
     let total_order =
       if !Config.Verification.total then
         Some
@@ -1237,6 +1274,10 @@ struct
     let prog', tests', tests =
       get_tests_to_verify ~init_data prog pnames_to_verify lnames_to_verify
     in
+    List.iter (fun (name,_,_) ->
+      if not (List.exists (fun test -> test.name = name && test.final_locals <> []) tests) then
+        Totality.unsupported "unused final-local binding.")
+      !Config.Verification.proof_final_locals;
     if Reduction.preparation_profile_enabled then (
       Reduction.preparation_profile_dump ~final:true ();
       Stdlib.exit 86);
@@ -1375,6 +1416,9 @@ struct
     L.Phase.with_normal ~title:"Program verification" @@ fun () ->
     let open ResultsDir in
     let open ChangeTracker in
+    if !Config.Verification.proof_final_locals <> [] &&
+       (incremental || not !Config.Verification.total) then
+      Totality.unsupported "final-local bindings require fresh total verification.";
     if incremental && !Config.Verification.total then
       Totality.unsupported
         "incremental verification cannot reuse partial-correctness results.";

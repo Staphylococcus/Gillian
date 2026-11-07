@@ -163,6 +163,45 @@ let require_verifier_scope_source binding ~mem =
       Error ("Missing final-store verifier scope source: " ^ name)
   | _ -> Ok ()
 
+(* Explicit actual final values witness existing public POST existentials.
+   This adds obligations to verification, never assumptions or caller posts. *)
+let validate_final_locals (s : st) bindings =
+  if bindings <> [] then (
+    let invalid why = invalid_arg ("Invalid final-local binding: " ^ why) in
+    if s.ss_flag <> Flag.Normal || not s.ss_to_verify then
+      invalid "requires a verified normal case";
+    let sources = ref SS.empty and targets = ref SS.empty in
+    List.iter (fun b ->
+      let source = match b.vsb_source with
+        | Expr.PVar name when name <> "" -> name
+        | _ -> invalid "source must be a program variable" in
+      let target = match b.vsb_target with
+        | Expr.LVar name when name <> "" -> name
+        | _ -> invalid "target must be a logical variable" in
+      if SS.mem source !sources || SS.mem target !targets then
+        invalid "duplicate source or target";
+      sources := SS.add source !sources; targets := SS.add target !targets;
+      if SS.mem target (Asrt.lvars (fst s.ss_pre)) then
+        invalid "target occurs in PRE";
+      if s.ss_posts = [] || List.exists (fun (p,_) ->
+          not (SS.mem target (Asrt.lvars p))) s.ss_posts then
+        invalid "target absent from a public POST";
+      Option.iter (fun scope ->
+        if SS.mem target (Expr.lvars scope.vsb_target) then
+          invalid "target overlaps verifier scope") s.ss_verifier_scope) bindings)
+
+let final_local_posts bindings posts =
+  List.map (fun (post,loc) ->
+    List.map (fun b -> Asrt.Pure (Expr.BinOp
+      (b.vsb_source, ValueEqual, b.vsb_target))) bindings @ post, loc) posts
+
+let require_final_local_sources bindings ~mem =
+  List.fold_left (fun result b -> match result, b.vsb_source with
+    | Error _, _ -> result
+    | Ok (), Expr.PVar name when mem name -> Ok ()
+    | Ok (), Expr.PVar name -> Error ("Missing final-store proof local: " ^ name)
+    | Ok (), _ -> invalid_arg "Invalid final-local source") (Ok ()) bindings
+
 let pp_sspec fmt sspec =
   let pp_lab fmt' (lab, exs) =
     match exs with

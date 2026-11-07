@@ -248,9 +248,49 @@ let observation_size_bound () =
       Alcotest.(check bool) "oversized observation creates no file" true
         (absent path))
 
+let final_local_exports () =
+  let open Gillian.Gil_syntax in
+  let a = Expr.LVar "#outer" and b = Expr.LVar "#discarded" in
+  let public = [([Asrt.pred "Owners" [a;b] []],None)] in
+  let case = Spec.s_init ([Asrt.Emp],None) public None Flag.Normal true in
+  let bindings = [
+    Spec.{vsb_source=Expr.PVar "allocated";vsb_target=a};
+    Spec.{vsb_source=Expr.PVar "old_exports";vsb_target=b}] in
+  Spec.validate_final_locals case bindings;
+  Alcotest.(check bool) "public posts unchanged" true (case.ss_posts=public);
+  let private_posts=Spec.final_local_posts bindings public in
+  Alcotest.(check int) "two checked equalities" 3 (List.length(fst(List.hd private_posts)));
+  Alcotest.(check bool) "exact value identity" true
+    (List.for_all (function Asrt.Pure(Expr.BinOp(_,ValueEqual,_))->true|_->false)
+      (List.filteri(fun i _->i<2)(fst(List.hd private_posts))));
+  Alcotest.(check bool) "only existing final bindings accepted" true
+    (Result.is_ok(Spec.require_final_local_sources bindings
+       ~mem:(fun x->x="allocated"||x="old_exports")));
+  Alcotest.(check bool) "missing final source fails" true
+    (Result.is_error(Spec.require_final_local_sources bindings
+       ~mem:(fun x->x="allocated")));
+  let reject case bindings =
+    match (try Spec.validate_final_locals case bindings;None
+           with Invalid_argument why->Some why) with
+    |Some _->()
+    |None->Alcotest.fail "invalid final-local binding accepted" in
+  let first=List.hd bindings in
+  List.iter(fun bindings->reject case bindings)[
+    [first;first];
+    [{first with vsb_source=Expr.LVar "#forged"}];
+    [{first with vsb_target=Expr.PVar "not_logical"}]];
+  reject {case with ss_pre=([Asrt.Pure(Expr.BinOp(a,Equal,a))],None)} bindings;
+  reject {case with ss_posts=[]} bindings;
+  reject {case with ss_posts=public@[([Asrt.Emp],None)]} bindings;
+  reject {case with ss_to_verify=false} bindings;
+  reject {case with ss_flag=Flag.Error} bindings;
+  reject {case with ss_verifier_scope=Some Spec.{
+    vsb_source=Expr.PVar "scope";vsb_target=Expr.EList[b]}} bindings
+
 let tests =
   [
     Alcotest.test_case "heap phase scope" `Quick phase_scope;
+    Alcotest.test_case "checked final local exports" `Quick final_local_exports;
     Alcotest.test_case "closed observation round trip" `Quick
       observation_round_trip;
     Alcotest.test_case "closed observation disabled modes" `Quick

@@ -954,6 +954,9 @@ module Spec : sig
   val verifier_posts : st -> Asrt.t located list
   val verifier_scope_source : verifier_scope_binding option -> string option
   val require_verifier_scope_source : verifier_scope_binding option -> mem:(string -> bool) -> (unit, string) result
+  val validate_final_locals : st -> verifier_scope_binding list -> unit
+  val final_local_posts : verifier_scope_binding list -> Asrt.t Location.located list -> Asrt.t Location.located list
+  val require_final_local_sources : verifier_scope_binding list -> mem:(string -> bool) -> (unit, string) result
   val verifier_scope_binding_to_yojson : verifier_scope_binding -> Yojson.Safe.t
 
   val pp_sspec : Format.formatter -> st -> unit
