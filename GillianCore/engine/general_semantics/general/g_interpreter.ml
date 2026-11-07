@@ -2233,6 +2233,8 @@ struct
 
   let evaluate_cmd = Evaluate_cmd.eval_cmd
 
+  let callable_failure_context_count = ref 0
+
   let simplify state =
     snd (State.simplify ~save:true ~kill_new_lvars:true state)
 
@@ -2618,11 +2620,29 @@ struct
           eval_step_state
 
       let err (cconf : CConf.err) eval_step_state =
-        let { results; rest_confs; f; _ } = eval_step_state in
+        let { results; rest_confs; f; prog; _ } = eval_step_state in
         let { callstack; proc_idx; error_state; errors; branch_path; loc; _ } =
           cconf
         in
         let proc = Call_stack.get_cur_proc_id callstack in
+        (* Failure-only source attribution; read the existing stack/annotation,
+           never evaluate an expression or inspect a heap/store. *)
+        (try
+           if proc = "i__isCallable" && !callable_failure_context_count < 8
+              && Sys.getenv_opt "GILLIAN_RECOVERY_SELECTION_PROFILE" = Some "1"
+           then match callstack with
+             | frame :: (_ :: _ as parent) ->
+                 let caller, (annot, _) = get_cmd prog parent frame.call_index in
+                 let caller = String.sub caller 0 (min 128 (String.length caller)) in
+                 let origin = Fmt.str "%a" Location.pp_log_opt
+                     (Annot.get_origin_loc annot) in
+                 let origin = String.sub origin 0 (min 512 (String.length origin)) in
+                 incr callable_failure_context_count;
+                 L.normal (fun m -> m
+                   "CALLABLE_FAILURE_PARENT caller=%s command=%d origin=%s"
+                   caller frame.call_index origin)
+             | _ -> ()
+         with _ -> ());
         let result =
           Exec_res.RFail { proc; proc_idx; error_state; errors; loc }
         in
