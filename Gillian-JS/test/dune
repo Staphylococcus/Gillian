@@ -6,7 +6,7 @@
 (test
  (name jsil_variant_tests)
  (modules jsil_variant_tests)
- (libraries alcotest js2jsil_lib parsing jsil_syntax))
+ (libraries alcotest js2jsil_lib parsing jsil_syntax JS_Parser))
 
 (test
  (name for_in_cursor_tests)

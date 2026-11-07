@@ -338,6 +338,50 @@ let raw_argument_metadata () =
     [" raw_args(raw_item,n)"; " raw_args(n,n)"; " raw_args(n,ret)";
      " raw_args(n,\"a,b\")"; " raw_args()"]
 
+let compile_arguments ?(total=false) procedure source =
+  let module Front=Js2jsil_lib.JS2JSIL_Compiler in
+  let previous_mode = !Gillian.Utils.Config.current_exec_mode in
+  let previous_total = !Gillian.Utils.Config.Verification.total in
+  Fun.protect ~finally:(fun () ->
+      Gillian.Utils.Config.current_exec_mode := previous_mode;
+      Gillian.Utils.Config.Verification.total := previous_total)
+    (fun () ->
+      assert (Option.is_none !Js2jsil_lib.ES2015Frontend.profile);
+      Hashtbl.clear Front.cc_tbl; Hashtbl.clear Front.fun_tbl;
+      Hashtbl.clear Front.old_fun_tbl; Hashtbl.clear Front.vis_tbl;
+      Js2jsil_lib.JS2JSIL_Helpers.reset_generators ();
+      Gillian.Utils.Config.current_exec_mode := Verification;
+      Gillian.Utils.Config.Verification.total := total;
+      let ast=JS_Parser.parse_string_exn source in
+      let program,_,_=Front.js2jsil ~filename:"arguments.js" ast true in
+      (Option.get (Jsil_syntax.EProg.get_proc program procedure)).body |> Array.to_list)
+
+let own_arguments total () =
+  let open Jsil_syntax in let open LabCmd in
+  let commands = compile_arguments ~total "own"
+      "'use strict'; /** @id own */ function own(a) { return arguments.length > 1 ? arguments[1] : a; }" in
+  let sources=List.filter_map (function _,_,LArguments x -> Some x | _ -> None) commands in
+  Alcotest.(check int) "one real raw-arguments read" 1 (List.length sources);
+  Alcotest.(check int) "one actual arguments object initializer" 1
+    (List.length (List.filter (function
+       | _,_,LCall (_,Lit (String "create_arguments_object"),[_],None,None) -> true
+       | _ -> false) commands))
+
+let nested_arguments () =
+  let source = "'use strict'; /** @id outer */ function outer(a) { /** @id inner */ function inner() { return arguments[0]; } return a; }" in
+  let has_arguments rows=List.exists (function _,_,Jsil_syntax.LabCmd.LArguments _ -> true | _ -> false) rows in
+  Alcotest.(check bool) "nested read does not initialize outer arguments" false
+    (has_arguments (compile_arguments "outer" source));
+  Alcotest.(check bool) "nested function initializes its own object" true
+    (has_arguments (compile_arguments "inner" source))
+
+let sloppy_arguments () =
+  let rejected = try
+      ignore (compile_arguments "own" "/** @id own */ function own(a) { return arguments[0]; }"); false
+    with Js2jsil_lib.ES2015Frontend.Frontend_error message ->
+      String.equal message "Verification supports own arguments reads only in strict functions" in
+  Alcotest.(check bool) "unsupported mapped arguments reject" true rejected
+
 let () =
   Alcotest.run "JSIL procedure variants"
     [
@@ -363,4 +407,9 @@ let () =
           Alcotest.test_case "integer rank syntax boundary" `Quick
             structural_rank_is_not_executable;
         ] );
+      ( "ordinary arguments",
+        [ Alcotest.test_case "partial verification materializes arguments" `Quick (own_arguments false);
+          Alcotest.test_case "total verification materializes arguments" `Quick (own_arguments true);
+          Alcotest.test_case "nested lexical ownership" `Quick nested_arguments;
+          Alcotest.test_case "mapped arguments reject" `Quick sloppy_arguments ] );
     ]

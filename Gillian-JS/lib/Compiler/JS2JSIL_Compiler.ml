@@ -7088,10 +7088,10 @@ let generate_proc ?use_cc e fid params strictness vis_fid spec : EProc.t =
       );
     ]
   in
-  (* Babel's default-parameter lowering reads this function's arguments.
-     Verification historically omitted the existing arguments initializer.
-     Materialise it only at the opt-in boundary and only for reached strict
-     functions; this runtime helper implements unmapped strict arguments. *)
+  (* Own arguments reads also occur in ordinary ES5, including already-lowered
+     default parameters. Verification must execute their real initializer,
+     independently of the frontend profile. This helper implements unmapped
+     strict arguments; reject mapped/sloppy reads rather than omit the object. *)
   let own_arguments_reads =
     JS_Utils.js_fold
       (fun exp depth _ children ->
@@ -7109,13 +7109,12 @@ let generate_proc ?use_cc e fid params strictness vis_fid spec : EProc.t =
   in
   let verification_arguments =
     if
-      Option.is_some !ES2015Frontend.profile
-      && Exec_mode.is_verification_exec !Config.current_exec_mode
+      Exec_mode.is_verification_exec !Config.current_exec_mode
       && own_arguments_reads
     then (
       if not strictness then
         ES2015Frontend.fail
-          "Opt-in verification supports own arguments reads only in strict functions";
+          "Verification supports own arguments reads only in strict functions";
       cmds_arg_obj)
     else if_verification [] cmds_arg_obj
   in
