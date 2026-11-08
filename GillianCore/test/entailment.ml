@@ -21267,7 +21267,7 @@ let closed_utf16_seed_map_frame () = with_nonblank_counter_trace (fun () ->
     (before = nonblank_counter_rows () && files = nonblank_counter_files ()
      && contexts = Array.to_list (Sys.readdir (pending_context_directory ())));
   nonblank_counter_retained "Map4 complete fallback/cache" fs gamma atoms types;
-  closed_utf16_seed_full "Map4 numeric contradiction" false
+  closed_utf16_seed_full "map4-numeric-contradiction" false
     (Expr.Set.add (bin FLessThanEqual ps (Expr.num 0.)) fs) gamma)
 
 let closed_utf16_seed_comparisons () = with_nonblank_counter_trace (fun () ->
