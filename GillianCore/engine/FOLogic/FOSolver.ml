@@ -1711,6 +1711,9 @@ let check_entailment_simplified
              alias, even when the focused query retains the string itself.
              Use the complete query rather than this optional weakening. *)
           && (not (Expr.Set.exists observes_utf16_length focused))
+          (* List length/index subsets can omit bounds linked through another
+             list's length. Preserve the complete fallback for this shape. *)
+          && (not (Expr.Set.exists observes_list_length focused))
           (* Formatter-bearing focused subsets can retain costly UTF16 facts
              while omitting typed bounds. Keep the complete fallback. *)
           && (not (Expr.Set.exists observes_number_to_utf16 focused))

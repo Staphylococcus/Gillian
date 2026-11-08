@@ -21135,3 +21135,63 @@ let tests = tests @
        Alcotest.test_case "bounded predecessor seed false frame alternative raw zeros and declines" `Quick
          (with_total predecessor_seed_rejections)]
    | _ -> [])
+
+(* A direct-overlap focused subset retains keys/values length equality but
+   drops the upper bound mentioning only values. Keep these fixtures finite:
+   the false goal has a countermodel with length8 and index0. *)
+let focused_list_length_alias_bounds expected () = with_nonblank_counter_trace (fun () ->
+  let label = if expected then "positive" else "finite-negative" in
+  let stem = String.map (function '-' -> '_' | c -> c) label in
+  let name part = "#focused_list_" ^ stem ^ "_" ^ part in
+  let index = Expr.LVar (name "index") and keys = Expr.LVar (name "keys")
+  and values = Expr.LVar (name "values") in
+  let length e = Expr.UnOp (LstLen,e) in
+  let gamma = Gamma.init () in
+  List.iter (fun (part,typ) -> Gamma.update gamma (name part) typ)
+    ["index",Type.IntType;"keys",Type.ListType;"values",Type.ListType];
+  let descriptor = Expr.EList [nonblank_utf16 "d";Expr.Lit Null;
+    Expr.bool true;Expr.bool true;Expr.bool true] in
+  let facts = Expr.Set.of_list [
+    bin ILessThanEqual (Expr.int 0) index;
+    bin ILessThanEqual (bin IPlus (Expr.int 1) index) (length keys);
+    bin Equal (length keys) (length values);
+    bin ILessThanEqual (length values) (Expr.int 8);
+    bin Equal (bin LstNth keys index) (nonblank_utf16 "errors");
+    bin ValueEqual (bin LstNth values index) descriptor] in
+  let tail = bin IPlus (bin ITimes (Expr.int (-1)) index) (length keys) in
+  let failed = bin ILessThan (Expr.int (if expected then 8 else 7)) tail in
+  let goal = not_ failed and full = Expr.Set.add failed facts in
+  let pfs = Engine.PFS.of_list (Expr.Set.elements facts) in
+  let original = Engine.PFS.to_list pfs and types = Gamma.as_hashtbl gamma in
+  let original_types = nonblank_counter_types types in
+  let before = nonblank_counter_rows () in
+  Alcotest.(check bool) (label ^ " actual public entailment") expected
+    (Solver.check_entailment Utils.Containers.SS.empty pfs [goal] gamma);
+  let public_rows = symbolic_prefix_new_rows before in
+  Alcotest.(check bool) (label ^ " no list-length focused probe") true
+    (List.for_all (fun row -> smt_result_field "caller" row <>
+      "optional-entailment-focused") public_rows);
+  if not expected then ignore (nonblank_counter_observe label before
+    "required-complete" "sat" full types);
+  let caller = "control-focused-list-length-" ^ label in
+  let before_control = nonblank_counter_rows () in
+  Alcotest.(check bool) (label ^ " native complete counterquery") (not expected)
+    (Option.is_some (Smt.exec_sat ~caller_kind:caller full types));
+  let row = nonblank_counter_observe label before_control caller
+    (if expected then "unsat" else "sat") full types in
+  Alcotest.(check string) (label ^ " complete UNKNOWN policy unchanged") "false"
+    (smt_result_field "raw_unknown" row);
+  Alcotest.(check bool) (label ^ " every public native answer is definite") true
+    (List.for_all (fun row -> smt_result_field "result" row <> "unknown") public_rows);
+  Alcotest.(check bool) (label ^ " caller premises unchanged") true
+    (List.equal Expr.equal original (Engine.PFS.to_list pfs));
+  nonblank_counter_retained label full types (Expr.Set.elements full) original_types)
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "focused list length alias bounds keep native UNSAT proof" `Quick
+         (with_total (focused_list_length_alias_bounds true));
+       Alcotest.test_case "focused list length alias bounds keep finite native SAT counterquery" `Quick
+         (with_total (focused_list_length_alias_bounds false))]
+   | _ -> [])
