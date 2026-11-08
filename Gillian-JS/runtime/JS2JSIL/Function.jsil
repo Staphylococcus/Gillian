@@ -182,8 +182,8 @@ proc FP_toString (xsc, vthis) {
 			goto [ret = "Function"] retfun thrw;
 	retfun:	bound := hasField(m, "@targetFunction");
 			goto [bound] native scoped;
-	scoped:	scope := [m, "@scope"];
-			goto [scope = empty] native user;
+	scoped:	functionScope := [m, "@scope"];
+			goto [functionScope = empty] native user;
 
 	(* Native/bound source spelling is implementation-defined. Keep its native
 	   marker observable: Babel's wrapNativeSuper tests it for the real Error.
