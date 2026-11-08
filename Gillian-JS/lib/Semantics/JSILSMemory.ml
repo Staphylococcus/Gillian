@@ -656,8 +656,10 @@ module M = struct
                   let found = List.find_map (fun (offset, key) ->
                     if reduce key <> reduce prop then None
                     else
-                      let index = Expr.BinOp (UnOp (LstLen, prefix_list),
-                        IPlus, Expr.int offset) in
+                      let index = match prefix with
+                        | [] -> Expr.int offset
+                        | _ -> Expr.BinOp (UnOp (LstLen, prefix_list),
+                            IPlus, Expr.int offset) in
                       named (Expr.BinOp (keys, LstNth, index)) key)
                     (List.mapi (fun i key -> i, key) names) in
                   (match found with Some _ -> found
@@ -673,7 +675,7 @@ module M = struct
             List.find_map (function
               | Expr.EList _ as literal -> segments [] [literal]
               | Expr.NOp (LstCat, parts) -> segments [] parts
-              | _ -> None) (keys :: reduced_keys :: aliases)
+              | _ -> None) (reduced_keys :: keys :: aliases)
 
   (* Nonmembership is checked against the complete owned sequence; a missing
      positive witness or an unrelated list cannot establish absence. *)
@@ -1042,7 +1044,7 @@ module M = struct
     match ordered_fields_snapshot heap pfs gamma loc with
     | Error errors -> selected_fields_rejection "snapshot"; Error errors
     | Ok (name, _, keys, values) ->
-        let index = match ordered_cell_index pfs gamma keys values prop with
+        let index = match ordered_cell_index ~structural:true pfs gamma keys values prop with
           | Some _ as index -> index
           | None -> Option.bind (ordered_list pfs gamma keys) (fun names ->
               List.find_map (fun (index, key) ->

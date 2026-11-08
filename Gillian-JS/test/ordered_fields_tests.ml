@@ -1470,6 +1470,28 @@ let concat_named_read () =
      false, false, None, Expr.EList [Expr.num nan; Expr.num (-0.)];
      false, true, None, Expr.num 41.]
 
+let concat_selected_roundtrip () =
+  let descriptor = Expr.EList [ukey "d";Expr.num 17.;Expr.bool true;Expr.bool true;Expr.bool true] in
+  let c, original, prop, _ = concat_read_fixture descriptor in
+  let before = snapshot original in
+  let remainder, outputs = consume_selected c original prop in
+  check "concat view learns its mathematical prefix-length index"
+    (Gillian.Logic.FOSolver.is_equal ~pfs:c.pfs ~gamma:c.gamma
+      (List.hd outputs) (Expr.UnOp (LstLen,sequence_keys)));
+  check "concat consume owns the exact complete key/value sequence"
+    (Heap.get_ordered original loc_name = Some (List.nth outputs 1,List.nth outputs 2));
+  check "concat consume removes all fields and frames metadata"
+    (Heap.get_ordered remainder loc_name = None && Heap.get_met remainder loc_name = Some metadata);
+  check "concat consumption does not mutate its input branch" (snapshot original = before);
+  reject_selected_produce c remainder prop
+    (Expr.BinOp (List.hd outputs,IPlus,Expr.one_i) :: List.tl outputs);
+  reject_selected_produce c remainder prop
+    [List.hd outputs;List.nth outputs 1;List.nth outputs 2;Expr.EList []];
+  let restored = produce_selected c remainder prop outputs in
+  check "concat view roundtrip restores the entire exact footprint"
+    (Heap.get_ordered restored loc_name = Heap.get_ordered original loc_name
+     && Heap.get_met restored loc_name = Some metadata)
+
 let concat_named_rejections () =
   let c, heap, _, _ = concat_read_fixture (Expr.num 17.) in
   let before = snapshot heap in
@@ -1576,5 +1598,6 @@ let () =
             ("selected prefix alias rejects false witnesses", selected_prefix_alias_rejections);
             ("concat segment named read", concat_named_read);
             ("concat segment ownership and identity guards", concat_named_rejections);
+            ("concat selected whole-resource roundtrip", concat_selected_roundtrip);
           ] );
     ]
