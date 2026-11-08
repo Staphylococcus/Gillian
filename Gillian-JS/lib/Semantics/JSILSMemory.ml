@@ -593,7 +593,7 @@ module M = struct
   (* A complete ordered resource denotes distinct present keys paired with
      values. A proved in-range key selection therefore identifies exactly one
      owned value. No raw cell is exposed or consumed by this read. *)
-  let ordered_cell_index pfs gamma keys values prop =
+  let ordered_cell_index ?(structural = false) pfs gamma keys values prop =
     let reduce = Reduction.reduce_lexpr ~pfs ~gamma in
     let selection = function
     | Expr.BinOp (selected_keys, LstNth, index)
@@ -629,7 +629,7 @@ module M = struct
               Some index
           | _ -> None
         in
-        List.find_map
+        let from_facts = List.find_map
           (function
             | Expr.BinOp (left, (Equal | ValueEqual), right) ->
                 (match named left right with
@@ -637,6 +637,43 @@ module M = struct
                 | None -> named right left)
             | _ -> None)
           (PFS.to_list pfs)
+        in
+        match from_facts with
+        | Some _ as index -> index
+        | None when not structural -> None
+        | None ->
+            (* A literal segment can name a field after an abstract prefix.
+               Its nth equality may already have simplified away. Derive only
+               a candidate from this OWNED key expression, then check the same
+               index domains and actual selected-key equality as above. *)
+            let rec segments prefix = function
+              | [] -> None
+              | Expr.EList names :: rest ->
+                  let prefix_list = match List.rev prefix with
+                    | [] -> Expr.EList []
+                    | [part] -> part
+                    | parts -> Expr.NOp (LstCat, parts) in
+                  let found = List.find_map (fun (offset, key) ->
+                    if reduce key <> reduce prop then None
+                    else
+                      let index = Expr.BinOp (UnOp (LstLen, prefix_list),
+                        IPlus, Expr.int offset) in
+                      named (Expr.BinOp (keys, LstNth, index)) key)
+                    (List.mapi (fun i key -> i, key) names) in
+                  (match found with Some _ -> found
+                    | None -> segments (Expr.EList names :: prefix) rest)
+              | part :: rest -> segments (part :: prefix) rest
+            in
+            let reduced_keys = reduce keys in
+            let aliases = List.concat_map (function
+              | Expr.BinOp (left, (Equal | ValueEqual), right) ->
+                  (if left = keys || left = reduced_keys then [right] else [])
+                  @ (if right = keys || right = reduced_keys then [left] else [])
+              | _ -> []) (PFS.to_list pfs) in
+            List.find_map (function
+              | Expr.EList _ as literal -> segments [] [literal]
+              | Expr.NOp (LstCat, parts) -> segments [] parts
+              | _ -> None) (keys :: reduced_keys :: aliases)
 
   (* Nonmembership is checked against the complete owned sequence; a missing
      positive witness or an unrelated list cannot establish absence. *)
@@ -724,7 +761,7 @@ module M = struct
     match Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) with
     | None -> get_exposed_cell heap pfs gamma loc prop
     | Some (keys, values) -> (
-        match ordered_cell_index pfs gamma keys values prop with
+        match ordered_cell_index ~structural:true pfs gamma keys values prop with
         | Some index ->
             let value = Expr.BinOp (values, LstNth, index) in
             (* Presence follows from the resource and proved bounds, not from
@@ -1121,7 +1158,7 @@ module M = struct
          | [ loc; prop ] -> (
              match Option.bind (get_loc_name pfs gamma loc) (SHeap.get_ordered heap) with
              | Some (keys, values)
-               when Option.is_some (ordered_cell_index pfs gamma keys values prop) -> ()
+               when Option.is_some (ordered_cell_index ~structural:true pfs gamma keys values prop) -> ()
              | _ -> string_key prop)
          | _ -> unsupported "has invalid arguments."
        else if action = JSILNames.delObj then

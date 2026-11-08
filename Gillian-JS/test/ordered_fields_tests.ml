@@ -1425,6 +1425,74 @@ let selected_prefix_alias_rejections () =
   reject_selected_produce c remainder prop
     [List.hd outputs; sequence_keys; sequence_values; Expr.EList []]
 
+(* Appended keys remain readable when their redundant nth equality reduces
+   away. No bounded key-count or retained equality supplies the index. *)
+let concat_read_fixture ?(alias = false) ?(interior = false) ?length value =
+  let c = sequence_context () in
+  Option.iter (fun n -> Gillian.Symbolic.Pure_context.extend c.pfs
+    (Expr.BinOp (UnOp (LstLen, sequence_keys), Equal, Expr.int n))) length;
+  let prop = ukey "errors" in
+  let keys_segment = if interior then [ukey "before";prop] else [prop] in
+  let values_segment = if interior then [Expr.num 1.;value] else [value] in
+  let suffix, value_suffix = if interior then (
+    List.iter (fun n -> Gillian.Symbolic.Type_env.update c.gamma n Type.ListType)
+      ["#concat_suffix_keys";"#concat_suffix_values"];
+    let ks, vs = Expr.LVar "#concat_suffix_keys", Expr.LVar "#concat_suffix_values" in
+    Gillian.Symbolic.Pure_context.extend c.pfs
+      (Expr.BinOp (UnOp (LstLen,ks), Equal, UnOp (LstLen,vs)));
+    [ks], [vs]) else [], [] in
+  let ks = Expr.NOp (LstCat, [sequence_keys; Expr.EList keys_segment] @ suffix) in
+  let vs = Expr.NOp (LstCat, [sequence_values; Expr.EList values_segment] @ value_suffix) in
+  let ks = if alias then (
+    let name = "#concat_owned_alias" in
+    Gillian.Symbolic.Type_env.update c.gamma name Type.ListType;
+    let witness = Expr.LVar name in
+    Gillian.Symbolic.Pure_context.extend c.pfs (Expr.BinOp (witness, Equal, ks));
+    witness) else ks in
+  let heap = Heap.init () in
+  Heap.set heap loc_name Fields.empty None (Some metadata);
+  c, produce ~context:c heap ks vs, prop, value
+
+let concat_named_read () =
+  List.iter (fun (alias, interior, length, value) ->
+    let c, heap, prop, expected = concat_read_fixture ~alias ~interior ?length value in
+    let before = snapshot heap in
+    check "structurally appended key passes the actual total read guard"
+      (Legacy.prepare_total_action getCell heap c.pfs c.gamma [loc;prop] = [loc;prop]);
+    let _, outputs = action ~context:c heap getCell [loc;prop] in
+    check "appended lookup returns its exact paired value"
+      (Gillian.Logic.FOSolver.check_entailment Gillian.Utils.Containers.SS.empty
+        c.pfs [Expr.BinOp (List.nth outputs 2, ValueEqual, expected)] c.gamma);
+    check "appended lookup retains complete ownership and metadata"
+      (snapshot heap = before && Heap.get_met heap loc_name = Some metadata))
+    [false, false, None, Expr.num 17.; false, false, Some 0, Expr.num 23.;
+     false, false, Some 3, Expr.num 31.; true, false, None, Expr.bool true;
+     false, false, None, Expr.EList [Expr.num nan; Expr.num (-0.)];
+     false, true, None, Expr.num 41.]
+
+let concat_named_rejections () =
+  let c, heap, _, _ = concat_read_fixture (Expr.num 17.) in
+  let before = snapshot heap in
+  let rejected = try ignore (action ~context:c heap getCell [loc;ukey "other"]); false
+    with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError text) ->
+      text = "Unsupported ordered fields: operation requires exposed cells." in
+  check "an unrelated name cannot borrow the appended index" rejected;
+  check "rejected concat lookup preserves whole ownership" (snapshot heap = before);
+  let c, heap, prop, _ = concat_read_fixture (Expr.num 17.) in
+  check "a separate cell cannot consume the complete concat resource"
+    (try ignore (Memory.consume aCell heap c [loc;prop]); false
+     with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError _) -> true);
+  check "missing ownership cannot use a structural selection"
+    (match Legacy.execute_action getCell (Heap.init ()) c.pfs c.gamma [loc;prop] with
+     | Error _ -> true | _ -> false);
+  let unlinked = pc () in
+  List.iter (fun n -> Gillian.Symbolic.Type_env.update unlinked.gamma n Type.ListType)
+    ["#sequence_keys";"#sequence_values"];
+  let ks = Expr.NOp (LstCat,[sequence_keys;Expr.EList[prop]]) in
+  let vs = Expr.NOp (LstCat,[sequence_values;Expr.EList[Expr.num 17.]]) in
+  check "a missing paired-length relation cannot authorize the candidate"
+    (Legacy.ordered_cell_index ~structural:true unlinked.pfs unlinked.gamma ks vs prop = None)
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -1506,5 +1574,7 @@ let () =
             ("selected prefix alias complete roundtrip", selected_prefix_alias_roundtrip);
             ("selected prefix alias actual read", selected_prefix_alias_read);
             ("selected prefix alias rejects false witnesses", selected_prefix_alias_rejections);
+            ("concat segment named read", concat_named_read);
+            ("concat segment ownership and identity guards", concat_named_rejections);
           ] );
     ]
