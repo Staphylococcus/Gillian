@@ -243,8 +243,8 @@ proc SP_indexOf (xsc, vthis, searchString, position) {
 					goto [kslen <= len] iloop end;
 
 	iloop:	kj := k + j;
-					skj := extern ExecuteStringNth (S, kj);
-					ssj := extern ExecuteStringNth (sStr, j);
+					skj := s-nth(S, kj);
+					ssj := s-nth(sStr, j);
 					goto [skj = ssj] checkj next;
 
 	checkj:	j := j + 1;
