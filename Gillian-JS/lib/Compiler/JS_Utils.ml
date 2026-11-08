@@ -34,7 +34,7 @@ let rec js_fold f_ac f_state state expr =
   let e_stx = expr.exp_stx in
   match e_stx with
   (* expressions *)
-  | Num _ | String _ | Null | Bool _ | Var _ | This -> f_ac []
+  | Num _ | String _ | Null | Bool _ | Var _ | This | RegExp _ -> f_ac []
   | Delete e | Unary_op (_, e) | Access (e, _) -> f_ac (f e)
   | Comma (e1, e2)
   | BinOp (e1, _, e2)
@@ -70,8 +70,6 @@ let rec js_fold f_ac f_state state expr =
   | Switch (e, cases) -> f_ac (f e @ analyse_cases cases)
   | Function (_, _, _, s) -> f_ac (f s)
   | With (e, s) -> f_ac (f e @ f s)
-  (* Non-supported constructs *)
-  | RegExp _ -> raise (Failure "JS Construct Not Supported")
 
 let rec js_map f_m expr =
   let f = js_map f_m in
@@ -87,7 +85,7 @@ let rec js_map f_m expr =
   let new_e_stx =
     match e_stx with
     (* expressions *)
-    | Num _ | String _ | Null | Bool _ | Var _ | This -> e_stx
+    | Num _ | String _ | Null | Bool _ | Var _ | This | RegExp _ -> e_stx
     | Delete e -> Delete (f e)
     | Unary_op (op, e) -> Unary_op (op, f e)
     | Access (e, x) -> Access (f e, x)
@@ -120,8 +118,6 @@ let rec js_map f_m expr =
     | Switch (e, les) -> Switch (f e, List.map f_switch les)
     | Function (b, os, lv, s) -> Function (b, os, lv, f s)
     | With (e, s) -> With (f e, f s)
-    (* Non-supported constructs *)
-    | RegExp _ -> raise (Failure "JS Construct Not Supported")
   in
 
   let new_e = { expr with exp_stx = new_e_stx } in
@@ -142,7 +138,7 @@ let rec js_map_with_state f_transform f_state init_state state exp =
   let new_exp_stx, next_state =
     match exp.exp_stx with
     (* Literals *)
-    | Null | Bool _ | String _ | Num _ -> (exp.exp_stx, state0)
+    | Null | Bool _ | String _ | Num _ | RegExp _ -> (exp.exp_stx, state0)
     (***************)
     (* Expressions *)
     (***************)
@@ -237,7 +233,6 @@ let rec js_map_with_state f_transform f_state init_state state exp =
             ([], state0) vdecls
         in
         (VarDec (List.rev vdecls'), state')
-    | RegExp _ -> raise (Failure "construct not supported yet")
     (***************)
     (* statements  *)
     (***************)
@@ -593,8 +588,6 @@ let rec returns_empty_exp (e : JS_Parser.Syntax.exp) =
 
 let is_stmt expr =
   match expr.exp_stx with
-  (* Non-supported constructs *)
-  | RegExp _ -> raise (Failure "JS Construct Not Supported")
   (* statement *)
   | Label _
   | If _
