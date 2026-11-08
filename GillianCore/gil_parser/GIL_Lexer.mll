@@ -153,7 +153,9 @@
 
 let digit = ['0'-'9']
 let letter = ['a'-'z''A'-'Z']
-let identifier = letter(letter|digit|'_')*
+(* Compiler-emitted JavaScript formals can start with underscores. Keep the
+   standalone '_' token below as the assertion wildcard. *)
+let identifier = (letter | '_' (letter|digit|'_'))(letter|digit|'_')*
 
 let float = '-'? digit+ ('.' digit*)? (['e' 'E'] ['+' '-']? digit+)?
 let int = '-'? digit+ 'i'
