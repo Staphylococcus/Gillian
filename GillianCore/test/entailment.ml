@@ -21171,8 +21171,8 @@ let focused_list_length_alias_bounds expected () = with_nonblank_counter_trace (
   Alcotest.(check bool) (label ^ " no list-length focused probe") true
     (List.for_all (fun row -> smt_result_field "caller" row <>
       "optional-entailment-focused") public_rows);
-  if not expected then ignore (nonblank_counter_observe label before
-    "required-complete" "sat" full types);
+  (* Public entailment may use an earlier valid proof/model/cache path. Check
+     the exact complete counterquery through the explicit native call below. *)
   let caller = "control-focused-list-length-" ^ label in
   let before_control = nonblank_counter_rows () in
   Alcotest.(check bool) (label ^ " native complete counterquery") (not expected)
