@@ -21195,3 +21195,141 @@ let tests = tests @
        Alcotest.test_case "focused list length alias bounds keep finite native SAT counterquery" `Quick
          (with_total (focused_list_length_alias_bounds false))]
    | _ -> [])
+
+(* Source-derived Map4 startup frame: the global domain has Array/Map/Set,
+   while the compared closed domain omits them. ps == 1 is a candidate hint,
+   not one of these three original atoms. No captured SMT input is retained. *)
+let closed_utf16_seed_frame label =
+  let ps_name = "#closed_set_" ^ label ^ "_ps"
+  and sp_name = "#closed_set_" ^ label ^ "_sp" in
+  let ps = Expr.LVar ps_name and sp = Expr.LVar sp_name in
+  let gamma = Hashtbl.create 2 in
+  List.iter (fun name -> Hashtbl.add gamma name Type.NumberType) [ps_name;sp_name];
+  Expr.Set.of_list [bin FLessThan (Expr.num 0.) ps;
+    bin FLessThan sp (Expr.num 0.)],gamma,ps
+
+let closed_utf16_seed_decline label fs gamma =
+  let atoms = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () and files = nonblank_counter_files ()
+  and contexts = Array.to_list (Sys.readdir (pending_context_directory ())) in
+  Alcotest.(check bool) (label ^ " literal seed declines") true
+    (Option.is_none (Smt.seeded_model fs gamma));
+  Alcotest.(check bool) (label ^ " no native query or context from decline") true
+    (before = nonblank_counter_rows () && files = nonblank_counter_files ()
+     && contexts = Array.to_list (Sys.readdir (pending_context_directory ())));
+  nonblank_counter_retained label fs gamma atoms types
+
+let closed_utf16_seed_full label expected fs gamma =
+  let atoms = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () and caller = "control-closed-set-" ^ label in
+  let model,contexts = pending_context_capture (fun () ->
+    Smt.exec_sat ~caller_kind:caller fs gamma) in
+  Alcotest.(check bool) (label ^ " complete native result") expected (Option.is_some model);
+  ignore (zero_inclusive_list_context label contexts caller fs gamma);
+  let row = nonblank_counter_observe label before caller
+    (if expected then "sat" else "unsat") fs gamma in
+  Alcotest.(check string) (label ^ " required UNKNOWN policy unchanged") "false"
+    (smt_result_field "raw_unknown" row);
+  nonblank_counter_retained label fs gamma atoms types
+
+let closed_utf16_seed_map_frame () = with_nonblank_counter_trace (fun () ->
+  let names = ["NaN";"Infinity";"undefined";"eval";"parseInt";"parseFloat";
+    "isNaN";"isFinite";"decodeURI";"decodeURIComponent";"encodeURI";
+    "encodeURIComponent";"Object";"Function";"Array";"String";"Boolean";
+    "Number";"Math";"Date";"RegExp";"Error";"EvalError";"RangeError";
+    "ReferenceError";"SyntaxError";"TypeError";"URIError";"JSON";"arguments";
+    "isPlainJsonObject";"normalizeNode";"normalizeJsonValue";"Set";"Map"] in
+  let old = List.filter (fun name -> not (List.mem name ["Array";"Map";"Set"])) names in
+  Alcotest.(check int) "Map4 complete global keys" 35 (List.length names);
+  Alcotest.(check int) "Map4 compared global keys" 32 (List.length old);
+  let set names = Expr.ESet (List.map nonblank_utf16 (List.sort String.compare names)) in
+  let fs,gamma,ps = closed_utf16_seed_frame "map" in
+  let fs = Expr.Set.add (not_ (bin Equal (set names) (set old))) fs in
+  Alcotest.(check int) "Map4 original three atoms" 3 (Expr.Set.cardinal fs);
+  Alcotest.(check int) "Map4 original two Number types" 2 (Hashtbl.length gamma);
+  Alcotest.(check bool) "Map4 original FS has no generated ps == 1 hint" false
+    (Expr.Set.mem (bin ValueEqual ps (Expr.num 1.)) fs);
+  closed_utf16_seed_decline "Map4 original" fs gamma;
+  let atoms = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+  let before = nonblank_counter_rows () in
+  let model,contexts = pending_context_capture (fun () -> Smt.check_sat fs gamma) in
+  Alcotest.(check bool) "Map4 complete fallback remains SAT" true (Option.is_some model);
+  Alcotest.(check bool) "Map4 no optional seed endpoint" true
+    (not (List.exists (fun c -> pending_context_field "caller" c
+      = `String "optional-seeded-model") contexts));
+  ignore (zero_inclusive_list_context "Map4 fallback" contexts "required-complete" fs gamma);
+  ignore (nonblank_counter_observe "Map4 fallback" before "required-complete" "sat" fs gamma);
+  let before = nonblank_counter_rows () and files = nonblank_counter_files ()
+  and contexts = Array.to_list (Sys.readdir (pending_context_directory ())) in
+  Alcotest.(check bool) "Map4 original-key cache preserves SAT" true
+    (Option.is_some (Smt.check_sat fs gamma));
+  Alcotest.(check bool) "Map4 cache dispatches nothing" true
+    (before = nonblank_counter_rows () && files = nonblank_counter_files ()
+     && contexts = Array.to_list (Sys.readdir (pending_context_directory ())));
+  nonblank_counter_retained "Map4 complete fallback/cache" fs gamma atoms types;
+  closed_utf16_seed_full "Map4 numeric contradiction" false
+    (Expr.Set.add (bin FLessThanEqual ps (Expr.num 0.)) fs) gamma)
+
+let closed_utf16_seed_comparisons () = with_nonblank_counter_trace (fun () ->
+  let set xs = Expr.ESet (List.map nonblank_utf16 xs) in
+  let a = set ["a"] and b = set ["b"] and empty = set [] in
+  List.iter (fun (label,relation,expected) ->
+    let fs,gamma,_ = closed_utf16_seed_frame label in
+    let fs = Expr.Set.add relation fs in
+    closed_utf16_seed_decline label fs gamma;
+    closed_utf16_seed_full label expected fs gamma)
+    ["equal",bin Equal a a,true;
+     "different",bin Equal a b,false;
+     "value-equal",bin ValueEqual a a,true;
+     "value-different",bin ValueEqual b a,false;
+     "empty-equal",bin Equal empty empty,true;
+     "empty-different",bin ValueEqual empty a,false;
+     "duplicates",bin Equal (set ["a";"a"]) a,true;
+     "duplicate-difference",bin ValueEqual (set ["a";"a"]) b,false;
+     "negated-equal",not_ (bin Equal a a),false;
+     "negated-different",not_ (bin ValueEqual a b),true;
+     "nested-true",bin Or (Expr.bool true) (not_ (bin Equal a a)),true;
+     "nested-false",bin And (Expr.bool true) (bin ValueEqual a b),false;
+     "nested-list",bin Equal (Expr.EList [bin Equal a a])
+       (Expr.EList [Expr.bool true]),true])
+
+let closed_utf16_seed_exclusions () = with_nonblank_counter_trace (fun () ->
+  List.iter (fun (label,relation,extra_types) ->
+    let fs,gamma,ps = closed_utf16_seed_frame label in
+    List.iter (fun (name,typ) -> Hashtbl.add gamma name typ) extra_types;
+    let fs = Expr.Set.add relation fs in
+    let atoms = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    let query = Expr.Set.add (bin ValueEqual ps (Expr.num 1.)) fs in
+    let before = nonblank_counter_rows () in
+    let model,contexts = pending_context_capture (fun () -> Smt.seeded_model fs gamma) in
+    Alcotest.(check bool) (label ^ " existing literal seed remains SAT") true
+      (Option.is_some model);
+    ignore (zero_inclusive_list_context label contexts "optional-seeded-model" query gamma);
+    ignore (nonblank_counter_observe label before "optional-seeded-model" "sat" query gamma);
+    nonblank_counter_retained label fs gamma atoms types)
+    ["symbolic-set",bin Equal (Expr.LVar "#closed_symbolic_set")
+       (Expr.ESet [nonblank_utf16 "a"]),["#closed_symbolic_set",Type.SetType];
+     "symbolic-member",bin Equal (Expr.ESet [Expr.LVar "#closed_member"])
+       (Expr.ESet [nonblank_utf16 "a"]),["#closed_member",Type.Utf16Type];
+     "numeric-members",bin ValueEqual (Expr.ESet [Expr.num 1.])
+       (Expr.ESet [Expr.num 1.]),[];
+     "mixed-members",bin Equal (Expr.ESet [nonblank_utf16 "a";Expr.num 1.])
+       (Expr.ESet [Expr.num 1.;nonblank_utf16 "a"]),[];
+     "legacy-string-members",bin Equal (Expr.ESet [Expr.Lit (String "a")])
+       (Expr.ESet [Expr.Lit (String "a")]),[];
+     "literal-lists",bin ValueEqual (Expr.EList [nonblank_utf16 "a"])
+       (Expr.EList [nonblank_utf16 "a"]),[];
+     "nested-symbolic",not_ (not_ (bin Equal
+       (Expr.ESet [Expr.LVar "#closed_nested_member"])
+       (Expr.ESet [nonblank_utf16 "a"]))),["#closed_nested_member",Type.Utf16Type]])
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "closed UTF16 sets decline Map4 literal seed and retain full fallback cache" `Quick
+         (with_total closed_utf16_seed_map_frame);
+       Alcotest.test_case "closed UTF16 set comparisons recursively decline without native guesses" `Quick
+         (with_total closed_utf16_seed_comparisons);
+       Alcotest.test_case "symbolic sets nonUTF16 members and lists retain whole-query literal seeds" `Quick
+         (with_total closed_utf16_seed_exclusions)]
+   | _ -> [])

@@ -3173,7 +3173,11 @@ let seeded_model fs gamma =
     (* This existing numeric search does not require a second counter or a
        UTF16 loop. Keep the content/rounded-length guard and passive raw upper
        bounds unchanged. One complete candidate may succeed only through native
-       validated SAT; guesses never become state facts. *)
+       validated SAT; guesses never become state facts. Closed UTF16 set
+       comparisons also decline this optional search: even a numeric guess
+       retains their complete encoding. Symbolic sets/lists remain eligible. *)
+    let closed_utf16_set = List.for_all (function
+      | Expr.Lit (Literal.Utf16String _) -> true | _ -> false) in
     let contents =
       object
         inherit [_] Visitors.iter as super
@@ -3185,6 +3189,9 @@ let seeded_model fs gamma =
                       | StrNth | StrCat | StrLess), _)
           | UnOp ((Utf16Len | Utf16Trim | Utf16ToNumber | NumberToUtf16
                   | StrLen | ToNumberOp | ToStringOp | StrToBytes), _) ->
+              seen <- true
+          | BinOp (ESet left, (Equal | ValueEqual), ESet right)
+            when closed_utf16_set left && closed_utf16_set right ->
               seen <- true
           | _ -> ());
           super#visit_expr () e
