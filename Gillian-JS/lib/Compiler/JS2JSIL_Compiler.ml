@@ -4095,8 +4095,21 @@ let rec translate_expr tr_ctx e :
       in
       let x, cmds, errs = loop decs [] [] in
       (annotate_first_cmd cmds, PVar x, errs)
-  | JS_Parser.Syntax.RegExp (_, _) ->
-      raise (Failure "Not implemented: RegExp literal")
+  | JS_Parser.Syntax.RegExp (pattern, flags) ->
+      (* Keep unsupported literals in unexecuted procedure bodies. No external
+         implementation exists: totality rejects this operation both during
+         selected-body checking and before every reached interpreter step. *)
+      let result = fresh_var () in
+      let command =
+        LECall
+          ( result,
+            PVar "UnsupportedRegExpLiteral",
+            [ Lit (String pattern); Lit (String flags) ],
+            Some tr_ctx.tr_err_lab )
+      in
+      ( annotate_first_cmd (annotate_cmds [ (None, command) ]),
+        PVar result,
+        [ result ] )
   | x ->
       raise
         (Failure
@@ -5145,7 +5158,8 @@ and translate_statement tr_ctx e =
   | JS_Parser.Syntax.Obj _
   | JS_Parser.Syntax.Array _
   | JS_Parser.Syntax.CAccess _
-  | JS_Parser.Syntax.ConditionalOp _ ->
+  | JS_Parser.Syntax.ConditionalOp _
+  | JS_Parser.Syntax.RegExp _ ->
       (*
      Section 12.4 - Expression Statement
      *)
@@ -6674,8 +6688,6 @@ and translate_statement tr_ctx e =
   | JS_Parser.Syntax.Function _ -> ([], Lit Empty, [], [], [], [])
   | JS_Parser.Syntax.With (_, _) ->
       raise (Failure "Not implemented: with (this should not happen)")
-  | JS_Parser.Syntax.RegExp (_, _) ->
-      raise (Failure "Not implemented: RegExp literal")
   | Try (_, None, None) -> raise (Failure "Try with missing parts")
 
 let make_final_cmd vars final_lab final_var origin_loc =
