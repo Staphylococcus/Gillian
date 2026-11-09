@@ -2382,6 +2382,7 @@ let native_smt_logging_parent () =
 
 module Dump = struct
   let counter = ref 0
+  let compact_header_emitted = ref false
 
   let folder =
     let folder_name = "gillian_smt_queries" in
@@ -2400,6 +2401,15 @@ module Dump = struct
     let ret = Printf.sprintf "query_%d.smt2" !counter in
     let () = incr counter in
     ret
+
+  let compact_id () =
+    if Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR" <> None then
+      invalid_arg "Compact SMT audit is incompatible with per-query context capture";
+    let id = file () in
+    if not !compact_header_emitted then (
+      L.normal (fun m -> m "SMT_AUDIT_MODE mode=fileless version=1");
+      compact_header_emitted := true);
+    id
 
   let to_file f =
     let () = L.verbose (fun m -> m "Dumping query %d to file" !counter) in
@@ -2693,8 +2703,9 @@ let exec_sat'
   let () = cost "encode" "none" in
   let encoded_assertions, declarations = encode_assertions fs gamma in
   let () = cost "capture" "none" in
-  let query = if !Config.dump_smt then
-    Dump.dump fs gamma encoded_assertions else "none" in
+  let query =
+    if Sys.getenv_opt "GILLIAN_SMT_COMPACT_AUDIT" = Some "1" then Dump.compact_id ()
+    else if !Config.dump_smt then Dump.dump fs gamma encoded_assertions else "none" in
   let () = capture_native_smt_context ~query ~caller_kind ~timeout_ms
     ~phase_selection ~primary_command_text ~raw_unknown fs gamma encoded_assertions declarations in
   let () = Utils.Owned_prefix_lifecycle.query ~query ~caller:caller_kind in

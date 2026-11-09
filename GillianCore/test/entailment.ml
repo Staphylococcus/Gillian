@@ -21454,3 +21454,84 @@ let memo_bounded_history () =
 let tests = tests @ [
   Alcotest.test_case "memo history retains256 queries then evicts without invalidating live models" `Quick
     (with_total memo_bounded_history)]
+
+(* Opt-in fresh-process native control. Default registrations and file-backed
+   tests remain unchanged; the host selects this group alone with the flag. *)
+let compact_smt_audit () =
+  let module L = Logging in
+  let saved_dump = !Config.dump_smt in
+  let read_log () =
+    let channel = open_in_bin "file.log" in
+    Fun.protect ~finally:(fun () -> close_in channel)
+      (fun () -> really_input_string channel (in_channel_length channel)) in
+  let no_payload () = Alcotest.(check bool) "compact audit creates no query directory"
+    false (Sys.file_exists "gillian_smt_queries") in
+  no_payload ();
+  L.Mode.set_mode (Enabled Normal); L.initialize [L.file_reporter];
+  Fun.protect ~finally:(fun () -> Config.dump_smt := saved_dump;
+    L.wrap_up (); L.initialize []; L.Mode.set_mode (Enabled Verbose)) (fun () ->
+    Config.dump_smt := true;
+    if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then memo_lifetime_unknown ()
+    else (
+      Smt.clear_query_caches ();
+      let variable=Expr.LVar "#compact_audit_x" in
+      let gamma=Hashtbl.create 1 in
+      Hashtbl.add gamma "#compact_audit_x" Type.IntType;
+      let sat=Expr.Set.singleton (bin Equal variable (Expr.int 7)) in
+      let unsat=Expr.Set.add (bin Equal variable (Expr.int 8)) sat in
+      let facts=Expr.Set.elements sat in
+      let model=match Smt.check_sat sat gamma with
+        | Some model -> model | None -> Alcotest.fail "missing compact native SAT model" in
+      let rows=smt_result_rows (read_log ()) in
+      let cached=match Smt.check_sat sat gamma with
+        | Some model -> model | None -> Alcotest.fail "missing cached compact SAT model" in
+      Alcotest.(check bool) "compact mode preserves the actual cached model" true (model == cached);
+      Alcotest.(check bool) "cache hit creates no dispatch/result" true
+        (rows = smt_result_rows (read_log ()));
+      let lifted=ref None in
+      Smt.lift_model model gamma (fun name value ->
+        if name="#compact_audit_x" then lifted:=Some value) (Expr.Set.singleton variable);
+      Alcotest.(check bool) "actual native model remains usable" true (!lifted=Some (Expr.int 7));
+      Config.dump_smt := false;
+      Alcotest.(check bool) "compact audit works independently of dump flag" true
+        (Option.is_none (Smt.exec_sat ~caller_kind:"control-compact-unsat" unsat gamma));
+      Config.dump_smt := true;
+      Alcotest.(check bool) "optional full-query UNSAT retains its result" true
+        (Smt.proves_unsat ~caller_kind:"control-compact-optional-unsat" unsat gamma);
+      Alcotest.(check bool) "compact observation preserves the original facts" true
+        (facts=Expr.Set.elements sat);
+      Alcotest.(check bool) "compact observation preserves Gamma" true
+        (Hashtbl.length gamma=1 && Hashtbl.find gamma "#compact_audit_x"=Type.IntType));
+    no_payload ();
+    let lines=String.split_on_char '\n' (read_log ()) in
+    let events=List.filter (fun line -> String.starts_with ~prefix:"SMT_AUDIT_MODE" line
+      || String.starts_with ~prefix:"SMT_PRIMARY_CHECK_DISPATCH " line
+      || String.starts_with ~prefix:"SMT_QUERY_RESULT " line) lines in
+    Alcotest.(check int) "one explicit compact mode header" 1
+      (List.length (List.filter ((=) "SMT_AUDIT_MODE mode=fileless version=1") events));
+    (match events with
+    | "SMT_AUDIT_MODE mode=fileless version=1" :: _ -> ()
+    | _ -> Alcotest.fail "compact header must precede the first actual dispatch");
+    let rows=smt_result_rows (read_log ()) in
+    Alcotest.(check bool) "compact audit observes actual solver answers" true (rows<>[]);
+    let rec join index events rows = match events,rows with
+      | [],[] -> ()
+      | dispatch::result::events,row::rows ->
+          let id=Printf.sprintf "query_%d.smt2" index in
+          Alcotest.(check string) "monotonic native ID independent of files" id (smt_result_field "query" row);
+          Alcotest.(check bool) "actual dispatch precedes its result" true
+            (String.starts_with ~prefix:("SMT_PRIMARY_CHECK_DISPATCH query="^id^" command=") dispatch);
+          Alcotest.(check string) "one result per primary dispatch" row result;
+          join (index+1) events rows
+      | _ -> Alcotest.fail "incomplete compact primary dispatch/result sequence" in
+    join 0 (List.tl events) rows;
+    if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then
+      Alcotest.(check bool) "UNKNOWN stays visible in compact mode" true
+        (List.exists (fun row -> smt_result_field "result" row="unknown") rows)
+    else Alcotest.(check bool) "compact SAT/UNSAT answers remain definite" true
+      (List.map (smt_result_field "result") rows=["sat";"unsat";"unsat"]))
+
+let tests = tests @
+  (if Sys.getenv_opt "GILLIAN_SMT_COMPACT_AUDIT" = Some "1" then [
+    Alcotest.test_case "fileless compact SMT audit preserves native results and UNKNOWN policy" `Quick
+      (with_total compact_smt_audit)] else [])
