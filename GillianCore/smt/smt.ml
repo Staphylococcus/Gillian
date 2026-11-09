@@ -479,6 +479,11 @@ let sat_cache = Formula_cache.create Config.big_tbl_size
    satisfiability query. A later actual SAT/UNSAT cache entry takes precedence. *)
 let inconclusive_prechecks = Formula_cache.create Config.big_tbl_size
 
+let clear_query_caches () =
+  Formula_cache.clear encoding_cache;
+  Formula_cache.clear sat_cache;
+  Formula_cache.clear inconclusive_prechecks
+
 let formula_key fs gamma =
   (fs, Hashtbl.to_seq gamma |> List.of_seq |> List.sort Stdlib.compare)
 

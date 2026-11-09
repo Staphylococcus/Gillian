@@ -42,6 +42,8 @@ end)
 
 let simplification_cache = Simplification_cache.create 1
 
+let clear_cache () = Simplification_cache.clear simplification_cache
+
 (* Reduction of assertions *)
 
 (*************************************)

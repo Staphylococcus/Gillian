@@ -892,6 +892,14 @@ struct
     | None -> raise (Failure "Debugging lemmas unsupported!")
 
   let verify (prog : annot MP.prog) (test : t) : unit Gillian_result.t =
+    (* Keep memo entries through evaluation and all procedure/lemma POST work.
+       Completed cases, rejected POSTs and exceptions share this boundary;
+       result/dependency tables and every persistent identity remain untouched. *)
+    Fun.protect
+      ~finally:(fun () ->
+        Smt.clear_query_caches ();
+        Simplifications.clear_cache ())
+    @@ fun () ->
     Gillian_result.with_target test.name @@ fun () ->
     Owned_prefix_lifecycle.with_root ~target:test.name ~case_id:test.id
       ~state:test.pre_state @@ fun () ->

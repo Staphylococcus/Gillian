@@ -1,3 +1,7 @@
+(** Release only simplification memo entries after a complete verification case.
+    This does not change live PFS/Gamma/substitutions or fresh identities. *)
+val clear_cache : unit -> unit
+
 (** [simplify_pfs_and_gamma ?matching ?kill_new_lvars ?save_spec_vars
      ?existentials lpfs ?rpfs gamma] simplifies the pure formule [lpfs] and the
     typing environment [gamma], attempting to instantiate the (optional)

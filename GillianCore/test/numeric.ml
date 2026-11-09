@@ -166,13 +166,16 @@ let signed_zero_identity () =
     "sets distinguish zeros" 2
     (Expr.Set.cardinal (Expr.Set.of_list [ n 0.; n (-0.) ]));
   let predicate zero = eq (bin FDiv (n 1.) (n zero)) (n infinity) in
-  List.iter
+  let check_zeros () = List.iter
     (fun zero ->
       Alcotest.(check bool)
         "cached division keeps sign"
         (1. /. zero > 0.)
         (Smt.is_sat (Expr.Set.singleton (predicate zero)) (Hashtbl.create 0)))
-    [ 0.; -0.; 0.; -0. ]
+    [ 0.; -0.; 0.; -0. ] in
+  check_zeros ();
+  Smt.clear_query_caches ();
+  check_zeros ()
 
 let model () =
   let gamma = gamma () in

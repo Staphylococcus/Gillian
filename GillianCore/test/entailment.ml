@@ -21333,3 +21333,93 @@ let tests = tests @
        Alcotest.test_case "symbolic sets nonUTF16 members and lists retain whole-query literal seeds" `Quick
          (with_total closed_utf16_seed_exclusions)]
    | _ -> [])
+
+let memo_lifetime_model () =
+  let name = "MemoLifetimeContext" and cname = "MemoLifetimeBox" in
+  let constructor : Constructor.t = {
+    constructor_name=cname; constructor_source_path=None; constructor_loc=None;
+    constructor_num_fields=1; constructor_fields=[Some Type.NumberType];
+    constructor_datatype=name } in
+  let datatype : Datatype.t = {
+    datatype_name=name; datatype_source_path=None; datatype_loc=None;
+    datatype_constructors=[constructor] } in
+  let table=Hashtbl.create 1 in
+  Hashtbl.add table name datatype;
+  let env=Prog_env.Datatype_env.make' table in
+  let number=Expr.LVar "#memo_number" in
+  let gamma=Hashtbl.create 1 in
+  Hashtbl.add gamma "#memo_number" Type.NumberType;
+  let facts=Expr.Set.of_list [
+    bin ValueEqual number (Expr.num (-0.));
+    bin Equal (Expr.LVar "#memo_box") (Expr.ConstructorApp(cname,[number]))] in
+  let run () = Prog_env.Datatype_env.using env (fun () ->
+    match Smt.check_sat facts gamma with
+    | Some model -> model
+    | None -> Alcotest.fail "missing memo-lifetime datatype model") in
+  let saved=run () in
+  Alcotest.(check bool) "same query actually reuses its cached model" true (saved == run ());
+  Smt.clear_query_caches ();
+  Smt.clear_query_caches ();
+  let fresh=run () in
+  Alcotest.(check bool) "eviction forces a fresh native model" false (saved == fresh);
+  Smt.clear_query_caches ();
+  Alcotest.(check bool) "required UNSAT survives repeated eviction" true
+    (Option.is_none (Smt.exec_sat (Expr.Set.singleton Expr.false_) (Hashtbl.create 0)));
+  (* Lift outside the active datatype environment and after an unrelated solver
+     query. Each live model owns its declarations; the memos supply neither. *)
+  List.iter (fun model ->
+    let lifted=Hashtbl.create 1 in
+    Smt.lift_model model gamma (Hashtbl.add lifted) (Expr.Set.singleton number);
+    match Hashtbl.find_opt lifted "#memo_number" with
+    | Some (Expr.Lit (Literal.Num actual)) -> Alcotest.(check int64)
+        "live model retains datatype context and negative zero"
+        (Int64.bits_of_float (-0.)) (Int64.bits_of_float actual)
+    | _ -> Alcotest.fail "missing memo-lifetime lifted Number") [saved;fresh]
+
+let memo_lifetime_simplification () =
+  let module Simpl = Gillian.Logic.Simplifications in
+  let variable=Expr.LVar "#memo_simplification" in
+  let run () =
+    let gamma=Gamma.init () in
+    Gamma.update gamma "#memo_simplification" Type.IntType;
+    let pfs=Engine.PFS.of_list [bin Equal variable (Expr.int 1)] in
+    let subst,_=Simpl.simplify_pfs_and_gamma ~matching:true pfs gamma in
+    (List.sort Expr.compare (Engine.PFS.to_list pfs),
+     List.sort Stdlib.compare (Gamma.to_list gamma),
+     Engine.SVal.SESubst.get subst variable) in
+  let before=run () in
+  Alcotest.(check bool) "cached simplification preserves results" true (before = run ());
+  Simpl.clear_cache ();
+  Simpl.clear_cache ();
+  Alcotest.(check bool) "fresh simplification preserves PFS Gamma and substitution" true (before = run ());
+  fallback ();
+  Smt.clear_query_caches (); Simpl.clear_cache ();
+  fallback ()
+
+let memo_lifetime_unknown () =
+  (* The existing finite-position resource-control query, with no extra dump or
+     observer hooks. Run only under the explicit one-millisecond control. *)
+  let s=Expr.LVar "#memo_unknown_s" and index=Expr.LVar "#memo_unknown_index" in
+  let pos=Expr.UnOp (ToIntOp,index) in
+  let len=Expr.UnOp (IntToNum,Expr.UnOp (Utf16Len,s)) in
+  let facts=Expr.Set.of_list [not_ (Expr.UnOp (IsInt,pos));
+    not_ (bin FLessThan pos (Expr.num 0.)); not_ (bin FLessThanEqual len pos)] in
+  let gamma=Hashtbl.create 2 in
+  Hashtbl.add gamma "#memo_unknown_s" Type.Utf16Type;
+  Hashtbl.add gamma "#memo_unknown_index" Type.NumberType;
+  List.iter (fun () ->
+    Smt.clear_query_caches ();
+    Alcotest.(check bool) "optional UNKNOWN never proves UNSAT" false (Smt.proves_unsat facts gamma);
+    let rejected = try ignore (Smt.exec_sat facts gamma); false with
+      | Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError message) ->
+          message = "Incomplete totality proof: SMT returned unknown" in
+    Alcotest.(check bool) "required UNKNOWN still rejects after eviction" true rejected) [();()]
+
+let tests = tests @ [
+  Alcotest.test_case "live models survive memo eviction and fresh datatype encoding" `Quick
+    (with_total memo_lifetime_model);
+  Alcotest.test_case "memo eviction preserves simplification and complete fallback" `Quick
+    (with_total memo_lifetime_simplification)] @
+  (if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then [
+    Alcotest.test_case "required UNKNOWN remains fatal after memo eviction" `Quick
+      (with_total memo_lifetime_unknown)] else [])

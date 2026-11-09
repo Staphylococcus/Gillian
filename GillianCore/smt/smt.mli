@@ -47,6 +47,12 @@ val replay_required_unknown_input : string -> string
     across solver resets and cache hits. *)
 type model
 
+(** Release only query encoding, SAT-result and inconclusive-precheck memo
+    entries after a complete verification case, including its POST analysis.
+    Live models retain their own values and datatype declarations. This does
+    not reset the solver, datatype/string identities, policy or proof results. *)
+val clear_query_caches : unit -> unit
+
 (** Requested optional query timeout, as a millisecond option string: the
     smaller of [cap] and the configured SMT limit, with configured zero leaving
     [cap] unchanged. This read-only policy value is not a host wallclock timer
