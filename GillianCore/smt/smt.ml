@@ -484,6 +484,12 @@ let clear_query_caches () =
   Formula_cache.clear sat_cache;
   Formula_cache.clear inconclusive_prechecks
 
+(* Bound each memo's history, not model size or live verification state. *)
+let remember_formula cache key value =
+  if (not (Formula_cache.mem cache key)) && Formula_cache.length cache >= 256
+  then Formula_cache.clear cache;
+  Formula_cache.replace cache key value
+
 let formula_key fs gamma =
   (fs, Hashtbl.to_seq gamma |> List.of_seq |> List.sort Stdlib.compare)
 
@@ -2335,7 +2341,7 @@ let encode_assertions (fs : Expr.Set.t) (gamma : typenv) : sexp list * sexp list
   let declarations = ref [] in
   emit_definitions ~emit:(fun d -> declarations := d :: !declarations) needed;
   let result = (encoded, List.rev !declarations) in
-  let () = Formula_cache.replace encoding_cache key result in
+  let () = remember_formula encoding_cache key result in
   result
 
 (* Opt-in provenance only. Laziness leaves the unset path free of JSON/pretty
@@ -3010,10 +3016,10 @@ let proves_unsat ?(caller_kind = "optional-unsat") (fs : Expr.Set.t) (gamma : ty
               | None -> run_sat ~caller_kind ~timeout_ms:(optional_timeout 5000) ~phase_selection:3
                   ~raw_unknown:true fs gamma))
         in
-        Formula_cache.replace sat_cache key result;
+        remember_formula sat_cache key result;
         Option.is_none result
       with SMT_unknown ->
-        Formula_cache.replace inconclusive_prechecks key ();
+        remember_formula inconclusive_prechecks key ();
         false)
 
 (* A suffix-only, binder-free compiler copy. The caller retains its original
@@ -5056,7 +5062,7 @@ let check_sat (fs : Expr.Set.t) (gamma : typenv) : model option =
             let f = Expr.conjunct (Expr.Set.elements fs) in
             m "Adding to cache : @[%a@]" Expr.pp f)
       in
-      let () = Formula_cache.replace sat_cache key ret in
+      let () = remember_formula sat_cache key ret in
       ret
 
 let is_sat (fs : Expr.Set.t) (gamma : typenv) : bool =

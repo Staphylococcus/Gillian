@@ -1149,6 +1149,9 @@ let simplify_pfs_and_gamma
           subst = SESubst.copy result;
         }
       in
+      if not (Simplification_cache.mem simplification_cache key)
+         && Simplification_cache.length simplification_cache >= 256
+      then clear_cache ();
       Simplification_cache.replace simplification_cache key
         cached_simplification);
 

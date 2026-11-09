@@ -21423,3 +21423,34 @@ let tests = tests @ [
   (if Sys.getenv_opt "SMT_TIMEOUT" = Some "1" then [
     Alcotest.test_case "required UNKNOWN remains fatal after memo eviction" `Quick
       (with_total memo_lifetime_unknown)] else [])
+
+let memo_bounded_history () =
+  Smt.clear_query_caches ();
+  let variable=Expr.LVar "#memo_capacity" in
+  let gamma=Hashtbl.create 1 in
+  Hashtbl.add gamma "#memo_capacity" Type.IntType;
+  let run value =
+    let facts=Expr.Set.singleton (bin Equal variable (Expr.int value)) in
+    match Smt.check_sat facts gamma with
+    | Some model -> model
+    | None -> Alcotest.fail "missing bounded-memo native SAT model" in
+  let first=run 0 in
+  Alcotest.(check bool) "first query physically reuses its model" true (first == run 0);
+  (* First query +255 distinct keys fills the256-entry table. Replacing or
+     reading an existing key must preserve its cached model at capacity. *)
+  for value=1 to 255 do ignore (run value) done;
+  Alcotest.(check bool) "first entry remains cached at256 entries" true (first == run 0);
+  ignore (run 256);
+  let fresh=run 0 in
+  Alcotest.(check bool) "next new key evicts old history" false (first == fresh);
+  Alcotest.(check bool) "freshly cached model remains reusable" true (fresh == run 0);
+  let lifted=Hashtbl.create 1 in
+  Smt.lift_model first gamma (Hashtbl.add lifted) (Expr.Set.singleton variable);
+  match Hashtbl.find_opt lifted "#memo_capacity" with
+  | Some (Expr.Lit (Literal.Int value)) -> Alcotest.(check bool)
+      "eviction preserves a live model" true (Z.equal value Z.zero)
+  | _ -> Alcotest.fail "missing evicted-history live model value"
+
+let tests = tests @ [
+  Alcotest.test_case "memo history retains256 queries then evicts without invalidating live models" `Quick
+    (with_total memo_bounded_history)]
