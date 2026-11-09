@@ -103,6 +103,38 @@ module Make (State : SState.S) :
 
   type action_ret = (t * vt list, err_t) Res_list.t
 
+  (* Passive matching diagnostics: reserve space for both assertion and error,
+     keep the complete message below 8 KiB, and never format the model contents. *)
+  let matching_failure_message assertion error failing_model =
+    let bounded pp value =
+      let buffer = Buffer.create 256 in
+      let remaining = ref 3584 in
+      let exception Diagnostic_full in
+      let write text offset length =
+        let amount = min length !remaining in
+        Buffer.add_substring buffer text offset amount;
+        remaining := !remaining - amount;
+        if amount < length then raise Diagnostic_full
+      in
+      let formatter = Format.make_formatter write (fun () -> ()) in
+      let truncated =
+        try
+          pp formatter value;
+          Format.pp_print_flush formatter ();
+          false
+        with Diagnostic_full -> true
+      in
+      if truncated then Buffer.add_string buffer "\n[diagnostic truncated]";
+      Buffer.contents buffer
+    in
+    let assertion = bounded Asrt.pp assertion in
+    let error = bounded State.pp_err error in
+    Fmt.str
+      "Assert failed with argument %s. matching failed.\nErrors:\n%s.\n\
+       Failing Model: %s (contents omitted).\n"
+      assertion error
+      (if Option.is_some failing_model then "available" else "CANNOT CREATE MODEL")
+
   let init_with_pred_table pred_defs init_data =
     {
       state = State.init init_data;
@@ -623,17 +655,7 @@ module Make (State : SState.S) :
         let fail_pfs : Expr.t = State.get_failing_constraint err in
 
         let failing_model = State.sat_check_f astate.state [ fail_pfs ] in
-        let msg =
-          Fmt.str
-            "Assert failed with argument @[<h>%a@]. matching failed.@\n\
-             @[<v 2>Errors:@\n\
-             %a.@]@\n\
-             @[<v 2>Failing Model:@\n\
-             %a@]@\n"
-            Asrt.pp a State.pp_err err
-            Fmt.(option ~none:(any "CANNOT CREATE MODEL") SVal.SESubst.pp)
-            failing_model
-        in
+        let msg = matching_failure_message a err failing_model in
         L.print_to_all msg;
         Res_list.error_with (StateErr.EPure fail_pfs)
 
@@ -1343,17 +1365,7 @@ module Make (State : SState.S) :
               let fail_pfs : Expr.t = State.get_failing_constraint err in
 
               let failing_model = State.sat_check_f astate.state [ fail_pfs ] in
-              let msg =
-                Fmt.str
-                  "Assert failed with argument @[<h>%a@]. matching failed.@\n\
-                   @[<v 2>Errors:@\n\
-                   %a.@]@\n\
-                   @[<v 2>Failing Model:@\n\
-                   %a@]@\n"
-                  Asrt.pp a State.pp_err err
-                  Fmt.(option ~none:(any "CANNOT CREATE MODEL") SVal.SESubst.pp)
-                  failing_model
-              in
+              let msg = matching_failure_message a err failing_model in
               L.print_to_all msg;
               Res_list.error_with (StateErr.EPure fail_pfs))
       | Consume (asrt, binders) -> consume ~prog astate asrt binders
