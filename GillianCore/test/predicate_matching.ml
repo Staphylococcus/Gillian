@@ -3597,6 +3597,131 @@ let caller_pin_interpreter caught () =
           (fun () -> ignore (PinPState.pop_call_pins final_state))
     | _ -> Alcotest.fail "nested normal/caught-error call must return one result")
 
+let procedure_type_arm required core =
+  [Asrt.Types [Expr.PVar "item",required];
+   Asrt.CorePred (core,[Expr.PVar "item";Expr.PVar "value"],[])]
+
+let procedure_type_fixture definitions item =
+  let pred = { (stage_pred []) with pred_name = "TypedOwned";
+    pred_params = ["item",None;"value",Some Type.IntType];
+    pred_definitions = List.map (fun body -> None,body) definitions } in
+  procedure_unfold_fixture pred [item;Expr.int 7]
+
+let procedure_unfold_atomic_type_conflicts () =
+  List.iter (fun (item,known,other) ->
+    unfold_core_calls := 0;
+    let prog,state,command = procedure_type_fixture
+        [procedure_type_arm other "DeadCore";procedure_type_arm known "StageCell"] item in
+    (match item with Expr.LVar _ -> ignore (UnfoldState.assume_t state.state item known) | _ -> ());
+    (match ProcedureUnfold.evaluate_slcmd prog command state with
+     | [Ok state] ->
+         Alcotest.(check bool) "the live owner retains exact values, including NaN and raw zero" true
+           (List.equal (List.equal Expr.equal) [[item;Expr.int 7]]
+              (UnfoldState.get_heap state.ProcedureUnfold.state));
+         expect "the unrelated owner stays held" ["RetainedFrame",[]] (Preds.to_list state.preds)
+     | _ -> Alcotest.fail "exactly one compatible owned heap must survive");
+    Alcotest.(check int) "the contradictory type never reaches its dead core" 1 !unfold_core_calls)
+    [Expr.num nan,Type.NumberType,Type.Utf16Type;
+     Expr.num (-0.),Type.NumberType,Type.IntType;
+     Expr.int 3,Type.IntType,Type.NumberType;
+     stage_value "owned",Type.Utf16Type,Type.ObjectType;
+     Expr.ALoc "$l_procedure_typed",Type.ObjectType,Type.NumberType;
+     Expr.LVar "#procedure_known_type",Type.Utf16Type,Type.NumberType]
+
+let procedure_unfold_unknown_type_stays_live () =
+  let item = Expr.LVar "#procedure_unknown_type" in
+  let prog,state,command = procedure_type_fixture
+      [procedure_type_arm Type.NumberType "StageCell"] item in
+  Alcotest.(check bool) "the incoming type is genuinely absent" true
+    (Option.is_none (UnfoldState.get_type state.state item));
+  require_procedure_heap "original Types production may still infer an unknown type"
+    (ProcedureUnfold.evaluate_slcmd prog command state) [[item;Expr.int 7]];
+  List.iter (fun known ->
+    let prog,state,command = procedure_type_fixture
+        [procedure_type_arm Type.NumberType "DeadCore";
+         [Asrt.CorePred ("StageCell",[Expr.PVar "item";Expr.PVar "value"],[])]] item in
+    Option.iter (fun typ -> ignore (UnfoldState.assume_t state.state item typ)) known;
+    require_unfold_rejection "unknown or compatible Types cannot hide a live core loss"
+      (fun () -> ProcedureUnfold.evaluate_slcmd prog command state))
+    [None;Some Type.NumberType];
+  let prog,state,command = procedure_type_fixture
+      [[Asrt.Types [Expr.EList [],Type.NumberType];stage_core "DeadCore"]] (Expr.int 3) in
+  require_unfold_rejection "compound Types are not an atomic conflict certificate"
+    (fun () -> ProcedureUnfold.evaluate_slcmd prog command state)
+
+let procedure_unfold_type_cut_uses_only_incoming_types () =
+  let item = Expr.LVar "#procedure_inferred_type" in
+  let pred = { (stage_pred []) with pred_name = "AliasedTypedOwned";
+    pred_num_params = 3; ins_number = 3;
+    pred_params = ["item",None;"alias",None;"value",Some Type.IntType];
+    pred_definitions = [None,
+      [Asrt.Types [Expr.PVar "item",Type.NumberType];
+       Asrt.Types [Expr.PVar "alias",Type.Utf16Type];stage_core "DeadCore"]] } in
+  let prog,state,command = procedure_unfold_fixture pred [item;item;Expr.int 7] in
+  require_unfold_rejection "a type produced by this arm is not incoming evidence"
+    (fun () -> ProcedureUnfold.evaluate_slcmd prog command state);
+  let partial = Expr.BinOp (Expr.EList [],LstNth,Expr.int 0) in
+  let prog,state,command = procedure_type_fixture
+      [[Asrt.Types [Expr.PVar "item",Type.NumberType];
+        Asrt.definedness ~fact:false partial;stage_core "DeadCore"]] (stage_value "owned") in
+  (match ProcedureUnfold.evaluate_slcmd prog command state with
+   | _ -> Alcotest.fail "a known type conflict cannot waive a later domain obligation"
+   | exception PredicateCallbackResult.Exc.Gillian_error (AnalysisFailures [{msg;_}]) ->
+       Alcotest.(check bool) "full original domains still precede the type cut" true
+         (String.starts_with ~prefix:"Produced assertion is not proved defined:" msg));
+  let prog,state,_ = procedure_type_fixture
+      [procedure_type_arm Type.NumberType "DeadCore"] (stage_value "owned") in
+  let missing = SLCmd.Unfold ("TypedOwned",
+      [stage_value "owned";Expr.PVar "missing_typed_argument"],None,false) in
+  (match ProcedureUnfold.evaluate_slcmd prog missing state with
+   | _ -> Alcotest.fail "a known type conflict cannot provide a missing command argument"
+   | exception ProcedureUnfold.Internal_State_Error
+       ([Engine.StateErr.EVar "missing_typed_argument"],_) -> ())
+
+let procedure_unfold_type_cut_preserves_required_errors () =
+  let policy = Expr.LVar "#procedure_typed_policy" in
+  let guard = Expr.BinOp (Expr.PVar "policy",FLessThan,Expr.num 0.) in
+  let target = Expr.negate (Expr.BinOp (policy,FLessThan,Expr.num 0.)) in
+  let pred = { (stage_pred []) with pred_name = "TypedErrorOwned";
+    pred_num_params = 3; ins_number = 3;
+    pred_params = ["item",None;"policy",Some Type.NumberType;"value",Some Type.IntType];
+    pred_definitions = [None,procedure_type_arm Type.NumberType "DeadCore";
+      None,Asrt.Pure guard :: procedure_type_arm Type.Utf16Type "StageCell"] } in
+  List.iter (fun error ->
+    let prog,state,command = procedure_unfold_fixture pred
+        [stage_value "owned";policy;Expr.int 7] in
+    ignore (UnfoldState.assume_t state.state policy Type.NumberType);
+    unfold_assertion_failure := Some (target,error);
+    (match ProcedureUnfold.evaluate_slcmd prog command state with
+     | _ -> Alcotest.fail "a type-conflicting sibling cannot hide a required error"
+     | exception actual -> Alcotest.(check bool) "the identical required error escapes" true
+         (actual == error)))
+    [PredicateCallbackResult.Exc.Gillian_error
+       (OperationError "Incomplete totality proof: SMT returned unknown");
+     Gillian.Logic.Reduction.ReductionException (guard,"typed sibling control")]
+
+let procedure_unfold_type_cut_scope_and_all_empty () =
+  let item = stage_value "owned" in
+  let prog,state,command = procedure_type_fixture
+      [procedure_type_arm Type.NumberType "DeadCore";
+       procedure_type_arm Type.ObjectType "DeadCore"] item in
+  require_unfold_rejection "all certified type conflicts still reject vacuity"
+    (fun () -> ProcedureUnfold.evaluate_slcmd prog command state);
+  Alcotest.(check int) "no conflicting arm reaches heap production" 0 !unfold_core_calls;
+  let fixture () = procedure_type_fixture
+      [procedure_type_arm Type.NumberType "DeadCore";
+       procedure_type_arm Type.Utf16Type "StageCell"] item in
+  let prog,state,command = fixture () in
+  let results = ProcedureUnfold.evaluate_slcmd { prog with totality = None } command state in
+  Alcotest.(check int) "lemma-only infeasibility keeps its existing marker" 1
+    (List.length (List.filter checked_infeasible results));
+  Alcotest.(check int) "the lemma retains its compatible live owner" 1
+    (List.length (List.filter Result.is_ok results));
+  Utils.Config.Verification.total := false;
+  let prog,state,command = fixture () in
+  require_procedure_heap "partial verification retains its original live production"
+    (ProcedureUnfold.evaluate_slcmd prog command state) [[item;Expr.int 7]]
+
 let tests =
   List.map (fun (name, test) -> Alcotest.test_case name `Quick test)
     [
@@ -3687,4 +3812,9 @@ let tests =
       ("procedure unfold rejects wholly certified and unmarked empty outcomes", with_tracked_unfold procedure_unfold_final_all_empty);
       ("procedure final UNSAT handling preserves required errors", with_tracked_unfold procedure_unfold_final_errors);
       ("procedure final UNSAT handling preserves lemma and partial production", with_tracked_unfold procedure_unfold_final_scope);
+      ("procedure unfold refutes only known incompatible atomic types", with_tracked_unfold procedure_unfold_atomic_type_conflicts);
+      ("procedure unfold retains unknown compatible and compound Types", with_tracked_unfold procedure_unfold_unknown_type_stays_live);
+      ("procedure type cut uses incoming knowledge after complete domains", with_tracked_unfold procedure_unfold_type_cut_uses_only_incoming_types);
+      ("procedure type cut preserves required errors beside conflicts", with_tracked_unfold procedure_unfold_type_cut_preserves_required_errors);
+      ("procedure type cut preserves all-empty lemma and partial behavior", with_tracked_unfold procedure_unfold_type_cut_scope_and_all_empty);
     ]

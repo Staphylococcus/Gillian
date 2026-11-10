@@ -1115,10 +1115,22 @@ module Make (State : SState.S) :
         "raw_before_simplify", Asrt.to_yojson a;
         "mp_simplified_sas", Asrt.to_yojson sas])
     in
-    (* Pre-production pruning uses the original pure guards. Full domain
-       checking above precedes this cut; optional substitution must not allocate
-       an absent witness. No arm production has happened at this point. *)
+    (* Pre-production pruning uses only incoming types and original pure guards.
+       Full domain checking above precedes this cut; optional substitution must
+       not allocate an absent witness. No arm production has happened here. *)
     let known_false = prune_known_false && List.exists (function
+      | Asrt.Types bindings -> List.exists (fun (expression, required) ->
+          (* Only an existing atomic type can refute this whole arm. Do not
+             simplify a partial expression, infer a type or use an arm fact. *)
+          let known = match SVal.SESubst.subst_in_expr_opt subst expression with
+            | Some (Expr.Lit literal) -> Some (Literal.type_of literal)
+            | Some (Expr.ALoc _) -> Some Type.ObjectType
+            | Some (Expr.LVar name) ->
+                Type_env.get (State.get_typ_env astate.state) name
+            | _ -> None in
+          match known with
+          | Some known -> not (Type.equal known required)
+          | None -> false) bindings
       | Asrt.Pure formula as atom when Option.is_none (Asrt.as_definedness atom) ->
           (match subst_in_expr_opt astate subst formula with
            | Some reduced -> Expr.equal reduced Expr.false_
