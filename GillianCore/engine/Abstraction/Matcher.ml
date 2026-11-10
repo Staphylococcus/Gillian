@@ -18,6 +18,9 @@ module Unclassified_unfold_diagnostic = struct
   let enabled =
     Sys.getenv_opt "GILLIAN_UNCLASSIFIED_UNFOLD_DIAGNOSTIC" = Some "1"
 
+  let pure_enabled =
+    Sys.getenv_opt "GILLIAN_UNCLASSIFIED_UNFOLD_PURE_DIAGNOSTIC" = Some "1"
+
   let attempted = ref false
 
   let safe text =
@@ -26,6 +29,17 @@ module Unclassified_unfold_diagnostic = struct
             | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' | '.' | '-' -> true
             | _ -> false) text
     then text else "-"
+
+  (* Fixed fields and bounded safe identifiers keep this scalar below
+     2 KiB. Never include a state, assertion body, root value or query payload. *)
+  let pure_message ?site ~assertion sat =
+    let predicate, definition, label =
+      Option.value ~default:("-", -1, None) site in
+    "UNCLASSIFIED_UNFOLD_PURE_DIAGNOSTIC=" ^ Yojson.Safe.to_string (`Assoc [
+      "predicate", `String (safe predicate); "definition", `Int definition;
+      "label", `String (safe (Option.value ~default:"-" label));
+      "assertion", `Int assertion;
+      "satisfiability", `String (if sat then "SAT" else "UNSAT")])
 
   (* At most 384 raw bytes become at most 1536 escaped ASCII bytes. The
      bounded scalar prefix keeps the entire single-line record below 2 KiB. *)
@@ -53,7 +67,7 @@ module Unclassified_unfold_diagnostic = struct
     with _ -> None
 
   let emit ?site ~assertion atom =
-    if enabled && not !attempted then (
+    if (enabled || pure_enabled) && not !attempted then (
       attempted := true;
       try
         let kind = match atom with
@@ -942,9 +956,18 @@ module Make (State : SState.S) :
           | [], Some reason ->
               Res_list.error_with (StateErr.EInfeasibleUnfold reason)
           | _ ->
-              (if guard_loss && outcomes = [] then
+              (if guard_loss && outcomes = [] then (
+                 if Unclassified_unfold_diagnostic.pure_enabled then (
+                   (* Observe this exact failing atom, not an earlier memory
+                      rejection. Both answers retain the original loss guard;
+                      required UNKNOWN/reduction errors escape unchanged. *)
+                   let admissible = State.assume_a ~matching:true
+                       (State.copy intermediate_state.state) [Expr.true_] in
+                   L.normal (fun m -> m "%s"
+                     (Unclassified_unfold_diagnostic.pure_message ?site:unfold_site
+                       ~assertion:ordinal (Option.is_some admissible))));
                  Unclassified_unfold_diagnostic.emit ?site:unfold_site
-                   ~assertion:ordinal asrt);
+                   ~assertion:ordinal asrt));
               guard_unclassified_loss guard_loss
                 "explicit unfold assertion production" outcomes)
         (Res_list.return astate) sas
@@ -1271,7 +1294,8 @@ module Make (State : SState.S) :
     let () = extend_subst_with_bindings state subst_i additional_bindings in
     let produce_definition ordinal (lab, definition) astate subst =
       let unfold_site =
-        if Unclassified_unfold_diagnostic.enabled then
+        if Unclassified_unfold_diagnostic.enabled
+           || Unclassified_unfold_diagnostic.pure_enabled then
           Some (pname, ordinal, Option.map fst lab)
         else None
       in
@@ -1336,7 +1360,8 @@ module Make (State : SState.S) :
           let state' = State.add_spec_vars state new_spec_vars in
           let astate = { state = state'; preds; wands; pred_defs } in
           let diagnostic_ordinal =
-            if Origin.enabled || Unclassified_unfold_diagnostic.enabled then
+            if Origin.enabled || Unclassified_unfold_diagnostic.enabled
+               || Unclassified_unfold_diagnostic.pure_enabled then
               Some (ref 1)
             else None
           in

@@ -2825,6 +2825,7 @@ let ordinary_concrete_summary_unfolds () =
 (* Real Matcher production over a small owned core heap. DeadCore deliberately
    returns no memory outcome, so an incompatible arm must stop before it. *)
 let unfold_core_calls = ref 0
+let unfold_last_dead_context = ref None
 module UnfoldMemory = struct
   type init_data = unit
   type err_t = unit
@@ -2854,7 +2855,7 @@ module UnfoldMemory = struct
   let produce name heap pc values =
     incr unfold_core_calls;
     match name with
-    | "StageCell" -> [Engine.Gbranch.{ value = values :: heap; pc }]
+    | "StageCell" | "AOwnedCell" -> [Engine.Gbranch.{ value = values :: heap; pc }]
     | "CorrelatedFinal" | "OnlyFinalUnsat" -> (match values with
         | [selector;value] ->
             let branch index =
@@ -2867,7 +2868,7 @@ module UnfoldMemory = struct
             if name = "OnlyFinalUnsat" then [branch 1]
             else [branch 1;branch 0]
         | _ -> failwith "expected selector and owned value")
-    | "DeadCore" -> []
+    | "DeadCore" -> unfold_last_dead_context := Some (pc,heap); []
     | _ -> failwith "unexpected unfold fixture core"
   let copy heap = heap
   let is_overlapping_asrt _ = false
@@ -2903,6 +2904,10 @@ let unfold_simplify_loss = ref 0
 let unfold_simplify_calls = ref 0
 let unfold_assertion_failure = ref None
 let unfold_assertions = ref Expr.Set.empty
+let unfold_pure_diagnostic_checks = ref 0
+let unfold_pure_diagnostic_results = ref []
+let unfold_pure_diagnostic_source_ok = ref false
+let unfold_pure_diagnostic_failure = ref None
 module UnfoldState = struct
   include UnfoldStateBase
   let simplify_val state value =
@@ -2911,6 +2916,19 @@ module UnfoldState = struct
      | _ -> ());
     UnfoldStateBase.simplify_val state value
   let assume_a ?matching ?production ?(time = "") state facts =
+    let pure_diagnostic = time = "" && matching = Some true && production = None
+      && facts = [Expr.true_] in
+    let source = if pure_diagnostic then (
+      incr unfold_pure_diagnostic_checks;
+      let source = Option.map (fun (pc,heap) ->
+        unfold_pure_diagnostic_source_ok :=
+          UnfoldStateBase.get_pfs state != pc.Engine.Gpc.pfs
+          && UnfoldStateBase.get_typ_env state != pc.gamma
+          && UnfoldStateBase.get_heap state = heap;
+        pc, Engine.PFS.to_list pc.pfs, Engine.Type_env.to_list pc.gamma, heap)
+        !unfold_last_dead_context in
+      Option.iter raise !unfold_pure_diagnostic_failure;
+      source) else None in
     let final = time = "Produce: final check" in
     if final then (
       incr unfold_final_checks;
@@ -2924,6 +2942,13 @@ module UnfoldState = struct
       | _ -> production in
     let result = UnfoldStateBase.assume_a ?matching ?production ~time state facts in
     if final && Option.is_none result then incr unfold_final_unsat;
+    if pure_diagnostic then (
+      unfold_pure_diagnostic_results := Option.is_some result :: !unfold_pure_diagnostic_results;
+      Option.iter (fun (pc,pfs,gamma,heap) ->
+        unfold_pure_diagnostic_source_ok := !unfold_pure_diagnostic_source_ok
+          && Engine.PFS.to_list pc.Engine.Gpc.pfs = pfs
+          && Engine.Type_env.to_list pc.gamma = gamma
+          && UnfoldStateBase.get_heap state = heap) source);
     result
   let simplify ?save ?kill_new_lvars ?matching state =
     incr unfold_simplify_calls;
@@ -2956,6 +2981,11 @@ let with_tracked_unfold test () =
   unfold_simplify_calls := 0;
   unfold_assertion_failure := None;
   unfold_assertions := Expr.Set.empty;
+  unfold_last_dead_context := None;
+  unfold_pure_diagnostic_checks := 0;
+  unfold_pure_diagnostic_results := [];
+  unfold_pure_diagnostic_source_ok := false;
+  unfold_pure_diagnostic_failure := None;
   Fun.protect ~finally:(fun () ->
       Utils.Config.Verification.total := total;
       Utils.Config.under_approximation := under;
@@ -2968,7 +2998,12 @@ let with_tracked_unfold test () =
       unfold_simplify_loss := 0;
       unfold_simplify_calls := 0;
       unfold_assertion_failure := None;
-      unfold_assertions := Expr.Set.empty) test
+      unfold_assertions := Expr.Set.empty;
+      unfold_last_dead_context := None;
+      unfold_pure_diagnostic_checks := 0;
+      unfold_pure_diagnostic_results := [];
+      unfold_pure_diagnostic_source_ok := false;
+      unfold_pure_diagnostic_failure := None) test
 
 let unfold_empty () : UnfoldMatcher.t = {
   state = UnfoldState.init (); preds = Preds.init [];
@@ -3456,6 +3491,75 @@ let procedure_unfold_final_scope () =
   require_procedure_heap "partial production keeps its original surviving heap"
     (ProcedureUnfold.evaluate_slcmd prog command state) [[Expr.int 0;Expr.int 7]]
 
+let procedure_pure_diagnostic_fixture unsat =
+  let selector = Expr.LVar "#procedure_empty_selector" in
+  let constraints = if not unsat then [] else List.map (fun index ->
+    Asrt.Pure (Expr.BinOp (Expr.PVar "selector",Equal,Expr.int index))) [0;1] in
+  let pred = { (stage_pred []) with
+    pred_params = ["selector",Some Type.IntType;"value",Some Type.IntType];
+    pred_definitions = [Some ("exact_empty_site",[]),
+      constraints @ [stage_core "AOwnedCell";stage_core "DeadCore"]] } in
+  let prog,state,command = procedure_unfold_fixture pred [selector;Expr.int 7] in
+  ignore (UnfoldState.assume_t state.state selector Type.IntType);
+  prog,state,command
+
+let pure_diagnostic_enabled () =
+  Sys.getenv_opt "GILLIAN_UNCLASSIFIED_UNFOLD_PURE_DIAGNOSTIC" = Some "1"
+
+let reset_pure_diagnostic_fixture () =
+  unfold_core_calls := 0;
+  unfold_last_dead_context := None;
+  unfold_pure_diagnostic_checks := 0;
+  unfold_pure_diagnostic_results := [];
+  unfold_pure_diagnostic_source_ok := false
+
+let procedure_unfold_pure_diagnostic () =
+  List.iter (fun unsat ->
+    reset_pure_diagnostic_fixture ();
+    let prog,state,command = procedure_pure_diagnostic_fixture unsat in
+    require_unfold_rejection "neither SAT nor UNSAT changes the exact empty-atom guard"
+      (fun () -> ProcedureUnfold.evaluate_slcmd prog command state);
+    Alcotest.(check int) "the actual owned-cell and failing core both ran" 2 !unfold_core_calls;
+    (match !unfold_last_dead_context with
+     | Some (_,heap) -> expect "the failing site's exact owned heap remains intact" [[Expr.int 7]] heap
+     | None -> Alcotest.fail "the exact failed core site must exist");
+    Alcotest.(check int) "only opt-in adds one exact-site State assumption"
+      (if pure_diagnostic_enabled () then 1 else 0) !unfold_pure_diagnostic_checks;
+    expect "the real copied-state check reports the actual pure SAT/UNSAT answer"
+      (if pure_diagnostic_enabled () then [not unsat] else []) !unfold_pure_diagnostic_results;
+    Alcotest.(check bool) "the diagnostic uses independent PFS/gamma and preserves the source heap"
+      (pure_diagnostic_enabled ()) !unfold_pure_diagnostic_source_ok)
+    [false;true]
+
+let procedure_unfold_pure_diagnostic_errors () =
+  List.iter (fun error ->
+    reset_pure_diagnostic_fixture ();
+    unfold_pure_diagnostic_failure := Some error;
+    let prog,state,command = procedure_pure_diagnostic_fixture false in
+    if pure_diagnostic_enabled () then (
+      (match ProcedureUnfold.evaluate_slcmd prog command state with
+       | _ -> Alcotest.fail "the exact-site diagnostic cannot catch a required error"
+       | exception actual -> Alcotest.(check bool) "the identical required error escapes" true
+           (actual == error));
+      Alcotest.(check int) "the error originated at the diagnostic call" 1 !unfold_pure_diagnostic_checks;
+      Alcotest.(check bool) "the required error did not receive the original state" true
+        !unfold_pure_diagnostic_source_ok)
+    else require_unfold_rejection "flag-off keeps the original loss guard"
+      (fun () -> ProcedureUnfold.evaluate_slcmd prog command state);
+    expect "an unfinished diagnostic cannot publish an answer" [] !unfold_pure_diagnostic_results;
+    unfold_pure_diagnostic_failure := None)
+    [PredicateCallbackResult.Exc.Gillian_error
+       (OperationError "Incomplete totality proof: SMT returned unknown");
+     Gillian.Logic.Reduction.ReductionException (Expr.true_,"exact-site diagnostic control")]
+
+let procedure_unfold_pure_diagnostic_partial () =
+  Utils.Config.Verification.total := false;
+  let prog,state,command = procedure_pure_diagnostic_fixture false in
+  expect "partial production retains its original empty result" []
+    (ProcedureUnfold.evaluate_slcmd prog command state);
+  Alcotest.(check int) "an unguarded empty producer never starts the diagnostic" 0
+    !unfold_pure_diagnostic_checks
+
 
 module PinMemory = struct
   include Engine.SMemory.Dummy
@@ -3687,4 +3791,7 @@ let tests =
       ("procedure unfold rejects wholly certified and unmarked empty outcomes", with_tracked_unfold procedure_unfold_final_all_empty);
       ("procedure final UNSAT handling preserves required errors", with_tracked_unfold procedure_unfold_final_errors);
       ("procedure final UNSAT handling preserves lemma and partial production", with_tracked_unfold procedure_unfold_final_scope);
+      ("exact empty-unfold diagnostic preserves SAT UNSAT and owned state", with_tracked_unfold procedure_unfold_pure_diagnostic);
+      ("exact empty-unfold diagnostic preserves required errors and defaults", with_tracked_unfold procedure_unfold_pure_diagnostic_errors);
+      ("exact empty-unfold diagnostic excludes unguarded partial production", with_tracked_unfold procedure_unfold_pure_diagnostic_partial);
     ]
