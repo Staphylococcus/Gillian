@@ -1035,6 +1035,10 @@ module Make (State : SState.S) :
       @return List of states/predicate sets resulting from the evaluation *)
   let evaluate_slcmd_impl (prog : 'a MP.prog) (lcmd : SLCmd.t) (astate : t) :
       (t, err_t) Res_list.t =
+    let prune_known_false = !Config.Verification.total
+      && not !Config.under_approximation
+      && Option.is_some prog.totality && Option.is_none prog.lemma_induction
+      && (match lcmd with Unfold (_, _, _, false) -> true | _ -> false) in
     Owned_prefix_lifecycle.scope "logic-command" ~state:astate
       (fun () -> Cmd.to_yojson (fun (_ : unit) -> `Null) (Cmd.Logic (LCmd.SL lcmd))) @@ fun () ->
     let eval_expr e =
@@ -1164,14 +1168,16 @@ module Make (State : SState.S) :
               && Option.is_none prog.totality
               && Option.is_none prog.lemma_induction
             in
+            (* One-step explicit total-procedure unfolds prune proved-false
+               definitions locally, never through the lemma error collector. *)
             let** _, state =
-              SMatcher.unfold ~track_infeasible ?additional_bindings astate
+              SMatcher.unfold ~track_infeasible ~prune_known_false ?additional_bindings astate
                 pname vs
             in
             let _, states =
               simplify ~kill_new_lvars:true ~matching:true state
             in
-            if track_infeasible && states = [] then
+            if (track_infeasible || prune_known_false) && states = [] then
               Totality.unsupported
                 "Unclassified state loss during explicit unfold PState \
                  simplification";
@@ -1462,6 +1468,9 @@ module Make (State : SState.S) :
     in
     (match lcmd with ApplyLem (name, _, _) -> lemma_stage name "logic-simplify" | _ -> ());
     let _, astates = simplify resulting_astate in
+    if prune_known_false && astates = [] then
+      Totality.unsupported
+        "Unclassified state loss during explicit unfold final PState simplification";
     if Owned_prefix_lifecycle.active () then
       List.iter (fun state -> lifecycle "logic-return" state (fun () -> `Null)) astates;
     (match lcmd with ApplyLem (name, _, _) -> lemma_stage name "return" | _ -> ());

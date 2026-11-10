@@ -154,6 +154,7 @@ module type S = sig
 
   val unfold :
     ?track_infeasible:bool ->
+    ?prune_known_false:bool ->
     ?additional_bindings:unfold_info_t ->
     t ->
     string ->
@@ -845,6 +846,7 @@ module Make (State : SState.S) :
       ?diagnostic_origin
       ?unfold_site
       ?(track_infeasible = false)
+      ?(fail_on_loss = false)
       (astate : t)
       (subst : SVal.SESubst.t)
       (sas : Asrt.t) : (t, err_t) Res_list.t =
@@ -854,6 +856,7 @@ module Make (State : SState.S) :
       track_infeasible && !Config.Verification.total
       && not !Config.under_approximation
     in
+    let guard_loss = track_infeasible || fail_on_loss in
     let diagnostic_enabled =
       Sys.getenv_opt "GILLIAN_DIAGNOSTIC_INADMISSIBLE_PRODUCTION" = Some "1"
     in
@@ -917,7 +920,7 @@ module Make (State : SState.S) :
                 (StateErr.EInfeasibleUnfold
                    "explicit unfold pure formula is proved false")
             else try produce_assertion intermediate_state subst asrt with
-            | err when track_infeasible -> raise err
+            | err when guard_loss -> raise err
             | e ->
                 let admissible =
                   State.assume_a ~time:"Produce: final check" ~matching:true
@@ -935,10 +938,10 @@ module Make (State : SState.S) :
           | [], Some reason ->
               Res_list.error_with (StateErr.EInfeasibleUnfold reason)
           | _ ->
-              (if track_infeasible && outcomes = [] then
+              (if guard_loss && outcomes = [] then
                  Unclassified_unfold_diagnostic.emit ?site:unfold_site
                    ~assertion:ordinal asrt);
-              guard_unclassified_loss track_infeasible
+              guard_unclassified_loss guard_loss
                 "explicit unfold assertion production" outcomes)
         (Res_list.return astate) sas
     in
@@ -1029,6 +1032,9 @@ module Make (State : SState.S) :
           Res_list.error_with
             (StateErr.EInfeasibleUnfold
                "final explicit-unfold production admissibility check")
+        else if fail_on_loss then
+          Totality.unsupported
+            "Unclassified state loss during explicit unfold final admissibility"
         else Res_list.vanish
     | Some state -> Res_list.return { state; preds; pred_defs; wands }
 
@@ -1036,9 +1042,10 @@ module Make (State : SState.S) :
       ?diagnostic_origin
       ?unfold_site
       ?(track_infeasible = false)
+      ?(prune_known_false = false)
       (astate : t)
       (subst : SVal.SESubst.t)
-      (a : Asrt.t) : (t, err_t) Res_list.t =
+      (a : Asrt.t) : (t, err_t) Res_list.t option =
     L.verbose (fun m ->
         m
           "@[-----------------@\n\
@@ -1101,10 +1108,23 @@ module Make (State : SState.S) :
         "raw_before_simplify", Asrt.to_yojson a;
         "mp_simplified_sas", Asrt.to_yojson sas])
     in
-    produce_asrt_list ?diagnostic_origin ?unfold_site ~track_infeasible astate subst ordered_sas
+    (* Procedure unfolds discard only a definition whose original pure guard
+       is already false. Full domain checking above still precedes this cut;
+       optional substitution must not allocate an absent witness. No heap or
+       delayed production has happened when [None] returns to this unfold. *)
+    let known_false = prune_known_false && List.exists (function
+      | Asrt.Pure formula as atom when Option.is_none (Asrt.as_definedness atom) ->
+          (match subst_in_expr_opt astate subst formula with
+           | Some reduced -> Expr.equal reduced Expr.false_
+               || PFS.mem (State.get_pfs astate.state) (Expr.negate reduced)
+           | None -> false)
+      | _ -> false) ordered_sas in
+    if known_false then None
+    else Some (produce_asrt_list ?diagnostic_origin ?unfold_site ~track_infeasible
+      ~fail_on_loss:prune_known_false astate subst ordered_sas)
 
   let produce ?track_infeasible astate subst a =
-    produce_with_diagnostic ?track_infeasible astate subst a
+    Option.get (produce_with_diagnostic ?track_infeasible astate subst a)
 
   let produce_posts (state : t) (subst : SVal.SESubst.t) (asrts : Asrt.t list) :
       t list =
@@ -1171,6 +1191,7 @@ module Make (State : SState.S) :
      We only use unfold and fold in OX mode right now, and we don't quite know the meaning of UX fold/unfold. *)
   let rec unfold
       ?(track_infeasible = false)
+      ?(prune_known_false = false)
       ?(additional_bindings = [])
       (astate : t)
       (pname : string)
@@ -1179,6 +1200,10 @@ module Make (State : SState.S) :
       track_infeasible && !Config.Verification.total
       && not !Config.under_approximation
     in
+    let prune_known_false = prune_known_false && !Config.Verification.total
+      && not !Config.under_approximation in
+    assert (not (track_infeasible && prune_known_false));
+    let guard_loss = track_infeasible || prune_known_false in
     let pred = MP.get_pred_def astate.pred_defs pname in
     if
       !Config.Verification.total
@@ -1262,7 +1287,11 @@ module Make (State : SState.S) :
             "lineage_available", `Bool (Option.is_some source_event)])
         with _ -> Origin.unavailable "runtime-selection-snapshot"; None
       in
-      produce_with_diagnostic ?diagnostic_origin ?unfold_site ~track_infeasible astate subst definition
+      match produce_with_diagnostic ?diagnostic_origin ?unfold_site ~track_infeasible
+          ~prune_known_false astate subst definition with
+      | None -> []
+      | Some outcomes -> guard_unclassified_loss guard_loss
+          "explicit unfold predicate alternative" outcomes
     in
     let definitions = pred.pred.pred_definitions in
     let open Syntaxes.List in
@@ -1294,19 +1323,11 @@ module Make (State : SState.S) :
             let* def = rest_defs in
             let ordinal = match diagnostic_ordinal with
               | None -> 0 | Some n -> let i = !n in incr n; i in
-            let outcomes =
-              produce_definition ordinal def (copy_astate astate)
-                (SVal.SESubst.copy subst_i)
-            in
-            guard_unclassified_loss track_infeasible
-              "explicit unfold predicate alternative" outcomes
+            produce_definition ordinal def (copy_astate astate)
+              (SVal.SESubst.copy subst_i)
           in
           let first_results =
             produce_definition 0 first_def astate subst_i
-          in
-          let first_results =
-            guard_unclassified_loss track_infeasible
-              "explicit unfold predicate alternative" first_results
           in
           let* result = first_results @ rest_results in
           match result with
@@ -1319,12 +1340,14 @@ module Make (State : SState.S) :
           | Ok state ->
               let subst, states = simplify_astate ~matching:true state in
               let states =
-                guard_unclassified_loss track_infeasible
+                guard_unclassified_loss guard_loss
                   "explicit unfold simplification" states
               in
               let+ state = states in
               Ok (subst, state))
     in
+    let rets = guard_unclassified_loss prune_known_false
+      "explicit unfold with no live alternatives" rets in
 
     L.verbose (fun m ->
         m "Results of unfolding %s(@[<h>%a@]):@\n@[%a@]" pname

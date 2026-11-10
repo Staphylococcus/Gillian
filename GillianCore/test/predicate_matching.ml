@@ -2883,6 +2883,9 @@ module UnfoldMemory = struct
 end
 module UnfoldStateBase = Engine.SState.Make (UnfoldMemory)
 let unfold_reduction_failure = ref None
+let unfold_final_loss = ref false
+let unfold_simplify_loss = ref 0
+let unfold_simplify_calls = ref 0
 module UnfoldState = struct
   include UnfoldStateBase
   let simplify_val state value =
@@ -2890,6 +2893,13 @@ module UnfoldState = struct
      | Some (target, error) when Expr.equal value target -> raise error
      | _ -> ());
     UnfoldStateBase.simplify_val state value
+  let assume_a ?matching ?production ?(time = "") state facts =
+    if !unfold_final_loss && time = "Produce: final check" then None
+    else UnfoldStateBase.assume_a ?matching ?production ~time state facts
+  let simplify ?save ?kill_new_lvars ?matching state =
+    incr unfold_simplify_calls;
+    let subst, states = UnfoldStateBase.simplify ?save ?kill_new_lvars ?matching state in
+    (subst, if !unfold_simplify_calls = !unfold_simplify_loss then [] else states)
 end
 module UnfoldMatcher = Engine.Matcher.Make (UnfoldState)
 
@@ -2902,11 +2912,17 @@ let with_tracked_unfold test () =
   Utils.Config.delay_entailment := true;
   unfold_core_calls := 0;
   unfold_reduction_failure := None;
+  unfold_final_loss := false;
+  unfold_simplify_loss := 0;
+  unfold_simplify_calls := 0;
   Fun.protect ~finally:(fun () ->
       Utils.Config.Verification.total := total;
       Utils.Config.under_approximation := under;
       Utils.Config.delay_entailment := delayed;
-      unfold_reduction_failure := None) test
+      unfold_reduction_failure := None;
+      unfold_final_loss := false;
+      unfold_simplify_loss := 0;
+      unfold_simplify_calls := 0) test
 
 let unfold_empty () : UnfoldMatcher.t = {
   state = UnfoldState.init (); preds = Preds.init [];
@@ -3073,6 +3089,163 @@ let unfold_domain_stays_first () =
        Alcotest.(check bool) "the original undefined-expression rejection remains" true
          (String.starts_with ~prefix:"Produced assertion is not proved defined:" msg));
   Alcotest.(check int) "domain rejection precedes all core production" 0 !unfold_core_calls
+
+
+(* The real explicit-command path, with the procedure totality context that
+   deliberately excludes the existing lemma infeasibility collector. *)
+module ProcedureUnfold = Engine.PState.Make (UnfoldState)
+
+let procedure_unfold_fixture pred args =
+  let definitions = Hashtbl.create 1 in
+  Hashtbl.add definitions pred.Pred.pred_name pred;
+  let empty () = Hashtbl.create 0 in
+  let raw : (Annot.Basic.t, int) Prog.t = Prog.make ~imports:[]
+    ~lemmas:(empty ()) ~preds:definitions ~funcs:(empty ()) ~datatypes:(empty ())
+    ~only_specs:(empty ()) ~procs:(empty ()) ~macros:(empty ())
+    ~bi_specs:(empty ()) ~proc_names:[] ~predecessors:(empty ()) () in
+  let prog = Engine.MP.init_prog raw in
+  let prog = { prog with totality = Some Engine.Totality.{
+      name = "procedure_unfold_control"; variant = None; entry_rank = None } } in
+  let state : ProcedureUnfold.t = {
+    state = UnfoldState.init (); pred_defs = prog.preds;
+    preds = Preds.init [pred.pred_name,args; "RetainedFrame",[]];
+    wands = Engine.Wands.init [] } in
+  prog, state, SLCmd.Unfold (pred.pred_name,args,None,false)
+
+let procedure_stage definitions =
+  procedure_unfold_fixture (stage_pred definitions) [stage_value "after_root";Expr.int 7]
+
+let require_procedure_heap label results expected =
+  match results with
+  | [Ok state] ->
+      expect label expected (UnfoldState.get_heap state.ProcedureUnfold.state);
+      expect "only the actual stage owner was consumed" ["RetainedFrame",[]]
+        (Preds.to_list state.preds)
+  | _ -> Alcotest.fail "one actual procedure state, without lemma error markers, must survive"
+
+let require_unfold_rejection label run =
+  match run () with
+  | _ -> Alcotest.fail (label ^ " must reject")
+  | exception PredicateCallbackResult.Exc.Gillian_error (OperationError message) ->
+      Alcotest.(check bool) label true
+        (String.starts_with ~prefix:"Unsupported totality proof: Unclassified state loss" message)
+
+let procedure_unfold_stage () =
+  let prog,state,command = procedure_stage
+      ["after_items","DeadCore"; "after_root","StageCell"] in
+  Alcotest.(check bool) "the actual command has procedure totality" true
+    (Option.is_some prog.totality && Option.is_none prog.lemma_induction);
+  require_procedure_heap "only the compatible stage materializes its exact heap"
+    (ProcedureUnfold.evaluate_slcmd prog command state) [[Expr.int 7]];
+  Alcotest.(check int) "the false alternative never reaches memory" 1 !unfold_core_calls
+
+let procedure_unfold_policy () =
+  let ps = Expr.LVar "#procedure_policy" in
+  let negative = Expr.BinOp (ps,FLessThan,Expr.num 0.) in
+  let parameter = Expr.BinOp (Expr.PVar "policy",FLessThan,Expr.num 0.) in
+  let pred = { (stage_pred []) with pred_params =
+      ["policy",Some Type.NumberType; "value",Some Type.IntType];
+    pred_definitions = [None,[Asrt.Pure (Expr.UnOp (Not,parameter));stage_core "DeadCore"];
+      None,[Asrt.Pure parameter;stage_core "StageCell"]] } in
+  let prog,state,command = procedure_unfold_fixture pred [ps;Expr.int 7] in
+  ignore (UnfoldState.assume_t state.state ps Type.NumberType);
+  ignore (UnfoldState.assume_a ~production:true state.state [negative]);
+  require_procedure_heap "the exact held negative policy preserves its owned value"
+    (ProcedureUnfold.evaluate_slcmd prog command state) [[Expr.int 7]];
+  Alcotest.(check int) "the opposite exact policy stops before its dead core" 1 !unfold_core_calls;
+  (* <=0 does not contradict !(ps<0): the zero boundary must remain live. *)
+  let pred = { pred with pred_definitions =
+    [None,[Asrt.Pure (Expr.UnOp (Not,parameter));stage_core "StageCell"]] } in
+  let prog,state,command = procedure_unfold_fixture pred [ps;Expr.int 7] in
+  ignore (UnfoldState.assume_t state.state ps Type.NumberType);
+  ignore (UnfoldState.assume_a ~production:true state.state
+    [Expr.BinOp (ps,FLessThanEqual,Expr.num 0.)]);
+  require_procedure_heap "a related bound keeps the compatible zero-boundary heap"
+    (ProcedureUnfold.evaluate_slcmd prog command state) [[Expr.int 7]]
+
+let procedure_unfold_live_loss () =
+  List.iter (fun definitions ->
+    let prog,state,command = procedure_stage definitions in
+    require_unfold_rejection "a live core loss cannot hide beside success"
+      (fun () -> ProcedureUnfold.evaluate_slcmd prog command state))
+    [["after_root","DeadCore"];["after_root","StageCell";"after_root","DeadCore"]];
+  let pred = { (stage_pred []) with pred_definitions = [None,
+      [Asrt.Types [Expr.PVar "value",Type.NumberType];stage_core "DeadCore"]] } in
+  let prog,state,command = procedure_unfold_fixture pred [stage_value "after_root";Expr.int 7] in
+  require_unfold_rejection "a type conflict cannot use the lemma infeasibility marker"
+    (fun () -> ProcedureUnfold.evaluate_slcmd prog command state);
+  let prog,state,command = procedure_stage ["after_root","StageCell"] in
+  unfold_final_loss := true;
+  require_unfold_rejection "final admissibility loss is not a pruned pure guard"
+    (fun () -> ProcedureUnfold.evaluate_slcmd prog command state)
+
+let procedure_unfold_simplification_loss () =
+  List.iter (fun ordinal ->
+    let prog,state,command = procedure_stage ["after_root","StageCell"] in
+    unfold_simplify_calls := 0; unfold_simplify_loss := ordinal;
+    require_unfold_rejection "every live Matcher/PState simplification stays checked"
+      (fun () -> ProcedureUnfold.evaluate_slcmd prog command state)) [1;2;3];
+  let prog,state,command = procedure_stage
+      ["after_root","StageCell";"after_root","StageCell"] in
+  unfold_simplify_calls := 0; unfold_simplify_loss := 1;
+  require_unfold_rejection "another live arm cannot hide simplification loss"
+    (fun () -> ProcedureUnfold.evaluate_slcmd prog command state)
+
+let procedure_unfold_all_false () =
+  let prog,state,command = procedure_stage
+    ["after_items","DeadCore";"before_root","DeadCore"] in
+  require_unfold_rejection "all skipped definitions cannot qualify vacuously"
+    (fun () -> ProcedureUnfold.evaluate_slcmd prog command state);
+  Alcotest.(check int) "no impossible core materializes" 0 !unfold_core_calls
+
+let procedure_unfold_domain_and_errors () =
+  let partial = Expr.BinOp (Expr.EList [],LstNth,Expr.int 0) in
+  let pred = { (stage_pred []) with pred_definitions = [None,
+    [Asrt.Pure Expr.false_;Asrt.definedness ~fact:false partial;stage_core "DeadCore"]] } in
+  let prog,state,command = procedure_unfold_fixture pred [stage_value "after_root";Expr.int 7] in
+  (match ProcedureUnfold.evaluate_slcmd prog command state with
+   | _ -> Alcotest.fail "a false procedure arm must still check its partial expression"
+   | exception PredicateCallbackResult.Exc.Gillian_error (AnalysisFailures [{msg;_}]) ->
+       Alcotest.(check bool) "the complete arm's domain precedes pruning" true
+         (String.starts_with ~prefix:"Produced assertion is not proved defined:" msg));
+  let formula = Expr.BinOp (Expr.PVar "stage",Equal,stage_value "after_root") in
+  let substituted = Expr.BinOp (stage_value "after_root",Equal,stage_value "after_root") in
+  List.iter (fun error ->
+    let pred = { (stage_pred []) with pred_definitions =
+      [None,[Asrt.Pure formula;stage_core "StageCell"]] } in
+    let prog,state,command = procedure_unfold_fixture pred [stage_value "after_root";Expr.int 7] in
+    unfold_reduction_failure := Some (substituted,error);
+    (match ProcedureUnfold.evaluate_slcmd prog command state with
+     | _ -> Alcotest.fail "required UNKNOWN/reduction errors must escape unchanged"
+     | exception actual -> Alcotest.(check bool) "the identical error escapes" true (actual == error)))
+    [Gillian.Logic.Reduction.ReductionException (formula,"procedure unfold control");
+     PredicateCallbackResult.Exc.Gillian_error
+       (OperationError "Incomplete totality proof: SMT returned unknown")]
+
+
+let procedure_unfold_missing_binding () =
+  let prog,state,_ = procedure_stage ["after_items","DeadCore"] in
+  let command = SLCmd.Unfold ("StageOwned",
+      [stage_value "after_root";Expr.PVar "missing_unfold_argument"],None,false) in
+  (match ProcedureUnfold.evaluate_slcmd prog command state with
+   | _ -> Alcotest.fail "a known false stage must not supply a missing argument"
+   | exception ProcedureUnfold.Internal_State_Error
+       ([Engine.StateErr.EVar "missing_unfold_argument"],_) -> ());
+  Alcotest.(check int) "missing input rejection precedes every core" 0 !unfold_core_calls
+
+let procedure_unfold_scope () =
+  let prog,state,command = procedure_stage ["after_items","DeadCore"] in
+  (* A lemma still returns its typed marker to its existing collector. *)
+  let lemma = { prog with totality = None } in
+  let results = ProcedureUnfold.evaluate_slcmd lemma command state in
+  Alcotest.(check bool) "the lemma marker does not become procedure success" true
+    (List.length results = 1 && List.for_all checked_infeasible results);
+  (* Partial verification retains its old production, including dead cores. *)
+  Utils.Config.Verification.total := false;
+  let prog,state,command = procedure_stage ["after_items","DeadCore"] in
+  expect "partial-mode explicit production stays unchanged" []
+    (ProcedureUnfold.evaluate_slcmd prog command state);
+  Alcotest.(check int) "partial mode still invokes the original core producer" 1 !unfold_core_calls
 
 
 module PinMemory = struct
@@ -3288,4 +3461,12 @@ let tests =
       ("tracked optional preflight preserves uncovered return production", with_tracked_unfold unfold_uncovered_return);
       ("tracked false pure never waives assertion domain checks", with_tracked_unfold unfold_domain_stays_first);
       ("tracked unfold does not prune a merely related numeric fact", with_tracked_unfold unfold_related_policy_is_live);
+      ("procedure explicit unfold locally prunes false stages", with_tracked_unfold procedure_unfold_stage);
+      ("procedure explicit unfold prunes only the exact opposite policy", with_tracked_unfold procedure_unfold_policy);
+      ("procedure explicit unfold rejects live and final-admissibility loss", with_tracked_unfold procedure_unfold_live_loss);
+      ("procedure explicit unfold rejects every simplification loss", with_tracked_unfold procedure_unfold_simplification_loss);
+      ("procedure explicit unfold rejects wholly pruned outcomes", with_tracked_unfold procedure_unfold_all_false);
+      ("procedure explicit unfold preserves full domains and required errors", with_tracked_unfold procedure_unfold_domain_and_errors);
+      ("procedure explicit unfold never supplies missing bindings", with_tracked_unfold procedure_unfold_missing_binding);
+      ("procedure pruning preserves lemma and partial-mode behavior", with_tracked_unfold procedure_unfold_scope);
     ]

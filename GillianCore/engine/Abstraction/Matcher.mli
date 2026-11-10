@@ -107,9 +107,11 @@ module type S = sig
   (** [unfold state name args unfold_info] returns a list of pairs (subst,
       state), resulting from unfolding the predicate [name(..args..)] from the
       given state. unfold_info contains information about how to bind new
-      variables. *)
+      variables. [prune_known_false] locally prunes pure guards for one-step
+      explicit total-procedure unfolds; it never classifies live state loss. *)
   val unfold :
     ?track_infeasible:bool ->
+    ?prune_known_false:bool ->
     ?additional_bindings:unfold_info_t ->
     t ->
     string ->
