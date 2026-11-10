@@ -559,12 +559,18 @@ let simplification_false_local_pair () =
     Simplification.clear_cache ();
     let cold = run ~on_false:observe () in
     (match List.rev !events with
-    | ["False in pure formulae", Some (local_before, after)] ->
+    | ("False in pure formulae", Some (local_before, after)) :: rest ->
         Alcotest.(check bool) "retain exactly the local pre-reduction expression" true (Expr.equal before local_before);
         Alcotest.(check bool) "retain the already computed false result" true (Expr.equal after Expr.false_);
         Alcotest.(check bool) "distinguish a relation from an already-false local atom"
-          (Expr.equal before Expr.false_) (Expr.equal local_before Expr.false_)
-    | _ -> Alcotest.fail "literal-false reduction did not report exactly one local pair");
+          (Expr.equal before Expr.false_) (Expr.equal local_before Expr.false_);
+        (* Replacing the relation changes the fixed-point input. One further
+           pass visits that stored false; an initially false input is stable. *)
+        let expected_rest = if Expr.equal before Expr.false_ then [] else
+          ["False in pure formulae", Some (Expr.false_, Expr.false_)] in
+        Alcotest.(check bool) "exact fixed-point revisit contains only the stored false pair"
+          true (rest = expected_rest)
+    | _ -> Alcotest.fail "literal-false reduction did not report its first local pair");
     events := [];
     Alcotest.(check bool) "pair observer preserves cached results" true (cold = run ~on_false:observe ());
     Alcotest.(check bool) "cache does not invent or retain an atom pair" true
