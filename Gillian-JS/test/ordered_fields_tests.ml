@@ -1596,19 +1596,34 @@ let literal_list_presence_partial () =
 let literal_descriptor_roundtrip () =
   let descriptor = closed_data_descriptor
       (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "string")) in
+  let context = pc () in
+  let reduce = Gillian.Logic.Reduction.reduce_lexpr
+      ~pfs:context.pfs ~gamma:context.gamma in
+  (* The reducer expands closed literal lists to EList. Check every descriptor
+     component after reducing the read, including an opaque sequence lookup. *)
+  let expected_descriptor = Expr.EList
+      [ukey "d";ukey "string";Expr.true_;Expr.true_;Expr.true_] in
   let original = Heap.init () in
   Heap.set original loc_name Fields.empty None (Some metadata);
   let before = snapshot original in
-  let stored = produce original (ukeys ["type"]) (Expr.EList [descriptor]) in
+  let stored = produce ~context original (ukeys ["type"]) (Expr.EList [descriptor]) in
   check "the actual setter still preserves its input heap" (snapshot original = before);
   check "the exact literal data descriptor reaches the owned field"
-    (snd (action stored getCell [loc;ukey "type"]) = [loc;ukey "type";descriptor]);
-  let remainder, outputs = consume stored in
+    (match snd (action ~context stored getCell [loc;ukey "type"]) with
+     | [actual_loc;actual_key;value] ->
+         actual_loc = loc && actual_key = ukey "type"
+         && Expr.equal (reduce value) expected_descriptor
+     | _ -> false);
+  let remainder, outputs = consume ~context stored in
   check "the whole field/domain footprint returns the exact descriptor"
-    (outputs = [ukeys ["type"];Expr.EList [descriptor]]);
-  let restored = produce remainder (List.hd outputs) (List.nth outputs 1) in
+    (outputs = [ukeys ["type"];Expr.EList [expected_descriptor]]);
+  check "consumption removes the complete field/domain footprint only"
+    (match Heap.get remainder loc_name with
+     | Some ((fields,None),Some md) -> Fields.is_empty fields && md = metadata
+     | _ -> false);
+  let restored = produce ~context remainder (List.hd outputs) (List.nth outputs 1) in
   check "roundtrip keeps metadata and observable order"
-    (snd (action restored getAllProps [loc]) = [loc;ukeys ["type"]]
+    (snd (action ~context restored getAllProps [loc]) = [loc;ukeys ["type"]]
      && Heap.get_met restored loc_name = Some metadata)
 
 let () =
