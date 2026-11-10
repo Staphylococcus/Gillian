@@ -16,12 +16,13 @@ val clear_cache : unit -> unit
     variables will be preserved. If the [save_spec_vars] parameter is
     [(var_set, false)], only the spec variables in [var_set] will be preserved.
     The [matching] flag should not be used by Gillian instantiation developers.
-    [on_false] observes an existing contradiction reason only; callback errors
-    do not affect simplification.
+    [on_false] observes an existing contradiction reason. Only literal-false
+    reduction supplies its local before/after pair; neither is an original
+    caller-atom provenance claim. Callback errors do not affect simplification.
 *)
 val simplify_pfs_and_gamma :
   ?matching:bool ->
-  ?on_false:(string -> unit) ->
+  ?on_false:(string -> (Expr.t * Expr.t) option -> unit) ->
   ?kill_new_lvars:bool ->
   ?save_spec_vars:Utils.Containers.SS.t * bool ->
   ?existentials:Utils.Containers.SS.t ->
@@ -35,7 +36,7 @@ val simplify_pfs_and_gamma :
     environment [gamma], attempting to instantiate the [existentials] and
     returning a (possibly smaller) new set of existentials *)
 val simplify_implication :
-  ?on_false:(string -> unit) ->
+  ?on_false:(string -> (Expr.t * Expr.t) option -> unit) ->
   matching:bool ->
   Utils.Containers.SS.t ->
   PFS.t ->

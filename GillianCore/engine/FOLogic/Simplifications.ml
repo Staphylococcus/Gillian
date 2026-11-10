@@ -228,8 +228,8 @@ let sanitise_pfs_no_store ?(matching = false) =
 (*   CLEANUP   *)
 (* *********** *)
 
-let notify_false observer reason =
-  match observer with None -> () | Some notify -> (try notify reason with _ -> ())
+let notify_false ?pair observer reason =
+  match observer with None -> () | Some notify -> (try notify reason pair with _ -> ())
 
 let clean_up_stuff ?on_false (left : PFS.t) (right : PFS.t) =
   let sleft = PFS.to_set left in
@@ -571,9 +571,9 @@ let simplify_pfs_and_gamma
         PFS.extend rpfs Expr.true_
       in
 
-      let stop_explain (msg : string) : [> `Stop ] =
+      let stop_explain ?pair (msg : string) : [> `Stop ] =
         L.verbose (fun m -> m "Pure formulae false: %s" msg);
-        notify_false on_false msg;
+        notify_false ?pair on_false msg;
         `Stop
       in
       (* PF simplification *)
@@ -597,7 +597,10 @@ let simplify_pfs_and_gamma
         (* If we find true, we can delete it *)
         | Lit (Bool true) -> `Filter
         (* If we find false, the entire pfs are false *)
-        | Lit (Bool false) -> stop_explain "False in pure formulae"
+        | Lit (Bool false) ->
+            (match on_false with
+            | None -> stop_explain "False in pure formulae"
+            | Some _ -> stop_explain ~pair:(pf, whole) "False in pure formulae")
         (* Inequality of things with different types *)
         | UnOp (Not, BinOp (le1, Equal, le2)) -> (
             let te1, _ = Typing.type_lexpr gamma le1 in

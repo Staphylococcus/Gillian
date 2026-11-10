@@ -4,6 +4,19 @@ module L = Logging
 let true_goal_false_diagnostic_enabled =
   Sys.getenv_opt "GILLIAN_TRUE_GOAL_FALSE_DIAGNOSTIC" = Some "1"
 
+let true_goal_false_excerpt e =
+  let buffer = Buffer.create 128 and remaining = ref 256 in
+  let exception Full in
+  let formatter = Format.make_formatter (fun text offset length ->
+    let amount = min length !remaining in
+    Buffer.add_substring buffer text offset amount;
+    remaining := !remaining - amount;
+    if amount < length then raise Full) (fun () -> ()) in
+  let truncated = try Expr.pp formatter e; Format.pp_print_flush formatter (); false
+    with Full -> true | _ -> Buffer.clear buffer;
+      Buffer.add_string buffer "diagnostic formatting unavailable"; true in
+  (Buffer.contents buffer, truncated)
+
 (** **************** * SATISFIABILITY * * **************** **)
 
 let get_axioms (fs : Expr.Set.t) (_ : Type_env.t) : Expr.Set.t =
@@ -1097,10 +1110,16 @@ let check_entailment_simplified
     then Some (PFS.mem left_fs Expr.false_, ref None)
     else None
   in
-  let on_false = Option.map (fun (_, first) reason ->
+  let on_false = Option.map (fun (_, first) reason pair ->
     if Option.is_none !first then (
       let length = min 256 (String.length reason) in
-      first := Some (String.sub reason 0 length, String.length reason > length)))
+      let detail = match pair with
+        | Some (before, Expr.Lit (Bool false))
+          when String.equal reason "False in pure formulae" ->
+            let text, truncated = true_goal_false_excerpt before in
+            Some (text, truncated, Expr.equal before Expr.false_)
+        | _ -> None in
+      first := Some (String.sub reason 0 length, String.length reason > length, detail)))
       false_diagnostic in
   (* The optional typed-alias core may only retain literal caller atoms and
      an originally declared witness type, never a type inferred from its link. *)
@@ -1166,14 +1185,21 @@ let check_entailment_simplified
     | None -> ()
     | Some (entry_has_false, first) ->
         (try
-          let cause, truncated = match !first with
-            | None -> `Null, false
-            | Some (reason, truncated) -> `String reason, truncated in
-          let message = "TRUE_GOAL_FALSE_DIAGNOSTIC " ^ Yojson.Safe.to_string (`Assoc [
+          let cause, truncated, detail = match !first with
+            | None -> `Null, false, []
+            | Some (reason, truncated, pair) ->
+                let detail = match pair with
+                  | None -> []
+                  | Some (text, truncated, incoming_false) -> [
+                      "localBeforeStage", `String "local-pre-reduction";
+                      "localBefore", `String text; "localBeforeTruncated", `Bool truncated;
+                      "incomingAlreadyFalse", `Bool incoming_false; "reducedAfter", `Bool false] in
+                `String reason, truncated, detail in
+          let message = "TRUE_GOAL_FALSE_DIAGNOSTIC " ^ Yojson.Safe.to_string (`Assoc ([
             "entryHasFalse", `Bool entry_has_false;
             "simplifiedLeftHasFalse", `Bool (List.mem Expr.false_ left_fs);
             "simplifiedRightHasFalse", `Bool (List.mem Expr.false_ right_fs);
-            "firstCause", cause; "causeTruncated", `Bool truncated]) in
+            "firstCause", cause; "causeTruncated", `Bool truncated] @ detail)) in
           if String.length message + 2 < 2048 then prerr_endline ("\n" ^ message)
         with _ -> ()));
     false)

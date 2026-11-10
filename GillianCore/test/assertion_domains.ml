@@ -485,7 +485,7 @@ let simplification_false_observer () =
     Engine.SVal.SESubst.to_list subst, Utils.Containers.SS.elements exists
   in
   let reasons = ref [] in
-  let observe reason = reasons := reason :: !reasons in
+  let observe reason _ = reasons := reason :: !reasons in
   Simplification.clear_cache ();
   let cold = run ~on_false:observe () in
   Alcotest.(check (list string)) "existing stop reason appears exactly once"
@@ -502,10 +502,10 @@ let simplification_false_observer () =
   Alcotest.(check (list string)) "no callback without the optional observer" [] !reasons;
   Simplification.clear_cache ();
   Alcotest.(check bool) "observer exception cannot change the original false result" true
-    (cold = run ~on_false:(fun _ -> raise Required_unknown) ());
+    (cold = run ~on_false:(fun _ _ -> raise Required_unknown) ());
   Simplification.clear_cache ();
   let nested_calls = ref 0 in
-  let nested _ =
+  let nested _ _ =
     incr nested_calls;
     ignore (Simplification.simplify_pfs_and_gamma (Engine.PFS.init ()) (Gamma.init ()))
   in
@@ -528,7 +528,7 @@ let implication_false_observer () =
   Simplification.clear_cache ();
   let before = run () and reasons = ref [] in
   Simplification.clear_cache ();
-  let observed = run ~on_false:(fun reason -> reasons := reason :: !reasons) () in
+  let observed = run ~on_false:(fun reason _ -> reasons := reason :: !reasons) () in
   Alcotest.(check bool) "implication observer preserves the exact clean-up result" true (before = observed);
   Alcotest.(check (list string)) "forward the existing clean-up contradiction only" ["clean-up"] (List.rev !reasons);
   let left, right, _, _ = observed in
@@ -543,3 +543,37 @@ let tests = tests @ List.map (fun (name, f) ->
   Alcotest.test_case name `Quick (with_total f))
   ["simplification false observer preserves cache defaults exceptions and nesting", simplification_false_observer;
    "implication false observer reports clean-up without changing rejection", implication_false_observer]
+
+let simplification_false_local_pair () =
+  let relation = Expr.BinOp (Expr.int 1, Equal, Expr.int 2) in
+  List.iter (fun before ->
+    let run ?on_false () =
+      let left = Engine.PFS.of_list [before] and right = Engine.PFS.of_list [Expr.true_] in
+      let gamma = Gamma.init () in
+      let subst, exists = Simplification.simplify_pfs_and_gamma ?on_false ~rpfs:right left gamma in
+      Engine.PFS.to_list left, Engine.PFS.to_list right, Gamma.to_list gamma,
+      Engine.SVal.SESubst.to_list subst, Utils.Containers.SS.elements exists
+    in
+    let events = ref [] in
+    let observe reason pair = events := (reason, pair) :: !events in
+    Simplification.clear_cache ();
+    let cold = run ~on_false:observe () in
+    (match List.rev !events with
+    | ["False in pure formulae", Some (local_before, after)] ->
+        Alcotest.(check bool) "retain exactly the local pre-reduction expression" true (Expr.equal before local_before);
+        Alcotest.(check bool) "retain the already computed false result" true (Expr.equal after Expr.false_);
+        Alcotest.(check bool) "distinguish a relation from an already-false local atom"
+          (Expr.equal before Expr.false_) (Expr.equal local_before Expr.false_)
+    | _ -> Alcotest.fail "literal-false reduction did not report exactly one local pair");
+    events := [];
+    Alcotest.(check bool) "pair observer preserves cached results" true (cold = run ~on_false:observe ());
+    Alcotest.(check bool) "cache does not invent or retain an atom pair" true
+      (List.rev !events = ["cache-false", None]);
+    Simplification.clear_cache ();
+    Alcotest.(check bool) "pair observer preserves the default cold result" true (cold = run ());
+    Alcotest.(check bool) "pair observer preserves the default cached result" true (cold = run ()))
+    [relation; Expr.false_]
+
+let tests = tests @
+  [Alcotest.test_case "false simplification reports only its immediate local pair" `Quick
+     (with_total simplification_false_local_pair)]
