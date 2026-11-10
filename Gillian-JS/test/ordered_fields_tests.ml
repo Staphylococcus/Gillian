@@ -1515,6 +1515,90 @@ let concat_named_rejections () =
   check "a missing paired-length relation cannot authorize the candidate"
     (Legacy.ordered_cell_index ~structural:true unlinked.pfs unlinked.gamma ks vs prop = None)
 
+module RejectionDiagnostic = Legacy.Ordered_fields_rejection
+
+let rejection_diagnostic_format () =
+  let module D = RejectionDiagnostic in
+  List.iter (fun (reason, expected_reason) -> List.iter (fun (root, expected_root) -> List.iter (fun sat ->
+    let text = D.message reason root None (Some true) (Some false) None sat in
+    let prefix = "ORDERED_FIELDS_REJECTION_DIAGNOSTIC=" in
+    check "one bounded scalar with no newline" (String.length text <= 2048
+      && not (String.contains text '\n') && String.starts_with ~prefix text);
+    let json = Yojson.Safe.from_string
+        (String.sub text (String.length prefix) (String.length text - String.length prefix)) in
+    let open Yojson.Safe.Util in
+    check "only the first-rejection selector is advertised"
+      (member "selection" json = `String "first");
+    check "reason and root alias stay exact fixed enums"
+      (member "reason" json = `String expected_reason && member "root" json = `String expected_root);
+    check "occupancy stays null when unobserved" (member "occupied" json = `Null);
+    check "only booleans/null describe ownership"
+      (member "ordered" json = `Bool true
+       && member "fields" json = `Bool false && member "domain" json = `Null);
+    check "the completed check has an exact SAT/UNSAT result"
+      (member "satisfiability" json = `String (if sat then "SAT" else "UNSAT"));
+    check "no root names or values can enter the fixed scalar" (not (String.contains text '#')))
+    [true;false])
+    [D.Unobserved,"unobserved";D.Direct_aloc,"direct-aloc";D.Direct_loc,"direct-loc";
+     D.Aloc_alias,"aloc-alias";D.Loc_alias,"loc-alias";D.Lvar_alias,"lvar-alias";
+     D.Other_alias,"other-alias";D.Fresh,"fresh"])
+    [D.Values_presence,"values-presence";D.Order,"order";D.Occupied_shape,"occupied-shape"]
+
+let with_rejection_diagnostic test =
+  let saved = !RejectionDiagnostic.attempted in
+  Fun.protect ~finally:(fun () -> RejectionDiagnostic.attempted := saved)
+    (fun () -> RejectionDiagnostic.attempted := false; test ())
+
+let rejection_diagnostic_effects () = with_rejection_diagnostic (fun () ->
+  let alias_context () =
+    let context = pc () in
+    Gillian.Symbolic.Type_env.update context.gamma "#diagnostic_count" Type.IntType;
+    Gillian.Symbolic.Pure_context.extend context.pfs
+      (Expr.BinOp (Expr.LVar "#diagnostic_count",Equal,Expr.int 7));
+    context in
+  let sequence = sequence_context () in
+  let cases = [
+    Heap.init (), alias_context (), keys [], Expr.EList [Expr.num 1.];
+    Heap.init (), pc (), keys ["10";"2"], values;
+    Heap.init (), pc (), keys ["a"], Expr.EList [Expr.Lit Literal.Nono];
+    make (), pc (), keys ["z";"a"], values;
+    sequence_make sequence, sequence, sequence_keys, sequence_values] in
+  let unsat = pc () in
+  Gillian.Symbolic.Pure_context.extend unsat.pfs Expr.false_;
+  List.iter (fun (heap, context, ks, vs) ->
+    RejectionDiagnostic.attempted := false;
+    let before = snapshot heap in
+    let pfs = Gillian.Symbolic.Pure_context.to_list context.PC.pfs
+    and gamma = Gillian.Symbolic.Type_env.to_list context.gamma in
+    let actual = Legacy.set_ordered_fields heap context.pfs context.gamma loc ks vs in
+    check "SAT and UNSAT diagnostics return the identical original error"
+      (actual = Legacy.ordered_fields_error loc);
+    check "the diagnostic never changes the rejected heap" (snapshot heap = before);
+    check "the diagnostic checks independent PFS and type copies"
+      (Gillian.Symbolic.Pure_context.to_list context.pfs = pfs
+       && Gillian.Symbolic.Type_env.to_list context.gamma = gamma);
+    check "only the explicit opt-in reaches the diagnostic check"
+      (!RejectionDiagnostic.attempted = RejectionDiagnostic.enabled))
+    (cases @ [Heap.init (), unsat, keys [], Expr.EList [Expr.num 1.]]))
+
+let rejection_diagnostic_once () = with_rejection_diagnostic (fun () ->
+  let heap = Heap.init () and context = pc () in
+  let reject () = Legacy.set_ordered_fields heap context.pfs context.gamma loc
+      (keys []) (Expr.EList [Expr.num 1.]) in
+  check "the first shape rejection stays an error" (reject () = Legacy.ordered_fields_error loc);
+  check "the opt-in records its first attempted check"
+    (!RejectionDiagnostic.attempted = RejectionDiagnostic.enabled);
+  (* The original list-length mismatch never inspects this partial expression.
+     Another diagnostic check would try to reduce it; a first-only observation
+     must still return the original error without re-reading the PFS. *)
+  let partial = Expr.BinOp (Expr.EList [],LstNth,Expr.int 0) in
+  Gillian.Symbolic.Pure_context.extend context.pfs (Expr.BinOp (partial,Equal,Expr.int 0));
+  let before = Gillian.Symbolic.Pure_context.to_list context.pfs in
+  check "later rejections cannot start another copied-state diagnostic"
+    (reject () = Legacy.ordered_fields_error loc);
+  check "later rejections retain the original PFS"
+    (Gillian.Symbolic.Pure_context.to_list context.pfs = before))
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -1599,5 +1683,8 @@ let () =
             ("concat segment named read", concat_named_read);
             ("concat segment ownership and identity guards", concat_named_rejections);
             ("concat selected whole-resource roundtrip", concat_selected_roundtrip);
+            ("bounded ordered-fields rejection scalar", rejection_diagnostic_format);
+            ("ordered-fields diagnostic preserves exact rejection and ownership", rejection_diagnostic_effects);
+            ("ordered-fields diagnostic observes only its first rejection", rejection_diagnostic_once);
           ] );
     ]

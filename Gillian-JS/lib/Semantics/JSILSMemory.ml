@@ -836,6 +836,57 @@ module M = struct
      frameable order fact. Its witness is observable enumeration order. *)
   let ordered_fields_error loc = Error [ ([ loc ], [], Expr.false_) ]
 
+  module Ordered_fields_rejection = struct
+    type reason = Values_presence | Order | Occupied_shape
+    type root = Unobserved | Direct_aloc | Direct_loc | Aloc_alias | Loc_alias
+      | Lvar_alias | Other_alias | Fresh
+
+    let enabled =
+      Sys.getenv_opt "GILLIAN_ORDERED_FIELDS_REJECTION_DIAGNOSTIC" = Some "1"
+    let attempted = ref false
+
+    let message reason root occupied ordered fields domain sat =
+      let reason = match reason with
+        | Values_presence -> "values-presence" | Order -> "order"
+        | Occupied_shape -> "occupied-shape" in
+      let root = match root with
+        | Unobserved -> "unobserved" | Direct_aloc -> "direct-aloc"
+        | Direct_loc -> "direct-loc" | Aloc_alias -> "aloc-alias"
+        | Loc_alias -> "loc-alias" | Lvar_alias -> "lvar-alias"
+        | Other_alias -> "other-alias" | Fresh -> "fresh" in
+      let flag = function None -> `Null | Some value -> `Bool value in
+      "ORDERED_FIELDS_REJECTION_DIAGNOSTIC=" ^ Yojson.Safe.to_string (`Assoc [
+        "selection", `String "first"; "reason", `String reason;
+        "root", `String root; "occupied", flag occupied; "ordered", flag ordered;
+        "fields", flag fields; "domain", flag domain;
+        "satisfiability", `String (if sat then "SAT" else "UNSAT")])
+
+    let emit ?resolved ?occupied reason heap pfs gamma loc =
+      if enabled && not !attempted then (
+        attempted := true;
+        (* One ordinary completed final-style check on independent copies.
+           Required UNKNOWN/errors escape; neither answer changes rejection. *)
+        let pfs = PFS.copy pfs and gamma = Type_env.copy gamma in
+        let sat = FOSolver.check_satisfiability ~matching:true
+            (Expr.true_ :: PFS.to_list pfs) gamma in
+        let root, ordered, fields, domain = match resolved with
+          | None -> Unobserved, None, None, None
+          | Some (name, fresh) ->
+              let root = if fresh then Fresh else match loc with
+                | ALoc own when own = name -> Direct_aloc
+                | Lit (Loc own) when own = name -> Direct_loc
+                | ALoc _ -> Aloc_alias | Lit (Loc _) -> Loc_alias
+                | LVar _ -> Lvar_alias | _ -> Other_alias in
+              let ordered = Option.is_some (SHeap.get_ordered heap name) in
+              let fields, domain = match SHeap.get heap name with
+                | None -> false, false
+                | Some ((fields, domain), _) ->
+                    not (SFVL.is_empty fields), Option.is_some domain in
+              root, Some ordered, Some fields, Some domain in
+        L.normal (fun m -> m "%s"
+          (message reason root occupied ordered fields domain sat)))
+  end
+
   let ordered_fields_snapshot heap pfs gamma loc =
     match get_loc_name pfs gamma loc with
     | None -> ordered_fields_error loc
@@ -923,27 +974,47 @@ module M = struct
               (not vacant)
               || observable_field_names pfs gamma fields <> keys
             then
-              ordered_fields_error loc
+              (if Ordered_fields_rejection.enabled then
+                 Ordered_fields_rejection.emit ~resolved:(name, new_pfs <> [])
+                   ~occupied:(not vacant)
+                   (if vacant then Ordered_fields_rejection.Order
+                    else Ordered_fields_rejection.Occupied_shape) heap pfs gamma loc;
+               ordered_fields_error loc)
             else
               let metadata = SHeap.get_met heap name in
               let heap = SHeap.copy heap in
               SHeap.set heap name fields (Some (ESet keys)) metadata;
               Ok [ (heap, [], new_pfs, []) ]
-        else ordered_fields_error loc)
+        else (
+          if Ordered_fields_rejection.enabled then
+            Ordered_fields_rejection.emit
+              (if valid_order then Ordered_fields_rejection.Values_presence
+               else Ordered_fields_rejection.Order) heap pfs gamma loc;
+          ordered_fields_error loc))
     | key_list, value_list
       when (Option.is_none key_list || Option.is_none value_list)
            && ordered_sequence_shape pfs gamma keys values ->
         let name, _, new_pfs = fresh_loc ~loc pfs gamma in
-        if Option.is_some (SHeap.get_ordered heap name) then ordered_fields_error loc
+        if Option.is_some (SHeap.get_ordered heap name) then (
+          if Ordered_fields_rejection.enabled then
+            Ordered_fields_rejection.emit ~resolved:(name, new_pfs <> [])
+              ~occupied:true Ordered_fields_rejection.Occupied_shape heap pfs gamma loc;
+          ordered_fields_error loc)
         else
           let fields, domain = fst (SHeap.get_with_default heap name) in
           if not (SFVL.is_empty fields) || Option.is_some domain then
-            ordered_fields_error loc
+            (if Ordered_fields_rejection.enabled then
+               Ordered_fields_rejection.emit ~resolved:(name, new_pfs <> [])
+                 ~occupied:true Ordered_fields_rejection.Occupied_shape heap pfs gamma loc;
+             ordered_fields_error loc)
           else
             let heap = SHeap.copy heap in
             SHeap.set_ordered heap name keys values;
             Ok [ (heap, [], ordered_length_equality keys values :: new_pfs, []) ]
-    | _ -> ordered_fields_error loc
+    | _ ->
+        if Ordered_fields_rejection.enabled then
+          Ordered_fields_rejection.emit Ordered_fields_rejection.Occupied_shape heap pfs gamma loc;
+        ordered_fields_error loc
 
   (* SelectedFields is a view of the whole OrderedFields resource. Its outputs
      bind the selected index and descriptor during matching; neither is guessed
