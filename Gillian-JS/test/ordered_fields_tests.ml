@@ -1515,6 +1515,102 @@ let concat_named_rejections () =
   check "a missing paired-length relation cannot authorize the candidate"
     (Legacy.ordered_cell_index ~structural:true unlinked.pfs unlinked.gamma ks vs prop = None)
 
+let old_value_presence context value =
+  Gillian.Logic.FOSolver.check_entailment Gillian.Utils.Containers.SS.empty context.PC.pfs
+    [Expr.UnOp (Not,Expr.BinOp (value,Equal,Expr.Lit Literal.Nono))] context.gamma
+
+let closed_data_descriptor value = Expr.Lit (Literal.LList [
+  Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "d");value;
+  Literal.Bool true;Literal.Bool true;Literal.Bool true])
+
+let literal_list_presence () =
+  let descriptor = closed_data_descriptor
+      (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "string")) in
+  let closed = [descriptor;Expr.Lit (Literal.LList []);
+    Expr.Lit (Literal.LList [Literal.LList [];Literal.Nono]);
+    Expr.Lit (Literal.LList [Literal.Num nan;Literal.Num (-0.);
+      Literal.LList [Literal.Bool false;Literal.Null]])] in
+  List.iter (fun prefix ->
+    let context = pc () in
+    List.iter (Gillian.Symbolic.Pure_context.extend context.pfs) prefix;
+    let before = Gillian.Symbolic.Pure_context.to_list context.pfs
+    and gamma = Gillian.Symbolic.Type_env.to_list context.gamma in
+    List.iter (fun value ->
+      check "a closed literal-list constructor is never Nono"
+        (Legacy.ordered_values_present context.pfs context.gamma [value])) closed;
+    check "constructor presence never drops or assumes a pure-prefix fact"
+      (Gillian.Symbolic.Pure_context.to_list context.pfs = before
+       && Gillian.Symbolic.Type_env.to_list context.gamma = gamma))
+    [ [];[Expr.false_];
+      [Expr.BinOp (Expr.LVar "#arbitrary_prefix",Equal,Expr.int 17)] ];
+  let impossible = pc () in
+  Gillian.Symbolic.Pure_context.extend impossible.pfs Expr.false_;
+  check "the old entailment does not supply the new constructor fact"
+    (not (old_value_presence impossible descriptor));
+  check "constructor presence does not certify pure-state satisfiability"
+    (not (Gillian.Logic.FOSolver.check_satisfiability ~matching:true
+      (Expr.true_ :: Gillian.Symbolic.Pure_context.to_list impossible.pfs) impossible.gamma))
+
+let literal_list_presence_fallback () =
+  let context = pc () in
+  let unknown = Expr.LVar "#unknown_presence" in
+  check "Nono remains absent"
+    (not (Legacy.ordered_values_present context.pfs context.gamma [Expr.Lit Literal.Nono]));
+  check "an untyped symbolic value still needs the original proof"
+    (not (Legacy.ordered_values_present context.pfs context.gamma [unknown]));
+  List.iter (fun typ ->
+    let typed = pc () in
+    Gillian.Symbolic.Type_env.update typed.gamma "#typed_presence" typ;
+    let value = Expr.LVar "#typed_presence" in
+    check "typed symbolic presence still follows its old entailment"
+      (old_value_presence typed value
+       && Legacy.ordered_values_present typed.pfs typed.gamma [value]))
+    [Type.ListType;Type.NumberType];
+  let impossible = pc () in
+  Gillian.Symbolic.Pure_context.extend impossible.pfs Expr.false_;
+  Gillian.Symbolic.Type_env.update impossible.gamma "#typed_presence" Type.ListType;
+  List.iter (fun value ->
+    let expected = old_value_presence impossible value in
+    check "the original false-prefix fallback stays authoritative" (not expected);
+    check "no other literal, EList, operator or variable gains a shortcut"
+      (Legacy.ordered_values_present impossible.pfs impossible.gamma [value] = expected))
+    [Expr.Lit Literal.Nono;Expr.Lit Literal.Null;Expr.EList [];
+     Expr.NOp (LstCat,[Expr.EList [];Expr.EList []]);
+     unknown;Expr.LVar "#typed_presence"];
+  check "one absent sibling still rejects the complete values list"
+    (not (Legacy.ordered_values_present context.pfs context.gamma
+      [Expr.Lit (Literal.LList []);Expr.Lit Literal.Nono]))
+
+let literal_list_presence_partial () =
+  let context = pc () in
+  let partial = Expr.BinOp (Expr.EList [],LstNth,Expr.int (-1)) in
+  let result run = try Ok (run ()) with
+    Gillian.Logic.Reduction.ReductionException (term,message) -> Error (term,message) in
+  List.iter (fun value ->
+    let before = result (fun () -> old_value_presence context value) in
+    let after = result (fun () -> Legacy.ordered_values_present context.pfs context.gamma [value]) in
+    check "the original partial-expression error really occurs" (Result.is_error before);
+    check "direct EList and operator errors survive the unchanged fallback" (after = before))
+    [partial;Expr.EList [partial]]
+
+let literal_descriptor_roundtrip () =
+  let descriptor = closed_data_descriptor
+      (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "string")) in
+  let original = Heap.init () in
+  Heap.set original loc_name Fields.empty None (Some metadata);
+  let before = snapshot original in
+  let stored = produce original (ukeys ["type"]) (Expr.EList [descriptor]) in
+  check "the actual setter still preserves its input heap" (snapshot original = before);
+  check "the exact literal data descriptor reaches the owned field"
+    (snd (action stored getCell [loc;ukey "type"]) = [loc;ukey "type";descriptor]);
+  let remainder, outputs = consume stored in
+  check "the whole field/domain footprint returns the exact descriptor"
+    (outputs = [ukeys ["type"];Expr.EList [descriptor]]);
+  let restored = produce remainder (List.hd outputs) (List.nth outputs 1) in
+  check "roundtrip keeps metadata and observable order"
+    (snd (action restored getAllProps [loc]) = [loc;ukeys ["type"]]
+     && Heap.get_met restored loc_name = Some metadata)
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -1599,5 +1695,9 @@ let () =
             ("concat segment named read", concat_named_read);
             ("concat segment ownership and identity guards", concat_named_rejections);
             ("concat selected whole-resource roundtrip", concat_selected_roundtrip);
+            ("literal-list presence is constructor disjointness only", literal_list_presence);
+            ("all nonliteral-list values retain original presence entailment", literal_list_presence_fallback);
+            ("literal-list presence preserves partial value errors", literal_list_presence_partial);
+            ("literal data descriptor keeps whole-field ownership", literal_descriptor_roundtrip);
           ] );
     ]

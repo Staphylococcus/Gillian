@@ -545,7 +545,11 @@ module M = struct
 
   let ordered_values_present pfs gamma values =
     List.for_all
-      (fun value ->
+      (function
+      (* Literal list and Nono are distinct constructors. This proves presence
+         only, never pure-state satisfiability; final/UNKNOWN guards still apply. *)
+      | Expr.Lit (Literal.LList _) -> true
+      | value ->
         FOSolver.check_entailment Containers.SS.empty pfs
           [ Expr.UnOp (Not, Expr.BinOp (value, Equal, Lit Nono)) ]
           gamma)
