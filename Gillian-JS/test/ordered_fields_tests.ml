@@ -1596,7 +1596,7 @@ let rejection_site_updates () =
   List.iter (fun _ ->
     check "repeated rejection observation never consults the solver"
       (Legacy.set_ordered_fields heap context.pfs context.gamma loc
-        (keys []) (Expr.EList [Expr.num 1.]) = Legacy.ordered_fields_error loc)) [0;1];
+        (Expr.EList []) (Expr.EList [Expr.num 1.]) = Legacy.ordered_fields_error loc)) [0;1];
   check "the unused PFS remains exact" (Gillian.Symbolic.Pure_context.to_list context.pfs = before)
 
 let () =
