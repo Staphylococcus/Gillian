@@ -12,6 +12,63 @@ type recovery_tactic =
   | Try_unfold of string * Expr.t list
 [@@deriving yojson]
 
+module Unclassified_unfold_diagnostic = struct
+  type site = string * int * string option
+
+  let enabled =
+    Sys.getenv_opt "GILLIAN_UNCLASSIFIED_UNFOLD_DIAGNOSTIC" = Some "1"
+
+  let attempted = ref false
+
+  let safe text =
+    if String.length text <= 128
+       && String.for_all (function
+            | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' | '.' | '-' -> true
+            | _ -> false) text
+    then text else "-"
+
+  (* At most 384 raw bytes become at most 1536 escaped ASCII bytes. The
+     bounded scalar prefix keeps the entire single-line record below 2 KiB. *)
+  let message ?site ~assertion ~kind print =
+    try
+      let predicate, definition, label =
+        Option.value ~default:("-", -1, None) site
+      in
+      let buffer = Buffer.create 128 and remaining = ref 384 in
+      let exception Full in
+      let formatter = Format.make_formatter (fun text offset length ->
+        let amount = min length !remaining in
+        Buffer.add_substring buffer text offset amount;
+        remaining := !remaining - amount;
+        if amount < length then raise Full) (fun () -> ()) in
+      let truncated =
+        try print formatter; Format.pp_print_flush formatter (); false
+        with Full -> true
+      in
+      let text = Printf.sprintf
+          "UNCLASSIFIED_UNFOLD_ASSERTION predicate=%s definition=%d label=%s assertion=%d kind=%s truncated=%b text=\"%s\""
+          (safe predicate) definition (safe (Option.value ~default:"-" label))
+          assertion (safe kind) truncated (String.escaped (Buffer.contents buffer)) in
+      if String.length text <= 2048 then Some text else None
+    with _ -> None
+
+  let emit ?site ~assertion atom =
+    if enabled && not !attempted then (
+      attempted := true;
+      try
+        let kind = match atom with
+          | Asrt.Emp -> "emp" | Types _ -> "types" | Pure _ -> "pure"
+          | Wand _ -> "wand"
+          | CorePred (name, _, _) ->
+              if Option.is_some (Asrt.as_user_pred_name name) then "predicate"
+              else "core"
+        in
+        let text = message ?site ~assertion ~kind (fun fmt -> Asrt.pp_atom fmt atom)
+          |> Option.value ~default:"UNCLASSIFIED_UNFOLD_ASSERTION unavailable=format" in
+        Logging.normal (fun m -> m "%s" text)
+      with _ -> ())
+end
+
 module type S = sig
   type err_t
   type state_t
@@ -786,6 +843,7 @@ module Make (State : SState.S) :
 
   and produce_asrt_list
       ?diagnostic_origin
+      ?unfold_site
       ?(track_infeasible = false)
       (astate : t)
       (subst : SVal.SESubst.t)
@@ -809,9 +867,12 @@ module Make (State : SState.S) :
       SVal.SESubst.iter subst (fun v value ->
           SVal.SESubst.put subst v (State.simplify_val astate.state value))
     in
+    let assertion_ordinal = ref 0 in
     let** { state; preds; wands; pred_defs } =
       List.fold_left
         (fun intermediate_states asrt ->
+          let ordinal = !assertion_ordinal in
+          incr assertion_ordinal;
           let** intermediate_state = intermediate_states in
           (* Only a known type conflict on an atomic value classifies an empty
              Types production as infeasible. Reverse typing can also fail for
@@ -854,6 +915,9 @@ module Make (State : SState.S) :
           | [], Some reason ->
               Res_list.error_with (StateErr.EInfeasibleUnfold reason)
           | _ ->
+              (if track_infeasible && outcomes = [] then
+                 Unclassified_unfold_diagnostic.emit ?site:unfold_site
+                   ~assertion:ordinal asrt);
               guard_unclassified_loss track_infeasible
                 "explicit unfold assertion production" outcomes)
         (Res_list.return astate) sas
@@ -950,6 +1014,7 @@ module Make (State : SState.S) :
 
   let produce_with_diagnostic
       ?diagnostic_origin
+      ?unfold_site
       ?(track_infeasible = false)
       (astate : t)
       (subst : SVal.SESubst.t)
@@ -1016,7 +1081,7 @@ module Make (State : SState.S) :
         "raw_before_simplify", Asrt.to_yojson a;
         "mp_simplified_sas", Asrt.to_yojson sas])
     in
-    produce_asrt_list ?diagnostic_origin ~track_infeasible astate subst ordered_sas
+    produce_asrt_list ?diagnostic_origin ?unfold_site ~track_infeasible astate subst ordered_sas
 
   let produce ?track_infeasible astate subst a =
     produce_with_diagnostic ?track_infeasible astate subst a
@@ -1139,6 +1204,11 @@ module Make (State : SState.S) :
     in
     let () = extend_subst_with_bindings state subst_i additional_bindings in
     let produce_definition ordinal (lab, definition) astate subst =
+      let unfold_site =
+        if Unclassified_unfold_diagnostic.enabled then
+          Some (pname, ordinal, Option.map fst lab)
+        else None
+      in
       Owned_prefix_lifecycle.scope_if (Owned_prefix_lifecycle.focused pname)
         "unfold-alternative" ~state:astate (fun () ->
         `Assoc ["predicate",`String pname;"ordinal",`Int ordinal;
@@ -1172,7 +1242,7 @@ module Make (State : SState.S) :
             "lineage_available", `Bool (Option.is_some source_event)])
         with _ -> Origin.unavailable "runtime-selection-snapshot"; None
       in
-      produce_with_diagnostic ?diagnostic_origin ~track_infeasible astate subst definition
+      produce_with_diagnostic ?diagnostic_origin ?unfold_site ~track_infeasible astate subst definition
     in
     let definitions = pred.pred.pred_definitions in
     let open Syntaxes.List in

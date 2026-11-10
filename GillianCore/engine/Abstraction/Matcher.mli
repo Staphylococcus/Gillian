@@ -12,6 +12,15 @@ type recovery_tactic =
   | Try_unfold of string * Expr.t list
 [@@deriving yojson]
 
+module Unclassified_unfold_diagnostic : sig
+  type site = string * int * string option
+
+  (** Pure bounded formatting only; never reads an execution state. *)
+  val message :
+    ?site:site -> assertion:int -> kind:string ->
+    (Format.formatter -> unit) -> string option
+end
+
 module type S = sig
   type err_t
   type state_t

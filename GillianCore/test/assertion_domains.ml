@@ -353,3 +353,52 @@ let tests = tests @ List.map (fun (name, f) ->
    "symbolic Number lookup cannot justify its pending domain", staged_no_self_justification;
    "required staged Number cast unknown propagates in both orders", staged_required_unknown;
    "staged contradictory Number bound retains genuine infeasibility", staged_infeasible_bound]
+
+module Unfold_diagnostic = Engine.Matcher.Unclassified_unfold_diagnostic
+
+let diagnostic_message ?site ~assertion ~kind print =
+  match Unfold_diagnostic.message ?site ~assertion ~kind print with
+  | Some text -> text
+  | None -> Alcotest.fail "bounded diagnostic formatting failed"
+
+let unfold_diagnostic_atom () =
+  let atom = Asrt.Types [(at, Type.ObjectType)] in
+  let text = diagnostic_message
+      ~site:("S05SuccessForest", 7, Some "negative_after_root")
+      ~assertion:3 ~kind:"types" (fun fmt -> Asrt.pp_atom fmt atom) in
+  Alcotest.(check bool) "preserve scalar site and zero-based atom index" true
+    (String.starts_with ~prefix:("UNCLASSIFIED_UNFOLD_ASSERTION predicate=S05SuccessForest " ^
+      "definition=7 label=negative_after_root assertion=3 kind=types truncated=false text=\"") text);
+  Alcotest.(check bool) "whole scalar record stays bounded" true
+    (String.length text <= 2048)
+
+let unfold_diagnostic_bound () =
+  let reached_after_flush = ref false in
+  let text = diagnostic_message ~site:(String.make 128 'p', max_int, Some (String.make 128 'l'))
+      ~assertion:max_int ~kind:"types" (fun fmt ->
+        Format.pp_print_string fmt (String.make 4096 '\255');
+        Format.pp_print_flush fmt ();
+        reached_after_flush := true) in
+  Alcotest.(check bool) "stop the formatter at its raw byte cap" false !reached_after_flush;
+  Alcotest.(check bool) "escaped worst-case record stays below2KiB" true
+    (String.length text <= 2048);
+  Alcotest.(check bool) "bounded text retains its first field" true
+    (String.contains text '\\');
+  Alcotest.(check bool) "no physical newline in scalar record" false
+    (String.contains text '\n' || String.contains text '\r')
+
+let unfold_diagnostic_escape_and_fail () =
+  let text = diagnostic_message ~site:("bad\nname", -1, Some "bad label")
+      ~assertion:0 ~kind:"core" (fun fmt -> Format.pp_print_string fmt "first\n\"\\field") in
+  Alcotest.(check bool) "unsafe scalar labels cannot create another record" true
+    (String.starts_with ~prefix:"UNCLASSIFIED_UNFOLD_ASSERTION predicate=- definition=-1 label=- " text);
+  Alcotest.(check bool) "assertion newlines remain escaped" false
+    (String.contains text '\n' || String.contains text '\r');
+  Alcotest.(check bool) "printer exceptions stay diagnostic-only" true
+    (Option.is_none (Unfold_diagnostic.message ~assertion:0 ~kind:"types"
+      (fun _ -> failwith "printer failure")))
+
+let tests = tests @
+  [Alcotest.test_case "unclassified unfold diagnostic keeps scalar atom provenance" `Quick unfold_diagnostic_atom;
+   Alcotest.test_case "unclassified unfold diagnostic caps output and stops its printer" `Quick unfold_diagnostic_bound;
+   Alcotest.test_case "unclassified unfold diagnostic escapes text and isolates printer failure" `Quick unfold_diagnostic_escape_and_fail]
