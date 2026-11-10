@@ -2855,6 +2855,18 @@ module UnfoldMemory = struct
     incr unfold_core_calls;
     match name with
     | "StageCell" -> [Engine.Gbranch.{ value = values :: heap; pc }]
+    | "CorrelatedFinal" | "OnlyFinalUnsat" -> (match values with
+        | [selector;value] ->
+            let branch index =
+              let pc = Engine.Gpc.copy pc in
+              Engine.PFS.extend pc.pfs
+                (Expr.BinOp (selector,Equal,Expr.int index));
+              Engine.Gbranch.{ value = [Expr.int index;value] :: heap; pc } in
+            (* Production retains both correlated outcomes. The real final
+               SState check, not this fixture, decides their satisfiability. *)
+            if name = "OnlyFinalUnsat" then [branch 1]
+            else [branch 1;branch 0]
+        | _ -> failwith "expected selector and owned value")
     | "DeadCore" -> []
     | _ -> failwith "unexpected unfold fixture core"
   let copy heap = heap
@@ -2883,7 +2895,10 @@ module UnfoldMemory = struct
 end
 module UnfoldStateBase = Engine.SState.Make (UnfoldMemory)
 let unfold_reduction_failure = ref None
-let unfold_final_loss = ref false
+let unfold_final_failure = ref None
+let unfold_final_checks = ref 0
+let unfold_final_unsat = ref 0
+let unfold_eager_fact = ref None
 let unfold_simplify_loss = ref 0
 let unfold_simplify_calls = ref 0
 let unfold_assertion_failure = ref None
@@ -2896,8 +2911,20 @@ module UnfoldState = struct
      | _ -> ());
     UnfoldStateBase.simplify_val state value
   let assume_a ?matching ?production ?(time = "") state facts =
-    if !unfold_final_loss && time = "Produce: final check" then None
-    else UnfoldStateBase.assume_a ?matching ?production ~time state facts
+    let final = time = "Produce: final check" in
+    if final then (
+      incr unfold_final_checks;
+      Option.iter raise !unfold_final_failure);
+    (* Exercise a real returned production Error beside a final-UNSAT sibling:
+       for one selected fact, check it eagerly unless the exact fact is held.
+       This never fabricates None; the original SState solver decides it. *)
+    let production = match !unfold_eager_fact with
+      | Some target when facts = [target]
+          && not (Engine.PFS.mem (UnfoldStateBase.get_pfs state) target) -> Some false
+      | _ -> production in
+    let result = UnfoldStateBase.assume_a ?matching ?production ~time state facts in
+    if final && Option.is_none result then incr unfold_final_unsat;
+    result
   let simplify ?save ?kill_new_lvars ?matching state =
     incr unfold_simplify_calls;
     let subst, states = UnfoldStateBase.simplify ?save ?kill_new_lvars ?matching state in
@@ -2921,7 +2948,10 @@ let with_tracked_unfold test () =
   Utils.Config.delay_entailment := true;
   unfold_core_calls := 0;
   unfold_reduction_failure := None;
-  unfold_final_loss := false;
+  unfold_final_failure := None;
+  unfold_final_checks := 0;
+  unfold_final_unsat := 0;
+  unfold_eager_fact := None;
   unfold_simplify_loss := 0;
   unfold_simplify_calls := 0;
   unfold_assertion_failure := None;
@@ -2931,7 +2961,10 @@ let with_tracked_unfold test () =
       Utils.Config.under_approximation := under;
       Utils.Config.delay_entailment := delayed;
       unfold_reduction_failure := None;
-      unfold_final_loss := false;
+      unfold_final_failure := None;
+      unfold_final_checks := 0;
+      unfold_final_unsat := 0;
+      unfold_eager_fact := None;
       unfold_simplify_loss := 0;
       unfold_simplify_calls := 0;
       unfold_assertion_failure := None;
@@ -3108,9 +3141,10 @@ let unfold_domain_stays_first () =
    deliberately excludes the existing lemma infeasibility collector. *)
 module ProcedureUnfold = Engine.PState.Make (UnfoldState)
 
-let procedure_unfold_fixture pred args =
+let procedure_unfold_fixture ?(extra_preds = []) pred args =
   let definitions = Hashtbl.create 1 in
   Hashtbl.add definitions pred.Pred.pred_name pred;
+  List.iter (fun pred -> Hashtbl.add definitions pred.Pred.pred_name pred) extra_preds;
   let empty () = Hashtbl.create 0 in
   let raw : (Annot.Basic.t, int) Prog.t = Prog.make ~imports:[]
     ~lemmas:(empty ()) ~preds:definitions ~funcs:(empty ()) ~datatypes:(empty ())
@@ -3186,10 +3220,6 @@ let procedure_unfold_live_loss () =
       [Asrt.Types [Expr.PVar "value",Type.NumberType];stage_core "DeadCore"]] } in
   let prog,state,command = procedure_unfold_fixture pred [stage_value "after_root";Expr.int 7] in
   require_unfold_rejection "a type conflict cannot use the lemma infeasibility marker"
-    (fun () -> ProcedureUnfold.evaluate_slcmd prog command state);
-  let prog,state,command = procedure_stage ["after_root","StageCell"] in
-  unfold_final_loss := true;
-  require_unfold_rejection "final admissibility loss is not a pruned pure guard"
     (fun () -> ProcedureUnfold.evaluate_slcmd prog command state)
 
 let procedure_unfold_simplification_loss () =
@@ -3313,6 +3343,111 @@ let procedure_unfold_entailment_errors () =
        (OperationError "Incomplete totality proof: SMT returned unknown");
      Gillian.Logic.Reduction.ReductionException (guard,"guard entailment control")];
   Alcotest.(check int) "entailment errors stop before all heap production" 0 !unfold_core_calls
+
+(* A single definition produces two honestly correlated memory branches after
+   its delayed selector=0 fact. Only the real final SAT check can reject branch
+   selector=1; the pre-production pure-guard cut cannot classify this split. *)
+let procedure_final_fixture cores =
+  let selector = Expr.LVar "#procedure_final_selector" in
+  let guard = Expr.BinOp (Expr.PVar "selector",Equal,Expr.int 0) in
+  let pred = { (stage_pred []) with pred_params =
+      ["selector",Some Type.IntType;"value",Some Type.IntType];
+    pred_definitions = List.map (fun core -> None,
+      [Asrt.Pure guard;
+       Asrt.CorePred (core,[Expr.PVar "selector";Expr.PVar "value"],[])]) cores } in
+  let prog,state,command = procedure_unfold_fixture pred [selector;Expr.int 7] in
+  ignore (UnfoldState.assume_t state.state selector Type.IntType);
+  prog,state,command,selector
+
+let procedure_unfold_final_siblings () =
+  let prog,state,command,selector = procedure_final_fixture ["CorrelatedFinal"] in
+  let results = ProcedureUnfold.evaluate_slcmd prog command state in
+  require_procedure_heap "the live branch keeps its exact correlated owned heap"
+    results [[Expr.int 0;Expr.int 7]];
+  Alcotest.(check int) "one definition really produced both final checks" 2 !unfold_final_checks;
+  Alcotest.(check int) "only the contradictory produced branch is certified" 1 !unfold_final_unsat;
+  match results with
+  | [Ok state] ->
+      Alcotest.(check bool) "the live branch retains the same selector" true
+        (UnfoldState.assert_a state.state
+          [Expr.BinOp (selector,Equal,Expr.int 0)]);
+      Alcotest.(check bool) "dead-branch facts cannot leak to the survivor" false
+        (UnfoldState.sat_check state.state
+          (Expr.BinOp (selector,Equal,Expr.int 1)))
+  | _ -> Alcotest.fail "exactly one correlated live branch must remain"
+
+let procedure_unfold_final_definition () =
+  let prog,state,command,_ = procedure_final_fixture ["OnlyFinalUnsat";"CorrelatedFinal"] in
+  require_procedure_heap "a wholly certified definition cannot erase a live definition"
+    (ProcedureUnfold.evaluate_slcmd prog command state) [[Expr.int 0;Expr.int 7]];
+  Alcotest.(check int) "all three actual produced branches reached the final check" 3 !unfold_final_checks;
+  Alcotest.(check int) "both contradictory branches require actual UNSAT" 2 !unfold_final_unsat
+
+let procedure_unfold_final_error_sibling () =
+  let selector = Expr.LVar "#procedure_final_error_selector" in
+  let parameter = Expr.PVar "selector" in
+  let required = Expr.BinOp (parameter,Equal,Expr.int 1) in
+  let fact = { (stage_pred []) with pred_name = "FinalRequiredOne";
+    pred_num_params = 1; ins_number = 1;
+    pred_params = ["selector",Some Type.IntType];
+    (* The fixture's only fact is the exact body, not an extra axiom. *)
+    pred_definitions = [None,[Asrt.Pure required]]; pred_facts = [required] } in
+  let pred = { (stage_pred []) with
+    pred_params = ["selector",Some Type.IntType;"value",Some Type.IntType];
+    pred_definitions = [None,
+      [Asrt.Pure (Expr.BinOp (parameter,Equal,Expr.int 0));
+       Asrt.CorePred ("CorrelatedFinal",[parameter;Expr.PVar "value"],[]);
+       Asrt.pred fact.pred_name [parameter] []]] } in
+  let prog,state,command = procedure_unfold_fixture ~extra_preds:[fact] pred
+      [selector;Expr.int 7] in
+  ignore (UnfoldState.assume_t state.state selector Type.IntType);
+  unfold_eager_fact := Some (Expr.BinOp (selector,Equal,Expr.int 1));
+  let results = ProcedureUnfold.evaluate_slcmd prog command state in
+  (match results with
+   | [Error (Engine.StateErr.EOther _)] -> ()
+   | _ -> Alcotest.fail "a real returned production Error must survive its final-UNSAT sibling");
+  Alcotest.(check int) "the other produced branch completed actual final UNSAT" 1 !unfold_final_unsat;
+  Alcotest.(check int) "one definition really reached the branching memory producer" 1 !unfold_core_calls
+
+let procedure_unfold_final_all_empty () =
+  let prog,state,command,_ = procedure_final_fixture ["OnlyFinalUnsat";"OnlyFinalUnsat"] in
+  require_unfold_rejection "all certified definitions still reject without a live outcome"
+    (fun () -> ProcedureUnfold.evaluate_slcmd prog command state);
+  Alcotest.(check int) "both definitions completed a real final UNSAT check" 2 !unfold_final_unsat;
+  (* No certificate accompanies DeadCore's empty production. A certified sibling
+     must not hide that earlier unclassified loss. *)
+  let prog,state,command,_ = procedure_final_fixture ["OnlyFinalUnsat";"DeadCore"] in
+  require_unfold_rejection "an unmarked empty producer still rejects beside a certificate"
+    (fun () -> ProcedureUnfold.evaluate_slcmd prog command state)
+
+let procedure_unfold_final_errors () =
+  List.iter (fun error ->
+    let prog,state,command,_ = procedure_final_fixture ["CorrelatedFinal"] in
+    unfold_final_checks := 0;
+    unfold_final_failure := Some error;
+    (match ProcedureUnfold.evaluate_slcmd prog command state with
+     | _ -> Alcotest.fail "an error at the exact final check cannot become a certificate"
+     | exception actual -> Alcotest.(check bool) "the identical final error escapes" true
+         (actual == error));
+    Alcotest.(check int) "the final-check hook actually ran" 1 !unfold_final_checks;
+    Alcotest.(check int) "the real branching producer ran before the error" 1 !unfold_core_calls;
+    unfold_final_failure := None;
+    unfold_core_calls := 0)
+    [PredicateCallbackResult.Exc.Gillian_error
+       (OperationError "Incomplete totality proof: SMT returned unknown");
+     Gillian.Logic.Reduction.ReductionException (Expr.true_,"final assumption control")]
+
+let procedure_unfold_final_scope () =
+  let prog,state,command,_ = procedure_final_fixture ["CorrelatedFinal"] in
+  let results = ProcedureUnfold.evaluate_slcmd { prog with totality = None } command state in
+  Alcotest.(check int) "lemma production retains its existing final infeasibility marker" 1
+    (List.length (List.filter checked_infeasible results));
+  Alcotest.(check int) "the lemma also keeps its one actual live branch" 1
+    (List.length (List.filter Result.is_ok results));
+  Utils.Config.Verification.total := false;
+  let prog,state,command,_ = procedure_final_fixture ["CorrelatedFinal"] in
+  require_procedure_heap "partial production keeps its original surviving heap"
+    (ProcedureUnfold.evaluate_slcmd prog command state) [[Expr.int 0;Expr.int 7]]
 
 
 module PinMemory = struct
@@ -3530,7 +3665,7 @@ let tests =
       ("tracked unfold does not prune a merely related numeric fact", with_tracked_unfold unfold_related_policy_is_live);
       ("procedure explicit unfold locally prunes false stages", with_tracked_unfold procedure_unfold_stage);
       ("procedure explicit unfold prunes only the exact opposite policy", with_tracked_unfold procedure_unfold_policy);
-      ("procedure explicit unfold rejects live and final-admissibility loss", with_tracked_unfold procedure_unfold_live_loss);
+      ("procedure explicit unfold rejects live core and type loss", with_tracked_unfold procedure_unfold_live_loss);
       ("procedure explicit unfold rejects every simplification loss", with_tracked_unfold procedure_unfold_simplification_loss);
       ("procedure explicit unfold rejects wholly pruned outcomes", with_tracked_unfold procedure_unfold_all_false);
       ("procedure explicit unfold preserves full domains and required errors", with_tracked_unfold procedure_unfold_domain_and_errors);
@@ -3539,4 +3674,10 @@ let tests =
       ("procedure unfold proves derived max-prefix guard before production", with_tracked_unfold procedure_unfold_derived_bound);
       ("procedure unfold retains an unproved symbolic guard", with_tracked_unfold procedure_unfold_unproved_guard);
       ("procedure unfold guard entailment preserves required errors", with_tracked_unfold procedure_unfold_entailment_errors);
+      ("procedure unfold keeps correlated live and final-UNSAT siblings", with_tracked_unfold procedure_unfold_final_siblings);
+      ("procedure unfold skips only wholly certified definitions", with_tracked_unfold procedure_unfold_final_definition);
+      ("procedure unfold preserves a returned Error beside final UNSAT", with_tracked_unfold procedure_unfold_final_error_sibling);
+      ("procedure unfold rejects wholly certified and unmarked empty outcomes", with_tracked_unfold procedure_unfold_final_all_empty);
+      ("procedure final UNSAT handling preserves required errors", with_tracked_unfold procedure_unfold_final_errors);
+      ("procedure final UNSAT handling preserves lemma and partial production", with_tracked_unfold procedure_unfold_final_scope);
     ]

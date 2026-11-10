@@ -243,6 +243,10 @@ module Make (State : SState.S) :
     pred_defs : MP.preds_tbl_t;
   }
 
+  (* Private to production: an empty result without this certificate remains
+     unclassified state loss. Never send it through the lemma error collector. *)
+  type produced_branch = Produced of t | Final_unsat
+
   type post_res = (Flag.t * Asrt.t list) option
   type s_state = t * SVal.SESubst.t * MP.t
   type search_state = s_state list * err_t list
@@ -849,7 +853,7 @@ module Make (State : SState.S) :
       ?(fail_on_loss = false)
       (astate : t)
       (subst : SVal.SESubst.t)
-      (sas : Asrt.t) : (t, err_t) Res_list.t =
+      (sas : Asrt.t) : (produced_branch, err_t) Res_list.t =
     let open Res_list.Syntax in
     let other_state_err msg = Res_list.error_with (StateErr.EOther msg) in
     let track_infeasible =
@@ -1033,10 +1037,13 @@ module Make (State : SState.S) :
             (StateErr.EInfeasibleUnfold
                "final explicit-unfold production admissibility check")
         else if fail_on_loss then
-          Totality.unsupported
-            "Unclassified state loss during explicit unfold final admissibility"
+          (* In total over-approximation, this exact completed satisfiability
+             check returns None only for UNSAT; errors/UNKNOWN escaped above.
+             Keep the certificate per produced branch, beside any live sibling
+             or Error, until the definition-level caller classifies them. *)
+          Res_list.return Final_unsat
         else Res_list.vanish
-    | Some state -> Res_list.return { state; preds; pred_defs; wands }
+    | Some state -> Res_list.return (Produced { state; preds; pred_defs; wands })
 
   let produce_with_diagnostic
       ?diagnostic_origin
@@ -1108,10 +1115,9 @@ module Make (State : SState.S) :
         "raw_before_simplify", Asrt.to_yojson a;
         "mp_simplified_sas", Asrt.to_yojson sas])
     in
-    (* Procedure unfolds discard only a definition whose original pure guard
-       is already false. Full domain checking above still precedes this cut;
-       optional substitution must not allocate an absent witness. No heap or
-       delayed production has happened when [None] returns to this unfold. *)
+    (* Pre-production pruning uses the original pure guards. Full domain
+       checking above precedes this cut; optional substitution must not allocate
+       an absent witness. No arm production has happened at this point. *)
     let known_false = prune_known_false && List.exists (function
       | Asrt.Pure formula as atom when Option.is_none (Asrt.as_definedness atom) ->
           (match subst_in_expr_opt astate subst formula with
@@ -1124,8 +1130,19 @@ module Make (State : SState.S) :
            | None -> false)
       | _ -> false) ordered_sas in
     if known_false then None
-    else Some (produce_asrt_list ?diagnostic_origin ?unfold_site ~track_infeasible
-      ~fail_on_loss:prune_known_false astate subst ordered_sas)
+    else
+      let branches = produce_asrt_list ?diagnostic_origin ?unfold_site
+          ~track_infeasible ~fail_on_loss:prune_known_false astate subst ordered_sas in
+      let outcomes = List.filter_map (function
+        | Ok Final_unsat -> None
+        | Ok (Produced state) -> Some (Ok state)
+        | Error error -> Some (Error error)) branches in
+      (* Only a nonempty collection entirely certified by the exact final
+         check may skip a whole definition. Some [] without a certificate still
+         reaches the existing alternative guard; global all-empty also rejects. *)
+      if prune_known_false && branches <> [] && List.for_all (function
+        | Ok Final_unsat -> true | _ -> false) branches
+      then None else Some outcomes
 
   let produce ?track_infeasible astate subst a =
     Option.get (produce_with_diagnostic ?track_infeasible astate subst a)
