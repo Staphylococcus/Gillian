@@ -1572,9 +1572,10 @@ let literal_list_presence_fallback () =
   List.iter (fun value ->
     let expected = old_value_presence impossible value in
     check "the original false-prefix fallback stays authoritative" (not expected);
-    check "no other literal, EList, operator or variable gains a shortcut"
+    check "other literals, symbolic lists, operators and variables keep the fallback"
       (Legacy.ordered_values_present impossible.pfs impossible.gamma [value] = expected))
-    [Expr.Lit Literal.Nono;Expr.Lit Literal.Null;Expr.EList [];
+    [Expr.Lit Literal.Nono;Expr.Lit Literal.Null;Expr.EList [unknown];
+     Expr.EList [Expr.EList [unknown]];
      Expr.NOp (LstCat,[Expr.EList [];Expr.EList []]);
      unknown;Expr.LVar "#typed_presence"];
   check "one absent sibling still rejects the complete values list"
@@ -1625,6 +1626,64 @@ let literal_descriptor_roundtrip () =
   check "roundtrip keeps metadata and observable order"
     (snd (action ~context restored getAllProps [loc]) = [loc;ukeys ["type"]]
      && Heap.get_met restored loc_name = Some metadata)
+
+let normalized_literal_list_presence () =
+  let context = pc () in
+  Gillian.Symbolic.Pure_context.extend context.pfs Expr.false_;
+  let descriptor = closed_data_descriptor
+      (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "string")) in
+  let normalized = match descriptor with
+    | Expr.Lit literal -> Expr.from_lit_list literal
+    | _ -> assert false in
+  List.iter (fun value ->
+    check "normalized static list trees are still not Nono"
+      (Legacy.ordered_values_present context.pfs context.gamma [value]))
+    [normalized;Expr.EList [];Expr.EList [Expr.EList [];Expr.Lit Literal.Nono];
+     Expr.EList [Expr.Lit (Literal.Num nan);Expr.Lit (Literal.Num (-0.));
+       Expr.EList [Expr.Lit (Literal.Bool false);Expr.Lit Literal.Null]];
+     Expr.EList [Expr.Lit (Literal.LList [Literal.LList [];Literal.Nono])]];
+  List.iter (fun constant ->
+    List.iter (fun value ->
+      let expected = old_value_presence context value in
+      check "an unresolved constant does not gain constructor presence" (not expected);
+      check "constants nested in EList or literal-list leaves use the old fallback"
+        (Legacy.ordered_values_present context.pfs context.gamma [value] = expected))
+      [Expr.EList [Expr.Lit (Literal.Constant constant)];
+       Expr.EList [Expr.Lit (Literal.LList [Literal.Constant constant])]])
+    [Constant.Pi;Constant.Random;Constant.UTCTime;Constant.LocalTime]
+
+let normalized_descriptor_false_prefix_setter () =
+  let context = pc () in
+  Gillian.Symbolic.Pure_context.extend context.pfs Expr.false_;
+  let descriptor = closed_data_descriptor
+      (Literal.Utf16String (Gillian.Utils.Utf16.of_canonical "string")) in
+  let expected_descriptor = Expr.EList
+      [ukey "d";ukey "string";Expr.true_;Expr.true_;Expr.true_] in
+  check "the setter really normalizes the nested descriptor before presence"
+    (Legacy.ordered_list context.pfs context.gamma (Expr.EList [descriptor])
+     = Some [expected_descriptor]);
+  check "the old entailment cannot authorize that normalized false-prefix value"
+    (not (old_value_presence context expected_descriptor));
+  let original = Heap.init () in
+  Heap.set original loc_name Fields.empty None (Some metadata);
+  let before = snapshot original
+  and facts = Gillian.Symbolic.Pure_context.to_list context.pfs
+  and gamma = Gillian.Symbolic.Type_env.to_list context.gamma in
+  let stored = produce ~context original (ukeys ["type"]) (Expr.EList [descriptor]) in
+  check "the real setter keeps the exact field/domain/metadata footprint"
+    (match Heap.get stored loc_name with
+     | Some ((fields,Some domain),Some md) ->
+         Fields.field_names fields = [ukey "type"]
+         && Fields.get (ukey "type") fields = Some expected_descriptor
+         && domain = Expr.ESet [ukey "type"] && md = metadata
+     | _ -> false);
+  check "constructor-only production changes neither its source heap nor pure context"
+    (snapshot original = before
+     && Gillian.Symbolic.Pure_context.to_list context.pfs = facts
+     && Gillian.Symbolic.Type_env.to_list context.gamma = gamma);
+  check "successful descriptor production still cannot certify the false prefix SAT"
+    (not (Gillian.Logic.FOSolver.check_satisfiability ~matching:true
+      (Expr.true_ :: Gillian.Symbolic.Pure_context.to_list context.pfs) context.gamma))
 
 let () =
   Alcotest.run "Ordered fields"
@@ -1714,5 +1773,7 @@ let () =
             ("all nonliteral-list values retain original presence entailment", literal_list_presence_fallback);
             ("literal-list presence preserves partial value errors", literal_list_presence_partial);
             ("literal data descriptor keeps whole-field ownership", literal_descriptor_roundtrip);
+            ("normalized literal-list presence stays structural", normalized_literal_list_presence);
+            ("normalized descriptor setter preserves false prefix", normalized_descriptor_false_prefix_setter);
           ] );
     ]

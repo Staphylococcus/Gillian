@@ -544,11 +544,22 @@ module M = struct
     collect Containers.SS.empty [] keys
 
   let ordered_values_present pfs gamma values =
+    let rec closed_literal_tree = function
+      | Expr.Lit (Literal.Constant _) -> false
+      | Expr.Lit (Literal.LList literals) ->
+          List.for_all (fun literal -> closed_literal_tree (Expr.Lit literal)) literals
+      | Expr.Lit _ -> true
+      | Expr.EList children -> List.for_all closed_literal_tree children
+      | _ -> false
+    in
     List.for_all
       (function
       (* Literal list and Nono are distinct constructors. This proves presence
          only, never pure-state satisfiability; final/UNKNOWN guards still apply. *)
       | Expr.Lit (Literal.LList _) -> true
+      (* ordered_list normalizes nested literal lists to EList. Admit only its
+         static literal trees, leaving constants and all expressions to entailment. *)
+      | (Expr.EList _ as value) when closed_literal_tree value -> true
       | value ->
         FOSolver.check_entailment Containers.SS.empty pfs
           [ Expr.UnOp (Not, Expr.BinOp (value, Equal, Lit Nono)) ]
