@@ -1515,6 +1515,90 @@ let concat_named_rejections () =
   check "a missing paired-length relation cannot authorize the candidate"
     (Legacy.ordered_cell_index ~structural:true unlinked.pfs unlinked.gamma ks vs prop = None)
 
+module RejectionSite = Legacy.Ordered_fields_rejection_site
+
+let rejection_site_json text =
+  let prefix = "ORDERED_FIELDS_REJECTION_SITE_DIAGNOSTIC=" in
+  check "each setter record is one bounded scalar" (String.length text <= 512
+    && String.starts_with ~prefix text && not (String.contains text '\n'));
+  Yojson.Safe.from_string
+    (String.sub text (String.length prefix) (String.length text - String.length prefix))
+
+let rejection_site_format () =
+  let module D = RejectionSite in
+  List.iter (fun (reason, reason_name) -> List.iter (fun (root, root_name) ->
+    let json = rejection_site_json (D.message reason root None (Some true) None (Some false)) in
+    let open Yojson.Safe.Util in
+    check "fixed reason and root-alias enums are exact"
+      (member "reason" json = `String reason_name && member "root" json = `String root_name);
+    check "only six enum/boolean/null fields occur"
+      (List.sort String.compare (List.map fst (to_assoc json))
+       = ["domain";"fields";"occupied";"ordered";"reason";"root"]);
+    check "unobserved fields stay null"
+      (member "occupied" json = `Null && member "fields" json = `Null);
+    check "observed occupancy stays Boolean"
+      (member "ordered" json = `Bool true && member "domain" json = `Bool false))
+    [D.Unobserved,"unobserved";D.Direct_aloc,"direct-aloc";D.Direct_loc,"direct-loc";
+     D.Aloc_alias,"aloc-alias";D.Loc_alias,"loc-alias";D.Lvar_alias,"lvar-alias";
+     D.Other_alias,"other-alias";D.Fresh,"fresh"])
+    [D.Values_presence,"values-presence";D.Order,"order";D.Occupied_shape,"occupied-shape"]
+
+let rejection_site_effects () =
+  let sequence = sequence_context () in
+  let opaque = sequence_make sequence in
+  check "opaque fixture really forbids raw field observation"
+    (try ignore (Heap.get opaque loc_name); false
+     with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError text) ->
+       text = "Unsupported ordered fields: operation requires exposed cells.");
+  let cases = [
+    Heap.init (), pc (), keys [], Expr.EList [Expr.num 1.];
+    Heap.init (), pc (), keys ["10";"2"], values;
+    Heap.init (), pc (), keys ["a"], Expr.EList [Expr.Lit Literal.Nono];
+    make (), pc (), keys ["z";"a"], values;
+    opaque, sequence, sequence_keys, sequence_values] in
+  List.iter (fun (heap, context, ks, vs) ->
+    let before = snapshot heap in
+    let pfs = Gillian.Symbolic.Pure_context.to_list context.PC.pfs
+    and gamma = Gillian.Symbolic.Type_env.to_list context.gamma in
+    List.iter (fun _ ->
+      check "every rejection returns the exact original error"
+        (Legacy.set_ordered_fields heap context.pfs context.gamma loc ks vs
+         = Legacy.ordered_fields_error loc)) [0;1];
+    check "repeated setter diagnostics preserve heap/PFS/types"
+      (snapshot heap = before && Gillian.Symbolic.Pure_context.to_list context.pfs = pfs
+       && Gillian.Symbolic.Type_env.to_list context.gamma = gamma)) cases;
+  let json = rejection_site_json (RejectionSite.record ~resolved:(loc_name,false)
+      ~occupied:true RejectionSite.Occupied_shape opaque loc) in
+  let open Yojson.Safe.Util in
+  check "opaque occupancy reports no fabricated exposed fields"
+    (member "occupied" json = `Bool true && member "ordered" json = `Bool true
+     && member "fields" json = `Null && member "domain" json = `Null)
+
+let rejection_site_updates () =
+  let module D = RejectionSite in
+  let heap = Heap.init () in
+  let record occupied = D.record ~resolved:(loc_name,false) ~occupied D.Occupied_shape heap loc in
+  let empty = rejection_site_json (record false) in
+  Heap.set heap loc_name
+    (Fields.add_abstract (key "private_field_never_logged") (Expr.num 987654.) Fields.empty)
+    (Some (Expr.ESet [key "private_field_never_logged"])) (Some metadata);
+  let occupied = rejection_site_json (record true) in
+  let open Yojson.Safe.Util in
+  check "successive records observe current ownership rather than the first rejection"
+    (member "fields" empty = `Bool false && member "domain" empty = `Bool false
+     && member "fields" occupied = `Bool true && member "domain" occupied = `Bool true);
+  let context = pc () in
+  let partial = Expr.BinOp (Expr.EList [],LstNth,Expr.int 0) in
+  Gillian.Symbolic.Pure_context.extend context.pfs (Expr.BinOp (partial,Equal,Expr.int 0));
+  let before = Gillian.Symbolic.Pure_context.to_list context.pfs in
+  (* Literal length mismatch never reads this partial PFS. In opt-in mode a
+     copied satisfiability query here would violate the query-free contract. *)
+  List.iter (fun _ ->
+    check "repeated rejection observation never consults the solver"
+      (Legacy.set_ordered_fields heap context.pfs context.gamma loc
+        (keys []) (Expr.EList [Expr.num 1.]) = Legacy.ordered_fields_error loc)) [0;1];
+  check "the unused PFS remains exact" (Gillian.Symbolic.Pure_context.to_list context.pfs = before)
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -1599,5 +1683,8 @@ let () =
             ("concat segment named read", concat_named_read);
             ("concat segment ownership and identity guards", concat_named_rejections);
             ("concat selected whole-resource roundtrip", concat_selected_roundtrip);
+            ("bounded query-free setter rejection schema", rejection_site_format);
+            ("query-free setter rejections preserve original errors and ownership", rejection_site_effects);
+            ("setter rejection records follow repeated ownership updates", rejection_site_updates);
           ] );
     ]
