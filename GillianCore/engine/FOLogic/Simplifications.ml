@@ -228,7 +228,10 @@ let sanitise_pfs_no_store ?(matching = false) =
 (*   CLEANUP   *)
 (* *********** *)
 
-let clean_up_stuff (left : PFS.t) (right : PFS.t) =
+let notify_false observer reason =
+  match observer with None -> () | Some notify -> (try notify reason with _ -> ())
+
+let clean_up_stuff ?on_false (left : PFS.t) (right : PFS.t) =
   let sleft = PFS.to_set left in
   let pf_sym pfa pfb =
     match ((pfa, pfb) : Expr.t * Expr.t) with
@@ -248,9 +251,10 @@ let clean_up_stuff (left : PFS.t) (right : PFS.t) =
     in
     Expr.Set.exists (eq_or_sym npf) sleft
   in
-  if PFS.filter_stop_cond ~keep ~cond right then
+  if PFS.filter_stop_cond ~keep ~cond right then (
     let () = PFS.clear right in
-    PFS.set left [ Expr.false_ ]
+    PFS.set left [ Expr.false_ ];
+    notify_false on_false "clean-up")
 
 (* Set intersections *)
 let get_num_set_intersections pfs =
@@ -487,6 +491,7 @@ let _resolve_set_existentials
     @return Substitution from logical variables to logical expressions *)
 let simplify_pfs_and_gamma
     ?(matching = false)
+    ?on_false
     ?(kill_new_lvars : bool option)
     ?(save_spec_vars : (SS.t * bool) option)
     ?(existentials : SS.t option)
@@ -519,6 +524,10 @@ let simplify_pfs_and_gamma
       in
       Type_env.reset gamma simpl_gamma;
       PFS.set lpfs simpl_pfs;
+      (match on_false with
+      | None -> ()
+      | Some _ ->
+          if PFS.mem lpfs Expr.false_ then notify_false on_false "cache-false");
 
       (* Deal with rpfs *)
       if PFS.length lpfs > 0 && PFS.get_nth 0 lpfs == Some Expr.false_ then (
@@ -564,6 +573,7 @@ let simplify_pfs_and_gamma
 
       let stop_explain (msg : string) : [> `Stop ] =
         L.verbose (fun m -> m "Pure formulae false: %s" msg);
+        notify_false on_false msg;
         `Stop
       in
       (* PF simplification *)
@@ -1189,6 +1199,7 @@ let simplify_pfs_and_gamma
       (result, !existentials)
 
 let simplify_implication
+    ?on_false
     ~matching
     (exists : SS.t)
     (lpfs : PFS.t)
@@ -1210,7 +1221,7 @@ let simplify_implication
       | _ -> ())
     (PFS.to_list lpfs);
   let subst, exists =
-    simplify_pfs_and_gamma ~matching lpfs gamma ~rpfs ~existentials:exists
+    simplify_pfs_and_gamma ~matching ?on_false lpfs gamma ~rpfs ~existentials:exists
   in
   PFS.substitution subst rpfs;
 
@@ -1219,7 +1230,7 @@ let simplify_implication
   L.verbose (fun fmt -> fmt "REDUCED RPFS:\n%a" PFS.pp rpfs);
 
   sanitise_pfs_no_store ~matching gamma rpfs;
-  clean_up_stuff lpfs rpfs;
+  clean_up_stuff ?on_false lpfs rpfs;
 
   L.(
     verbose (fun m ->

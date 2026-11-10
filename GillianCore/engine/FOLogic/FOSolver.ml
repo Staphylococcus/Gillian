@@ -1,6 +1,9 @@
 open SVal
 module L = Logging
 
+let true_goal_false_diagnostic_enabled =
+  Sys.getenv_opt "GILLIAN_TRUE_GOAL_FALSE_DIAGNOSTIC" = Some "1"
+
 (** **************** * SATISFIABILITY * * **************** **)
 
 let get_axioms (fs : Expr.Set.t) (_ : Type_env.t) : Expr.Set.t =
@@ -1087,6 +1090,18 @@ let check_entailment_simplified
     (left_fs : PFS.t)
     (right_fs : Expr.t list)
     (gamma : Type_env.t) : bool =
+  let false_diagnostic =
+    if true_goal_false_diagnostic_enabled && !Config.Verification.total
+       && not !Config.under_approximation && SS.is_empty existentials
+       && (match right_fs with [Expr.Lit (Bool true)] -> true | _ -> false)
+    then Some (PFS.mem left_fs Expr.false_, ref None)
+    else None
+  in
+  let on_false = Option.map (fun (_, first) reason ->
+    if Option.is_none !first then (
+      let length = min 256 (String.length reason) in
+      first := Some (String.sub reason 0 length, String.length reason > length)))
+      false_diagnostic in
   (* The optional typed-alias core may only retain literal caller atoms and
      an originally declared witness type, never a type inferred from its link. *)
   let finite_bound_original_existentials = existentials in
@@ -1132,7 +1147,7 @@ let check_entailment_simplified
   let left_lvars = PFS.lvars left_fs in
   let right_lvars = PFS.lvars right_fs in
   let existentials =
-    Simplifications.simplify_implication ~matching existentials left_fs right_fs
+    Simplifications.simplify_implication ~matching ?on_false existentials left_fs right_fs
       gamma
   in
   Type_env.filter_vars_in_place gamma (SS.union left_lvars right_lvars);
@@ -1146,7 +1161,22 @@ let check_entailment_simplified
   let gamma_right = Type_env.filter gamma (fun v -> SS.mem v existentials) in
 
   (* If left side is false, return false *)
-  if List.mem Expr.false_ (left_fs @ right_fs) then false
+  if List.mem Expr.false_ (left_fs @ right_fs) then (
+    (match false_diagnostic with
+    | None -> ()
+    | Some (entry_has_false, first) ->
+        (try
+          let cause, truncated = match !first with
+            | None -> `Null, false
+            | Some (reason, truncated) -> `String reason, truncated in
+          let message = "TRUE_GOAL_FALSE_DIAGNOSTIC " ^ Yojson.Safe.to_string (`Assoc [
+            "entryHasFalse", `Bool entry_has_false;
+            "simplifiedLeftHasFalse", `Bool (List.mem Expr.false_ left_fs);
+            "simplifiedRightHasFalse", `Bool (List.mem Expr.false_ right_fs);
+            "firstCause", cause; "causeTruncated", `Bool truncated]) in
+          if String.length message + 2 < 2048 then prerr_endline ("\n" ^ message)
+        with _ -> ()));
+    false)
   else
     (* Check satisfiability of left side *)
     let left_sat =

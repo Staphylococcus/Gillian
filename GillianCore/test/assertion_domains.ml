@@ -473,3 +473,73 @@ let tests = tests @ List.map (fun (name, f) ->
   Alcotest.test_case name `Quick (with_total f))
   ["proof domain failure retains raw/evaluated conditions without retries", proof_domain_details;
    "proof domain failure details are bounded and total-only", proof_domain_detail_bound]
+
+module Simplification = Gillian.Logic.Simplifications
+
+let simplification_false_observer () =
+  let run ?on_false () =
+    let left = Engine.PFS.of_list [Expr.false_] and right = Engine.PFS.of_list [Expr.true_] in
+    let gamma = Gamma.init () in
+    let subst, exists = Simplification.simplify_pfs_and_gamma ?on_false ~rpfs:right left gamma in
+    Engine.PFS.to_list left, Engine.PFS.to_list right, Gamma.to_list gamma,
+    Engine.SVal.SESubst.to_list subst, Utils.Containers.SS.elements exists
+  in
+  let reasons = ref [] in
+  let observe reason = reasons := reason :: !reasons in
+  Simplification.clear_cache ();
+  let cold = run ~on_false:observe () in
+  Alcotest.(check (list string)) "existing stop reason appears exactly once"
+    ["False in pure formulae"] (List.rev !reasons);
+  reasons := [];
+  let warm = run ~on_false:observe () in
+  Alcotest.(check (list string)) "cached false carries an honest cache marker"
+    ["cache-false"] (List.rev !reasons);
+  Alcotest.(check bool) "observer preserves cold/warm PFS Gamma substitution and existentials" true (cold = warm);
+  reasons := [];
+  Simplification.clear_cache ();
+  Alcotest.(check bool) "default cold result stays identical" true (cold = run ());
+  Alcotest.(check bool) "default cached result stays identical" true (cold = run ());
+  Alcotest.(check (list string)) "no callback without the optional observer" [] !reasons;
+  Simplification.clear_cache ();
+  Alcotest.(check bool) "observer exception cannot change the original false result" true
+    (cold = run ~on_false:(fun _ -> raise Required_unknown) ());
+  Simplification.clear_cache ();
+  let nested_calls = ref 0 in
+  let nested _ =
+    incr nested_calls;
+    ignore (Simplification.simplify_pfs_and_gamma (Engine.PFS.init ()) (Gamma.init ()))
+  in
+  Alcotest.(check bool) "a nested observation has no shared cause state" true
+    (cold = run ~on_false:nested ());
+  Alcotest.(check int) "nested observer still fires once" 1 !nested_calls
+
+let implication_false_observer () =
+  let boolean = Expr.LVar "#false_observer_boolean" in
+  let run ?on_false () =
+    let left = Engine.PFS.of_list [boolean]
+    and right = Engine.PFS.of_list [Expr.UnOp (Not, boolean)] in
+    let gamma = Gamma.init () in
+    Gamma.update gamma "#false_observer_boolean" Type.BooleanType;
+    let exists = Simplification.simplify_implication ?on_false ~matching:false
+        Utils.Containers.SS.empty left right gamma in
+    Engine.PFS.to_list left, Engine.PFS.to_list right, Gamma.to_list gamma,
+    Utils.Containers.SS.elements exists
+  in
+  Simplification.clear_cache ();
+  let before = run () and reasons = ref [] in
+  Simplification.clear_cache ();
+  let observed = run ~on_false:(fun reason -> reasons := reason :: !reasons) () in
+  Alcotest.(check bool) "implication observer preserves the exact clean-up result" true (before = observed);
+  Alcotest.(check (list string)) "forward the existing clean-up contradiction only" ["clean-up"] (List.rev !reasons);
+  let left, right, _, _ = observed in
+  Alcotest.(check bool) "clean-up retains the original false premise" true (left = [Expr.false_] && right = []);
+  let facts = Engine.PFS.of_list [Expr.false_] and gamma = Gamma.init () in
+  Alcotest.(check bool) "a public true goal still rejects a false premise" false
+    (Solver.check_entailment Utils.Containers.SS.empty facts [Expr.true_] gamma);
+  Alcotest.(check bool) "public caller facts and Gamma remain unchanged" true
+    (Engine.PFS.to_list facts = [Expr.false_] && Gamma.to_list gamma = [])
+
+let tests = tests @ List.map (fun (name, f) ->
+  Alcotest.test_case name `Quick (with_total f))
+  ["simplification false observer preserves cache defaults exceptions and nesting", simplification_false_observer;
+   "implication false observer reports clean-up without changing rejection", implication_false_observer]
