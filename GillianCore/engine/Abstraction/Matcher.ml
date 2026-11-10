@@ -78,25 +78,33 @@ module Definedness_match_exception = struct
       try
         match Asrt.as_definedness atom with
         | Some (_, expression)
-          when let variables = Expr.pvars expression in
-            Containers.SS.mem "entryCopied" variables
-            && Containers.SS.mem "successMapBefore" variables ->
+          when let paired variables left right =
+            Containers.SS.mem left variables && Containers.SS.mem right variables in
+            paired (Expr.pvars expression) "entryCopied" "successMapBefore"
+            || paired (Expr.lvars expression)
+                 "#successMapEntrySlot0" "#successMapCurrentSlot0" ->
             attempted := true;
             let backtrace = Printexc.get_raw_backtrace () in
             let safe = Unclassified_unfold_diagnostic.safe in
             let frames = match Printexc.backtrace_slots backtrace with
               | None -> []
               | Some slots ->
-                  let rec take index remaining =
-                    if remaining = 0 || index = Array.length slots then []
-                    else match Printexc.Slot.location slots.(index) with
-                      | None -> take (index + 1) remaining
-                      | Some location ->
-                          `String (Printf.sprintf "%s:%d:%d-%d"
-                            (safe (Filename.basename location.filename))
-                            location.line_number location.start_char location.end_char)
-                          :: take (index + 1) (remaining - 1)
-                  in take 0 3
+                  let locations = Array.to_list slots |> List.filter_map (fun slot ->
+                    Option.map (fun location -> Printexc.Slot.is_raise slot, location)
+                      (Printexc.Slot.location slot)) in
+                  let first_throw = List.find_opt fst locations in
+                  let find file = List.find_opt (fun (_, location) ->
+                    Filename.basename location.Printexc.filename = file) locations in
+                  let context = match find "Totality.ml" with
+                    | Some _ as frame -> frame | None -> find "SState.ml" in
+                  List.fold_left (fun frames -> function
+                    | None -> frames
+                    | Some (_, location) ->
+                        let frame = `String (Printf.sprintf "%s:%d:%d-%d"
+                          (safe (Filename.basename location.Printexc.filename))
+                          location.line_number location.start_char location.end_char) in
+                        if List.mem frame frames then frames else frames @ [frame])
+                    [] [first_throw; find "FOSolver.ml"; context]
             in
             (* Class and source locations only: never invoke an exception
                printer, render operands, or inspect an execution state. *)

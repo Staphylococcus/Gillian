@@ -3819,12 +3819,14 @@ let tests =
       ("procedure type cut preserves all-empty lemma and partial behavior", with_tracked_unfold procedure_unfold_type_cut_scope_and_all_empty);
     ]
 
-(* Real matching catch, with no solver or synthetic proof result: the evaluator
-   throws before a definedness request can query the state. No public test API. *)
+(* Real matching catch, with no synthetic proof result: the exception fixture
+   runs before a definedness request can query the state. No public test API. *)
 let definedness_match_error = ref None
+let definedness_match_eval_hook = ref (fun () -> ())
 module DefinednessExceptionState = struct
   include ReturnState
   let eval_expr state expression =
+    !definedness_match_eval_hook ();
     Option.iter raise !definedness_match_error;
     ReturnState.eval_expr state expression
 end
@@ -3882,7 +3884,7 @@ let require_definedness_error = function
   | [Error (Engine.StateErr.EOther _)] -> ()
   | _ -> Alcotest.fail "ordinary evaluator exception must retain the original matching Error"
 
-let definedness_exception_record output =
+let definedness_exception_record ?(expected_class = Some "Failure") ?expected_files output =
   let lines = String.split_on_char '\n' output |> List.filter ((<>) "") in
   let prefix = "DEFINEDNESS_MATCH_EXCEPTION " in
   match lines with
@@ -3891,14 +3893,26 @@ let definedness_exception_record output =
       let json = Yojson.Safe.from_string
           (String.sub line (String.length prefix) (String.length line - String.length prefix)) in
       let open Yojson.Safe.Util in
-      Alcotest.(check string) "class excludes the exception payload" "Failure"
-        (json |> member "exceptionClass" |> to_string);
+      let class_name = json |> member "exceptionClass" |> to_string in
+      Option.iter (fun expected -> Alcotest.(check string)
+        "class excludes the exception payload" expected class_name) expected_class;
+      Alcotest.(check bool) "class stays a bounded static name" true
+        (String.length class_name <= 128 && String.for_all (function
+          | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' | '.' | '-' -> true
+          | _ -> false) class_name);
       Alcotest.(check bool) "case remains unavailable" false
         (json |> member "exactCaseIDAvailable" |> to_bool);
       Alcotest.(check bool) "observation grants no proof credit" false
         (json |> member "proofCredit" |> to_bool);
-      Alcotest.(check bool) "at most three source locations" true
-        (List.length (json |> member "sourceFrames" |> to_list) <= 3)
+      let frames = json |> member "sourceFrames" |> to_list |> List.map to_string in
+      Alcotest.(check bool) "at most three distinct source locations" true
+        (List.length frames <= 3 && List.length (List.sort_uniq String.compare frames) = List.length frames);
+      Option.iter (fun expected -> Alcotest.(check (list string))
+        "actual throw FOSolver and caller locations retain priority" expected
+        (List.map (fun frame -> String.split_on_char ':' frame |> List.hd) frames)) expected_files;
+      Alcotest.(check (list string)) "no payload or operand fields"
+        ["exceptionClass";"sourceFrames";"exactCaseIDAvailable";"proofCredit"]
+        (json |> to_assoc |> List.map fst)
   | _ -> Alcotest.fail "expected exactly one bounded exception-class record"
 
 let definedness_exception_filter_and_first () =
@@ -3950,3 +3964,75 @@ let tests = tests @
       (with_total_return definedness_exception_printer_isolation);
    Alcotest.test_case "definedness exception observation never catches required errors" `Quick
       (with_total_return definedness_exception_required_errors)]
+
+let definedness_scalar_atom entry current =
+  Asrt.definedness ~fact:true (Expr.BinOp (
+    BinOp (entry, Equal, Expr.Lit Undefined), Or, BinOp (current, ValueEqual, entry)))
+
+let definedness_scalar_filter_and_class () =
+  let entry = Expr.LVar "#successMapEntrySlot0"
+  and current = Expr.LVar "#successMapCurrentSlot0" in
+  let _, output, _ = captured_definedness_exception (fun () ->
+    List.iter (fun atom -> run_definedness_exception atom (Failure "not the selected cause")
+      |> require_definedness_error)
+      [definedness_scalar_atom entry (Expr.LVar "#successMapCurrentSlot1");
+       definedness_scalar_atom (Expr.LVar "#successMapEntrySlot1") current;
+       definedness_scalar_atom (Expr.PVar "entryCopied") current;
+       definedness_scalar_atom entry (Expr.PVar "successMapBefore");
+       definedness_scalar_atom entry (Expr.LVar "#successMapCurrentSlot00")];
+    run_definedness_exception (definedness_scalar_atom entry current)
+      (Invalid_argument ("FOSolver.ml:1:2-3 Totality.ml:4:5-6 " ^ String.make 65536 '\255'))
+      |> require_definedness_error;
+    run_definedness_exception
+      (definedness_exception_atom (Expr.PVar "entryCopied") (Expr.PVar "successMapBefore"))
+      (Failure "later legacy cause must not replace the current cause") |> require_definedness_error) in
+  if Sys.getenv_opt "GILLIAN_DEFINEDNESS_MATCH_EXCEPTION" = Some "1"
+  then definedness_exception_record ~expected_class:(Some "Invalid_argument") output
+  else Alcotest.(check string) "OFF ignores current scalars too" "" output
+
+let with_definedness_eval_hook hook action =
+  let previous = !definedness_match_eval_hook and backtrace = Printexc.backtrace_status () in
+  Printexc.record_backtrace true;
+  definedness_match_eval_hook := hook;
+  Fun.protect ~finally:(fun () -> definedness_match_eval_hook := previous;
+    Printexc.record_backtrace backtrace) action
+
+let definedness_exception_source_priority () =
+  (* Deliberately malformed diagnostic fixture, not a valid-domain proof:
+     real public entailment throws before SMT and supplies actual source slots. *)
+  let bad = Expr.BinOp (BinOp (Expr.EList [], LstNth, Expr.int 0), Equal, Expr.Lit Undefined) in
+  let hook () = ignore (Engine.FOSolver.check_entailment Utils.Containers.SS.empty
+    (Engine.PFS.of_list [bad]) [Expr.false_] (Engine.Type_env.init ())) in
+  with_definedness_eval_hook hook (fun () ->
+    let _, output, _ = captured_definedness_exception (fun () ->
+      run_definedness_exception
+        (definedness_scalar_atom (Expr.LVar "#successMapEntrySlot0") (Expr.LVar "#successMapCurrentSlot0"))
+        (Failure "the real FOSolver reduction must run first") |> require_definedness_error) in
+    if Sys.getenv_opt "GILLIAN_DEFINEDNESS_MATCH_EXCEPTION" = Some "1"
+    then definedness_exception_record ~expected_class:(Some "Engine.Reduction.ReductionException")
+      ~expected_files:["Reduction.ml";"FOSolver.ml";"Totality.ml"] output
+    else Alcotest.(check string) "OFF records no real solver stack" "" output)
+
+let definedness_exception_sstate_fallback () =
+  let backtrace = Printexc.backtrace_status () in
+  Printexc.record_backtrace true;
+  Fun.protect ~finally:(fun () -> Printexc.record_backtrace backtrace) (fun () ->
+    let error, origin = match ReturnState.eval_expr (ReturnState.init ()) (Expr.PVar "absent") with
+      | _ -> Alcotest.fail "missing program variable must produce the real SState exception"
+      | exception (ReturnState.Internal_State_Error _ as error) -> error, Printexc.get_raw_backtrace () in
+    with_definedness_eval_hook (fun () -> Printexc.raise_with_backtrace error origin) (fun () ->
+      let _, output, _ = captured_definedness_exception (fun () ->
+        run_definedness_exception
+          (definedness_scalar_atom (Expr.LVar "#successMapEntrySlot0") (Expr.LVar "#successMapCurrentSlot0"))
+          (Failure "preserve the real saved SState exception") |> require_definedness_error) in
+      if Sys.getenv_opt "GILLIAN_DEFINEDNESS_MATCH_EXCEPTION" = Some "1"
+      then definedness_exception_record ~expected_class:None ~expected_files:["SState.ml"] output
+      else Alcotest.(check string) "OFF keeps saved source stacks silent" "" output))
+
+let tests = tests @
+  [Alcotest.test_case "definedness scalar filter preserves the first current exception class" `Quick
+      (with_total_return definedness_scalar_filter_and_class);
+   Alcotest.test_case "definedness source selection keeps real FOSolver and Totality frames" `Quick
+      (with_total_return definedness_exception_source_priority);
+   Alcotest.test_case "definedness source selection deduplicates throw and SState fallback" `Quick
+      (with_total_return definedness_exception_sstate_fallback)]
