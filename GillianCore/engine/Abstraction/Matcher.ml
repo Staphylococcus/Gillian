@@ -896,7 +896,23 @@ module Make (State : SState.S) :
             | _ -> None
           in
           let outcomes =
-            try produce_assertion intermediate_state subst asrt with
+            (* Delayed pure production may retain false until the final
+               admissibility check. Reject a proved-false explicit-unfold arm
+               before a later core producer can lose its impossible state.
+               Optional substitution must not invent missing witnesses. *)
+            let proved_false =
+              match asrt with
+              | Asrt.Pure formula when track_infeasible -> (
+                  match subst_in_expr_opt intermediate_state subst formula with
+                  | Some reduced -> Expr.equal reduced Expr.false_
+                  | None -> false)
+              | _ -> false
+            in
+            if proved_false then
+              Res_list.error_with
+                (StateErr.EInfeasibleUnfold
+                   "explicit unfold pure formula reduces to false")
+            else try produce_assertion intermediate_state subst asrt with
             | err when track_infeasible -> raise err
             | e ->
                 let admissible =
@@ -1265,7 +1281,11 @@ module Make (State : SState.S) :
                 definitions);
           let state' = State.add_spec_vars state new_spec_vars in
           let astate = { state = state'; preds; wands; pred_defs } in
-          let diagnostic_ordinal = if Origin.enabled then Some (ref 1) else None in
+          let diagnostic_ordinal =
+            if Origin.enabled || Unclassified_unfold_diagnostic.enabled then
+              Some (ref 1)
+            else None
+          in
           let rest_results =
             let* def = rest_defs in
             let ordinal = match diagnostic_ordinal with

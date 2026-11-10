@@ -2822,6 +2822,225 @@ let ordinary_concrete_summary_unfolds () =
            (Expr.BinOp (value, Equal, Expr.int 8)))
   | _ -> Alcotest.fail "ordinary concrete predicate must still auto-unfold"
 
+(* Real Matcher production over a small owned core heap. DeadCore deliberately
+   returns no memory outcome, so an incompatible arm must stop before it. *)
+let unfold_core_calls = ref 0
+module UnfoldMemory = struct
+  type init_data = unit
+  type err_t = unit [@@deriving yojson, show]
+  type t = Expr.t list list [@@deriving yojson]
+  let init () = []
+  let get_init_data _ = ()
+  let clear _ = []
+  let execute_action _ _ _ _ = failwith "unfold fixture has no actions"
+  let is_action_total _ _ = false
+  let consume _ _ _ _ = failwith "unfold fixture does not consume cores"
+  let produce name heap pc values =
+    incr unfold_core_calls;
+    match name with
+    | "StageCell" -> [Engine.Gbranch.{ value = values :: heap; pc }]
+    | "DeadCore" -> []
+    | _ -> failwith "unexpected unfold fixture core"
+  let copy heap = heap
+  let is_overlapping_asrt _ = false
+  let pp fmt heap = Fmt.(Dump.list (Dump.list Expr.pp)) fmt heap
+  let pp_by_need _ = pp
+  let get_print_info variables _ = variables, Utils.Containers.SS.empty
+  let substitution_in_place ~pfs:_ ~gamma:_ subst heap =
+    let substitute = ReturnSubst.subst_in_expr subst ~partial:true in
+    [List.map (List.map substitute) heap, Expr.Set.empty, []]
+  let clean_up ?keep:_ _ = Expr.Set.empty, Expr.Set.empty
+  let lvars heap = List.concat heap |> List.fold_left
+      (fun names value -> Utils.Containers.SS.union names (Expr.lvars value))
+      Utils.Containers.SS.empty
+  let alocs _ = Utils.Containers.SS.empty
+  let assertions ?to_keep:_ heap =
+    List.map (fun values -> Asrt.CorePred ("StageCell", values, [])) heap
+  let mem_constraints _ = []
+  let get_recovery_tactic _ _ = Engine.Recovery_tactic.none
+  let pp_err _ _ = ()
+  let get_failing_constraint _ = Expr.false_
+  let get_fixes _ = []
+  let can_fix _ = false
+  let sure_is_nonempty heap = heap <> []
+  let split_further _ _ _ _ = None
+end
+module UnfoldStateBase = Engine.SState.Make (UnfoldMemory)
+let unfold_reduction_failure = ref None
+module UnfoldState = struct
+  include UnfoldStateBase
+  let simplify_val state value =
+    (match !unfold_reduction_failure with
+     | Some (target, error) when Expr.equal value target -> raise error
+     | _ -> ());
+    UnfoldStateBase.simplify_val state value
+end
+module UnfoldMatcher = Engine.Matcher.Make (UnfoldState)
+
+let with_tracked_unfold test () =
+  let total = !Utils.Config.Verification.total in
+  let under = !Utils.Config.under_approximation in
+  let delayed = !Utils.Config.delay_entailment in
+  Utils.Config.Verification.total := true;
+  Utils.Config.under_approximation := false;
+  Utils.Config.delay_entailment := true;
+  unfold_core_calls := 0;
+  unfold_reduction_failure := None;
+  Fun.protect ~finally:(fun () ->
+      Utils.Config.Verification.total := total;
+      Utils.Config.under_approximation := under;
+      Utils.Config.delay_entailment := delayed;
+      unfold_reduction_failure := None) test
+
+let unfold_empty () : UnfoldMatcher.t = {
+  state = UnfoldState.init (); preds = Preds.init [];
+  wands = Engine.Wands.init []; pred_defs = Engine.MP.init_pred_defs () }
+
+let stage_value text = Expr.Lit (Literal.Utf16String (Utils.Utf16.of_canonical text))
+let stage_core name = Asrt.CorePred (name, [Expr.PVar "value"], [])
+let stage_pred definitions : Pred.t = {
+  (call_mode_pred ~abstract:false 2) with
+  pred_name = "StageOwned"; pred_nounfold = true;
+  pred_params = ["stage", Some Type.Utf16Type; "value", Some Type.IntType];
+  pred_definitions = List.map (fun (stage, core) ->
+    Some (stage, []), [
+      Asrt.Pure (Expr.BinOp (Expr.PVar "stage", Equal, stage_value stage));
+      stage_core core]) definitions }
+
+let stage_unfold ?(track = true) definitions actual =
+  let pred = stage_pred definitions in
+  let definitions = Hashtbl.create 1 in
+  Hashtbl.add definitions pred.pred_name pred;
+  let pred_defs = match Engine.MP.init_preds definitions with
+    | Ok table -> table
+    | Error _ -> Alcotest.fail "stage fixture requires real matching plans" in
+  let args = [stage_value actual; Expr.int 7] in
+  let initial = { (unfold_empty ()) with pred_defs;
+    preds = Preds.init [pred.pred_name, args] } in
+  let before = Preds.to_list initial.preds in
+  let working = { initial with state = UnfoldState.copy initial.state;
+    preds = Preds.copy initial.preds; wands = Engine.Wands.copy initial.wands } in
+  let state = match UnfoldMatcher.consume_pred working pred.pred_name
+      (List.map Option.some args) with
+    | [Ok (state, [])] -> state
+    | _ -> Alcotest.fail "stage unfold must consume its held input tuple" in
+  let results = UnfoldMatcher.unfold ~track_infeasible:track state pred.pred_name args in
+  expect "unfold preserves the caller's held ownership snapshot" before
+    (Preds.to_list initial.preds);
+  results
+
+let checked_infeasible = function
+  | Error (Engine.StateErr.EInfeasibleUnfold _) -> true
+  | _ -> false
+
+let unfold_stage_prunes_before_core () =
+  let results = stage_unfold
+      ["after_items", "DeadCore"; "after_root", "StageCell"] "after_root" in
+  Alcotest.(check int) "only the compatible arm materializes a core" 1 !unfold_core_calls;
+  Alcotest.(check int) "one incompatible arm retains its typed rejection" 1
+    (List.length (List.filter checked_infeasible results));
+  match List.filter_map (function Ok (_, state) -> Some state | Error _ -> None) results with
+  | [state] ->
+      expect "the compatible arm retains its exact owned heap" [[Expr.int 7]]
+        (UnfoldState.get_heap state.UnfoldMatcher.state)
+  | _ -> Alcotest.fail "exactly one compatible owned heap must survive"
+
+let unfold_live_core_loss () =
+  (match stage_unfold ["after_root", "DeadCore"] "after_root" with
+   | _ -> Alcotest.fail "a live core loss must not become infeasibility"
+   | exception PredicateCallbackResult.Exc.Gillian_error
+       (OperationError message) ->
+       expect "the original unclassified core-loss guard remains exact"
+         "Unsupported totality proof: Unclassified state loss during explicit unfold assertion production"
+         message);
+  Alcotest.(check int) "the live core producer really ran" 1 !unfold_core_calls
+
+let unfold_all_infeasible () =
+  let results = stage_unfold
+      ["after_items", "DeadCore"; "before_root", "DeadCore"] "after_root" in
+  Alcotest.(check int) "every impossible arm remains an error outcome" 2 (List.length results);
+  Alcotest.(check bool) "no successful state can qualify a wholly infeasible lemma" true
+    (List.for_all checked_infeasible results);
+  Alcotest.(check int) "no impossible core is materialized" 0 !unfold_core_calls
+
+let unfold_policy_prunes_before_core () =
+  let ps = Expr.LVar "#unfold_policy" in
+  let negative = Expr.BinOp (ps, FLessThan, Expr.num 0.) in
+  let initial = unfold_empty () in
+  ignore (UnfoldState.assume_t initial.state ps Type.NumberType);
+  ignore (UnfoldState.assume_a ~production:true initial.state [negative]);
+  let before = Engine.PFS.to_list (UnfoldState.get_pfs initial.state) in
+  let results = UnfoldMatcher.produce ~track_infeasible:true initial
+      (ReturnSubst.init [ps, ps])
+      [Asrt.Pure (Expr.UnOp (Not, negative)); Asrt.CorePred ("DeadCore", [], [])] in
+  Alcotest.(check bool) "the opposite known policy is a typed infeasible arm" true
+    (List.length results = 1 && List.for_all checked_infeasible results);
+  Alcotest.(check int) "the opposite policy never materializes a core" 0 !unfold_core_calls;
+  expect "the checked policy and caller PFS remain unchanged" before
+    (Engine.PFS.to_list (UnfoldState.get_pfs initial.state))
+
+let unfold_symbolic_and_errors () =
+  let variable = Expr.LVar "#unfold_symbolic" in
+  let formula = Expr.BinOp (variable, ILessThan, Expr.int 0) in
+  let initial () =
+    let state = unfold_empty () in
+    ignore (UnfoldState.assume_t state.state variable Type.IntType);
+    state in
+  let produce () = UnfoldMatcher.produce ~track_infeasible:true (initial ())
+      (ReturnSubst.init [variable, variable])
+      [Asrt.Pure formula; Asrt.CorePred ("StageCell", [variable], [])] in
+  (match produce () with
+   | [Ok state] -> expect "an unproved symbolic guard retains its owned heap"
+       [[variable]] (UnfoldState.get_heap state.UnfoldMatcher.state)
+   | _ -> Alcotest.fail "a satisfiable symbolic guard must not be pruned");
+  List.iter (fun error ->
+      unfold_core_calls := 0;
+      unfold_reduction_failure := Some (formula, error);
+      (match produce () with
+       | _ -> Alcotest.fail "required reduction/UNKNOWN error must escape"
+       | exception actual -> Alcotest.(check bool) "the identical required error escapes" true
+           (actual == error));
+      Alcotest.(check int) "required errors stop before core production" 0 !unfold_core_calls)
+    [Gillian.Logic.Reduction.ReductionException (formula, "unfold reduction control");
+     PredicateCallbackResult.Exc.Gillian_error
+       (OperationError "Incomplete totality proof: SMT returned unknown")]
+
+let unfold_untracked_unchanged () =
+  List.iter (fun (total, track) ->
+      Utils.Config.Verification.total := total;
+      unfold_core_calls := 0;
+      let results = stage_unfold ~track ["after_items", "StageCell"] "after_root" in
+      expect "untracked/partial delayed production retains its old empty result" [] results;
+      Alcotest.(check int) "untracked/partial production still reaches the core" 1
+        !unfold_core_calls) [true, false; false, true]
+
+let unfold_uncovered_return () =
+  let subst = ReturnSubst.init [] in
+  let results = UnfoldMatcher.produce ~track_infeasible:true (unfold_empty ()) subst
+      [Asrt.Pure (Expr.BinOp (return_var, ValueEqual, Expr.int 7));
+       Asrt.CorePred ("StageCell", [return_var], [])] in
+  match results with
+  | [Ok state] ->
+      let value = Option.get (ReturnStore.get (UnfoldState.get_store state.state)
+          Utils.Names.return_variable) in
+      expect "an uncovered return still learns its original exact value" (Expr.int 7) value;
+      expect "the later core uses that same returned value" [[value]]
+        (UnfoldState.get_heap state.state)
+  | _ -> Alcotest.fail "optional preflight must not invent an uncovered return binding"
+
+let unfold_domain_stays_first () =
+  let partial = Expr.BinOp (Expr.EList [], LstNth, Expr.int 0) in
+  (match UnfoldMatcher.produce ~track_infeasible:true (unfold_empty ())
+      (ReturnSubst.init [])
+      [Asrt.Pure Expr.false_; Asrt.definedness ~fact:false partial;
+       Asrt.CorePred ("DeadCore", [], [])] with
+   | _ -> Alcotest.fail "a false arm must not waive assertion-domain checks"
+   | exception PredicateCallbackResult.Exc.Gillian_error
+       (AnalysisFailures [{msg; _}]) ->
+       Alcotest.(check bool) "the original undefined-expression rejection remains" true
+         (String.starts_with ~prefix:"Produced assertion is not proved defined:" msg));
+  Alcotest.(check int) "domain rejection precedes all core production" 0 !unfold_core_calls
+
 
 module PinMemory = struct
   include Engine.SMemory.Dummy
@@ -3027,4 +3246,12 @@ let tests =
       ("caller pins preserve protected-location rejection", with_total_return caller_pin_alias_rejection);
       ("caller pins release after actual nested normal returns", caller_pin_interpreter false);
       ("caller pins release after actual caught-error return", caller_pin_interpreter true);
+      ("tracked unfold prunes false stage before core and retains compatible heap", with_tracked_unfold unfold_stage_prunes_before_core);
+      ("tracked unfold retains live core-loss rejection", with_tracked_unfold unfold_live_core_loss);
+      ("tracked unfold keeps wholly infeasible outcomes as errors", with_tracked_unfold unfold_all_infeasible);
+      ("tracked unfold prunes the opposite known numeric policy", with_tracked_unfold unfold_policy_prunes_before_core);
+      ("tracked unfold preserves symbolic guards and required errors", with_tracked_unfold unfold_symbolic_and_errors);
+      ("untracked and partial unfold production stay unchanged", with_tracked_unfold unfold_untracked_unchanged);
+      ("tracked optional preflight preserves uncovered return production", with_tracked_unfold unfold_uncovered_return);
+      ("tracked false pure never waives assertion domain checks", with_tracked_unfold unfold_domain_stays_first);
     ]
