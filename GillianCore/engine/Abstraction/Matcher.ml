@@ -1072,6 +1072,20 @@ module Make (State : SState.S) :
         ~assertion:(fun st e -> State.assert_a st [ e ])
         ~assume:(fun st es -> State.assume_a st es)
         (State.copy astate.state) original);
+    (* Certify atomic conflicts from the original assertions and incoming
+       Gamma, before simplification or metadata resolution can infer types. *)
+    let known_type_conflict = prune_known_false && List.exists (function
+      | Asrt.Types bindings -> List.exists (fun (expression, required) ->
+          let known = match SVal.SESubst.subst_in_expr_opt subst expression with
+            | Some (Expr.Lit literal) -> Some (Literal.type_of literal)
+            | Some (Expr.ALoc _) -> Some Type.ObjectType
+            | Some (Expr.LVar name) ->
+                Type_env.get (State.get_typ_env astate.state) name
+            | _ -> None in
+          match known with
+          | Some known -> not (Type.equal known required)
+          | None -> false) bindings
+      | _ -> false) a in
     let sas = MP.simplify_asrts a in
     (* Metadata is persistent in the JS memory model. Re-producing fields at
        an existential metadata location first would allocate a distinct ALoc
@@ -1118,19 +1132,7 @@ module Make (State : SState.S) :
     (* Pre-production pruning uses only incoming types and original pure guards.
        Full domain checking above precedes this cut; optional substitution must
        not allocate an absent witness. No arm production has happened here. *)
-    let known_false = prune_known_false && List.exists (function
-      | Asrt.Types bindings -> List.exists (fun (expression, required) ->
-          (* Only an existing atomic type can refute this whole arm. Do not
-             simplify a partial expression, infer a type or use an arm fact. *)
-          let known = match SVal.SESubst.subst_in_expr_opt subst expression with
-            | Some (Expr.Lit literal) -> Some (Literal.type_of literal)
-            | Some (Expr.ALoc _) -> Some Type.ObjectType
-            | Some (Expr.LVar name) ->
-                Type_env.get (State.get_typ_env astate.state) name
-            | _ -> None in
-          match known with
-          | Some known -> not (Type.equal known required)
-          | None -> false) bindings
+    let known_false = known_type_conflict || (prune_known_false && List.exists (function
       | Asrt.Pure formula as atom when Option.is_none (Asrt.as_definedness atom) ->
           (match subst_in_expr_opt astate subst formula with
            | Some reduced -> Expr.equal reduced Expr.false_
@@ -1140,7 +1142,7 @@ module Make (State : SState.S) :
                   arm facts, types or heap enter this disposable proof state. *)
                || State.assert_a (State.copy astate.state) [Expr.negate reduced]
            | None -> false)
-      | _ -> false) ordered_sas in
+      | _ -> false) ordered_sas) in
     if known_false then None
     else
       let branches = produce_asrt_list ?diagnostic_origin ?unfold_site
