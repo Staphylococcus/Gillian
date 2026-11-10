@@ -1731,11 +1731,18 @@ let defined_reference_data_fallback () =
     [Expr.EList [Expr.EList [unknown]];
      Expr.EList [Expr.ALoc "#defined_sibling";unknown];
      Expr.LVar "#known_data_leaf";Expr.ALoc "#direct_reference_keeps_fallback"] in
+  let result run = try Ok (run ()) with
+    Gillian.Logic.Reduction.ReductionException (term,message) -> Error (term,message) in
   List.iter (fun value ->
-    let expected = old_value_presence context value in
-    check "excluded and direct-reference values keep the required old entailment"
-      (not expected
-       && Legacy.ordered_values_present context.pfs context.gamma [value] = expected)) unchanged;
+    let expected = result (fun () -> old_value_presence context value) in
+    let actual = result (fun () ->
+      Legacy.ordered_values_present context.pfs context.gamma [value]) in
+    check "excluded values keep false or the same exact required reduction error"
+      (match expected,actual with
+       | Ok false,Ok false -> true
+       | Error (before,message),Error (after,other_message) ->
+           Expr.equal before after && message = other_message
+       | _ -> false)) unchanged;
   check "failed eligibility neither installs a type nor changes a pure fact"
     (Gillian.Symbolic.Type_env.to_list context.gamma = before
      && Gillian.Symbolic.Pure_context.to_list context.pfs = facts);
@@ -1743,8 +1750,6 @@ let defined_reference_data_fallback () =
   Gillian.Symbolic.Type_env.update live.gamma "#known_data_leaf" Type.ObjectType;
   let partial = Expr.BinOp (Expr.EList [],LstNth,Expr.int (-1)) in
   let value = Expr.EList [Expr.LVar "#known_data_leaf";partial] in
-  let result run = try Ok (run ()) with
-    Gillian.Logic.Reduction.ReductionException (term,message) -> Error (term,message) in
   let old = result (fun () -> old_value_presence live value) in
   check "a typed sibling cannot hide the original partial-expression error"
     (Result.is_error old
