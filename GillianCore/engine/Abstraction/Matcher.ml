@@ -1117,6 +1117,10 @@ module Make (State : SState.S) :
           (match subst_in_expr_opt astate subst formula with
            | Some reduced -> Expr.equal reduced Expr.false_
                || PFS.mem (State.get_pfs astate.state) (Expr.negate reduced)
+               (* Sufficient entailment over the incoming frame only. A false
+                  answer keeps production; required errors/UNKNOWN escape. No
+                  arm facts, types or heap enter this disposable proof state. *)
+               || State.assert_a (State.copy astate.state) [Expr.negate reduced]
            | None -> false)
       | _ -> false) ordered_sas in
     if known_false then None

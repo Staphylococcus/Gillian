@@ -2886,6 +2886,8 @@ let unfold_reduction_failure = ref None
 let unfold_final_loss = ref false
 let unfold_simplify_loss = ref 0
 let unfold_simplify_calls = ref 0
+let unfold_assertion_failure = ref None
+let unfold_assertions = ref Expr.Set.empty
 module UnfoldState = struct
   include UnfoldStateBase
   let simplify_val state value =
@@ -2900,6 +2902,13 @@ module UnfoldState = struct
     incr unfold_simplify_calls;
     let subst, states = UnfoldStateBase.simplify ?save ?kill_new_lvars ?matching state in
     (subst, if !unfold_simplify_calls = !unfold_simplify_loss then [] else states)
+  let assert_a state facts =
+    List.iter (fun fact ->
+      unfold_assertions := Expr.Set.add fact !unfold_assertions;
+      match !unfold_assertion_failure with
+      | Some (target,error) when Expr.equal fact target -> raise error
+      | _ -> ()) facts;
+    UnfoldStateBase.assert_a state facts
 end
 module UnfoldMatcher = Engine.Matcher.Make (UnfoldState)
 
@@ -2915,6 +2924,8 @@ let with_tracked_unfold test () =
   unfold_final_loss := false;
   unfold_simplify_loss := 0;
   unfold_simplify_calls := 0;
+  unfold_assertion_failure := None;
+  unfold_assertions := Expr.Set.empty;
   Fun.protect ~finally:(fun () ->
       Utils.Config.Verification.total := total;
       Utils.Config.under_approximation := under;
@@ -2922,7 +2933,9 @@ let with_tracked_unfold test () =
       unfold_reduction_failure := None;
       unfold_final_loss := false;
       unfold_simplify_loss := 0;
-      unfold_simplify_calls := 0) test
+      unfold_simplify_calls := 0;
+      unfold_assertion_failure := None;
+      unfold_assertions := Expr.Set.empty) test
 
 let unfold_empty () : UnfoldMatcher.t = {
   state = UnfoldState.init (); preds = Preds.init [];
@@ -3248,6 +3261,60 @@ let procedure_unfold_scope () =
   Alcotest.(check int) "partial mode still invokes the original core producer" 1 !unfold_core_calls
 
 
+let procedure_unfold_derived_bound () =
+  let index = Expr.LVar "#procedure_index" in
+  let impossible = Expr.BinOp (Expr.PVar "index",ValueEqual,Expr.num 2.) in
+  let pred = { (stage_pred []) with pred_params =
+      ["index",Some Type.NumberType;"value",Some Type.IntType];
+    pred_definitions = [None,[Asrt.Pure impossible;stage_core "DeadCore"];
+      None,[Asrt.Pure Expr.true_;stage_core "StageCell"]] } in
+  let prog,state,command = procedure_unfold_fixture pred [index;Expr.int 7] in
+  ignore (UnfoldState.assume_t state.state index Type.NumberType);
+  ignore (UnfoldState.assume_a ~production:true state.state
+    [Expr.UnOp (IsInt,index);Expr.BinOp (Expr.num 0.,FLessThanEqual,index);
+     Expr.BinOp (index,FLessThan,Expr.num 2.)]);
+  let refutation = Expr.negate (Expr.BinOp (index,ValueEqual,Expr.num 2.)) in
+  Alcotest.(check bool) "the refutation is not an exact held negation" false
+    (Engine.PFS.mem (UnfoldState.get_pfs state.state) refutation);
+  require_procedure_heap "the head bound excludes only the max-prefix arm"
+    (ProcedureUnfold.evaluate_slcmd prog command state) [[Expr.int 7]];
+  Alcotest.(check bool) "the sufficient entailment call actually ran" true
+    (Expr.Set.mem refutation !unfold_assertions);
+  Alcotest.(check int) "only the compatible heap reached memory" 1 !unfold_core_calls
+
+let procedure_unfold_unproved_guard () =
+  let policy = Expr.LVar "#procedure_unproved" in
+  let guard = Expr.BinOp (Expr.PVar "policy",FLessThan,Expr.num 0.) in
+  let pred = { (stage_pred []) with pred_params =
+      ["policy",Some Type.NumberType;"value",Some Type.IntType];
+    pred_definitions = [None,[Asrt.Pure guard;stage_core "StageCell"]] } in
+  let prog,state,command = procedure_unfold_fixture pred [policy;Expr.int 7] in
+  ignore (UnfoldState.assume_t state.state policy Type.NumberType);
+  require_procedure_heap "an unproved negated guard retains its exact original production"
+    (ProcedureUnfold.evaluate_slcmd prog command state) [[Expr.int 7]];
+  Alcotest.(check int) "a satisfiable symbolic guard is not a skip" 1 !unfold_core_calls
+
+let procedure_unfold_entailment_errors () =
+  let policy = Expr.LVar "#procedure_entailment_error" in
+  let guard = Expr.BinOp (Expr.PVar "policy",FLessThan,Expr.num 0.) in
+  let target = Expr.negate (Expr.BinOp (policy,FLessThan,Expr.num 0.)) in
+  let pred = { (stage_pred []) with pred_params =
+      ["policy",Some Type.NumberType;"value",Some Type.IntType];
+    pred_definitions = [None,[Asrt.Pure guard;stage_core "StageCell"]] } in
+  List.iter (fun error ->
+    let prog,state,command = procedure_unfold_fixture pred [policy;Expr.int 7] in
+    ignore (UnfoldState.assume_t state.state policy Type.NumberType);
+    unfold_assertion_failure := Some (target,error);
+    (match ProcedureUnfold.evaluate_slcmd prog command state with
+     | _ -> Alcotest.fail "guard entailment UNKNOWN/errors cannot become false-arm skips"
+     | exception actual -> Alcotest.(check bool) "the identical entailment error escapes" true
+         (actual == error)))
+    [PredicateCallbackResult.Exc.Gillian_error
+       (OperationError "Incomplete totality proof: SMT returned unknown");
+     Gillian.Logic.Reduction.ReductionException (guard,"guard entailment control")];
+  Alcotest.(check int) "entailment errors stop before all heap production" 0 !unfold_core_calls
+
+
 module PinMemory = struct
   include Engine.SMemory.Dummy
   let mem_constraints _ = []
@@ -3469,4 +3536,7 @@ let tests =
       ("procedure explicit unfold preserves full domains and required errors", with_tracked_unfold procedure_unfold_domain_and_errors);
       ("procedure explicit unfold never supplies missing bindings", with_tracked_unfold procedure_unfold_missing_binding);
       ("procedure pruning preserves lemma and partial-mode behavior", with_tracked_unfold procedure_unfold_scope);
+      ("procedure unfold proves derived max-prefix guard before production", with_tracked_unfold procedure_unfold_derived_bound);
+      ("procedure unfold retains an unproved symbolic guard", with_tracked_unfold procedure_unfold_unproved_guard);
+      ("procedure unfold guard entailment preserves required errors", with_tracked_unfold procedure_unfold_entailment_errors);
     ]
