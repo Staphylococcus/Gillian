@@ -302,6 +302,20 @@ let check_expression ?(proof = false) ~require ~proves ~evaluate expr =
   in
   check (Expr.Lit (Bool true)) expr
 
+(* Optional provenance must not render a whole fact or interrupt the check. *)
+let production_fact_excerpt e =
+  let buffer = Buffer.create 128 and remaining = ref 384 in
+  let exception Full in
+  let formatter = Format.make_formatter (fun text offset length ->
+    let amount = min length !remaining in
+    Buffer.add_substring buffer text offset amount;
+    remaining := !remaining - amount;
+    if amount < length then raise Full) (fun () -> ()) in
+  let truncated = try Expr.pp formatter e; Format.pp_print_flush formatter (); false
+    with Full -> true | _ -> Buffer.clear buffer;
+      Buffer.add_string buffer "diagnostic formatting unavailable"; true in
+  (Buffer.contents buffer, truncated)
+
 (* Share domain rules with executed expressions, without changing legacy proof
    evaluation or assuming a missing domain to make a proof go through. *)
 let check_proof_expression ~context ~evaluate ~assertion expr =
@@ -309,10 +323,16 @@ let check_proof_expression ~context ~evaluate ~assertion expr =
     let proves condition = assertion (evaluate condition) in
     check_expression ~proof:true ~proves ~evaluate
       ~require:(fun partial condition ->
-        if not (proves condition) then
+        let evaluated = evaluate condition in
+        if not (assertion evaluated) then
+          let excerpt e =
+            let text, truncated = production_fact_excerpt e in
+            text ^ (if truncated then " [truncated]" else "")
+          in
           raise
             (Gillian_result.Exc.analysis_failure
-               (Fmt.str "%s is not proved defined: %a" context Expr.pp partial)))
+               (Fmt.str "%s is not proved defined: %s; required condition: %s; evaluated condition: %s"
+                  context (excerpt partial) (excerpt condition) (excerpt evaluated))))
       expr
 
 (* Attach obligations before any assertion rewriting or automatic unfolding.
@@ -343,20 +363,6 @@ let preserve_assertion_domains a =
     List.sort_uniq Stdlib.compare obligations @ a
 
 exception Pending_domain of Expr.t
-
-(* Optional provenance must not render a whole fact or interrupt the check. *)
-let production_fact_excerpt e =
-  let buffer = Buffer.create 128 and remaining = ref 384 in
-  let exception Full in
-  let formatter = Format.make_formatter (fun text offset length ->
-    let amount = min length !remaining in
-    Buffer.add_substring buffer text offset amount;
-    remaining := !remaining - amount;
-    if amount < length then raise Full) (fun () -> ()) in
-  let truncated = try Expr.pp formatter e; Format.pp_print_flush formatter (); false
-    with Full -> true | _ -> Buffer.clear buffer;
-      Buffer.add_string buffer "diagnostic formatting unavailable"; true in
-  (Buffer.contents buffer, truncated)
 
 (* Work on a disposable state. Only independently defined original facts may
    enter the domain context; an unchecked fact cannot justify itself or another

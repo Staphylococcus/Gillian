@@ -402,3 +402,73 @@ let tests = tests @
   [Alcotest.test_case "unclassified unfold diagnostic keeps scalar atom provenance" `Quick unfold_diagnostic_atom;
    Alcotest.test_case "unclassified unfold diagnostic caps output and stops its printer" `Quick unfold_diagnostic_bound;
    Alcotest.test_case "unclassified unfold diagnostic escapes text and isolates printer failure" `Quick unfold_diagnostic_escape_and_fail]
+
+let proof_domain_failure run =
+  match run () with
+  | () -> Alcotest.fail "undefined proof expression was accepted"
+  | exception Gillian.Utils.Gillian_result.Exc.Gillian_error (AnalysisFailures [{msg; _}]) -> msg
+
+let proof_domain_details () =
+  let expression = Expr.UnOp (NumberToUtf16, index) in
+  let condition = Expr.BinOp (Expr.true_, Impl, typ index Type.NumberType) in
+  let events = ref [] in
+  let gamma = Gamma.init () in
+  let evaluate e =
+    events := "evaluate" :: !events;
+    Alcotest.(check bool) "evaluate the original required condition" true (Expr.equal condition e);
+    Reduction.reduce_lexpr ~gamma e
+  in
+  let assertion e =
+    events := "assertion" :: !events;
+    match e with
+    | Expr.Lit (Bool answer) -> answer
+    | _ -> Alcotest.fail "typed domain condition did not reduce to a Boolean"
+  in
+  Gamma.update gamma "#domain_index" Type.UndefinedType;
+  let message = proof_domain_failure (fun () ->
+    Totality.check_proof_expression ~context:"Matched assertion" ~evaluate ~assertion expression) in
+  Alcotest.(check (list string)) "one evaluation then one assertion on failure"
+    ["evaluate"; "assertion"] (List.rev !events);
+  Alcotest.(check string) "report original and already evaluated conditions"
+    ("Matched assertion is not proved defined: " ^ Fmt.str "%a" Expr.pp expression ^
+     "; required condition: " ^ Fmt.str "%a" Expr.pp condition ^
+     "; evaluated condition: false") message;
+  events := [];
+  Gamma.update gamma "#domain_index" Type.NumberType;
+  Totality.check_proof_expression ~context:"Matched assertion" ~evaluate ~assertion expression;
+  Alcotest.(check (list string)) "successful domain uses the same callbacks"
+    ["evaluate"; "assertion"] (List.rev !events);
+  List.iter (fun raise_at ->
+    events := [];
+    let evaluate e = if raise_at = "evaluate" then
+        (events := "evaluate" :: !events; raise Required_unknown) else evaluate e in
+    let assertion e = if raise_at = "assertion" then
+        (events := "assertion" :: !events; raise Required_unknown) else assertion e in
+    Alcotest.check_raises "required callback exception escapes unchanged" Required_unknown
+      (fun () -> Totality.check_proof_expression ~context:"Matched assertion" ~evaluate ~assertion expression);
+    Alcotest.(check (list string)) "no retry after a required callback exception"
+      (if raise_at = "evaluate" then ["evaluate"] else ["evaluate"; "assertion"])
+      (List.rev !events)) ["evaluate"; "assertion"]
+
+let proof_domain_detail_bound () =
+  let calls = ref (0, 0) in
+  let evaluate _ = let e, a = !calls in calls := (e + 1, a); Expr.false_ in
+  let assertion e = let n, a = !calls in calls := (n, a + 1); Expr.equal e Expr.true_ in
+  let expression = Expr.UnOp (NumberToUtf16, Expr.LVar ("#domain_" ^ String.make 4096 'x')) in
+  let message = proof_domain_failure (fun () ->
+    Totality.check_proof_expression ~context:"Matched assertion" ~evaluate ~assertion expression) in
+  Alcotest.(check (pair int int)) "bounded failure still evaluates and asserts once" (1, 1) !calls;
+  Alcotest.(check bool) "three diagnostic scalars fit below2KiB" true (String.length message < 2048);
+  Alcotest.(check bool) "truncation remains explicit" true
+    (String.ends_with ~suffix:" [truncated]; evaluated condition: false" message);
+  calls := (0, 0);
+  let saved = !Config.Verification.total in
+  Config.Verification.total := false;
+  Fun.protect ~finally:(fun () -> Config.Verification.total := saved) (fun () ->
+    Totality.check_proof_expression ~context:"Matched assertion" ~evaluate ~assertion expression);
+  Alcotest.(check (pair int int)) "non-total path remains inactive" (0, 0) !calls
+
+let tests = tests @ List.map (fun (name, f) ->
+  Alcotest.test_case name `Quick (with_total f))
+  ["proof domain failure retains raw/evaluated conditions without retries", proof_domain_details;
+   "proof domain failure details are bounded and total-only", proof_domain_detail_bound]
