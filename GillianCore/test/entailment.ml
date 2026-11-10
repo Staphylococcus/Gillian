@@ -21535,3 +21535,53 @@ let tests = tests @
   (if Sys.getenv_opt "GILLIAN_SMT_COMPACT_AUDIT" = Some "1" then [
     Alcotest.test_case "fileless compact SMT audit preserves native results and UNKNOWN policy" `Quick
       (with_total compact_smt_audit)] else [])
+
+(* A defined indexed disjunction must survive refuting its list-domain goal.
+   Unlike a direct nth=value atom, the disjunction cannot immediately rewrite
+   the whole list to a known nonempty prefix during implication simplification.
+   These are public APIs and real native oracles, never an exception certificate. *)
+let valid_list_domain_entailment expected () =
+  let saved_under = !Config.under_approximation in
+  Config.under_approximation := false;
+  Fun.protect ~finally:(fun () -> Config.under_approximation := saved_under) (fun () ->
+    let e = Expr.LVar "#domain_E" and c = Expr.LVar "#domain_C"
+    and n = Expr.LVar "#domain_n" in
+    let gamma = Gamma.init () in
+    List.iter (fun (name,typ) -> Gamma.update gamma name typ)
+      ["#domain_E",Type.ListType; "#domain_C",Type.ListType; "#domain_n",Type.IntType];
+    let length list = Expr.UnOp (LstLen,list) in
+    let nth list = bin LstNth list (Expr.int 0) in
+    let facts = [bin ILessThan (Expr.int 0) n;
+      bin ILessThanEqual n (length e); bin ILessThanEqual n (length c);
+      bin Or (bin Equal (nth e) (Expr.Lit Undefined))
+        (bin ValueEqual (nth c) (nth e))] in
+    (* The first three retained facts independently establish both lookup
+       domains. A singleton undefined list with n=1 satisfies every premise. *)
+    let goal = if expected then not_ (bin Equal (length e) (Expr.int 0))
+      else bin ILessThanEqual (Expr.int 2) (length e) in
+    let original = Expr.Set.of_list facts and pfs = Engine.PFS.of_list facts in
+    let types = Gamma.as_hashtbl gamma in
+    let before = Engine.PFS.to_list pfs and before_types = nonblank_counter_types types in
+    Fun.protect ~finally:(fun () ->
+      Alcotest.(check bool) "caller premises survive public entailment or its exception" true
+        (List.equal Expr.equal before (Engine.PFS.to_list pfs));
+      Alcotest.(check bool) "caller Gamma survives native or public entailment" true
+        (before_types = nonblank_counter_types (Gamma.as_hashtbl gamma))) (fun () ->
+      Alcotest.(check bool) "original complete premises have an actual native SAT model" true
+        (Option.is_some (Smt.exec_sat ~caller_kind:"control-valid-list-domain-premises" original types));
+      let counterquery = Expr.Set.add (not_ goal) original in
+      Alcotest.(check bool) "original complete counterquery has the definite native answer" (not expected)
+        (Option.is_some (Smt.exec_sat ~caller_kind:"control-valid-list-domain-counterquery" counterquery types));
+      Printf.printf "VALID_LIST_DOMAIN_PUBLIC label=%s expected=%b\n%!"
+        (if expected then "nonempty" else "singleton-counterexample") expected;
+      Alcotest.(check bool) "actual public list-domain entailment" expected
+        (Solver.check_entailment Utils.Containers.SS.empty pfs [goal] gamma)))
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [
+       Alcotest.test_case "valid list domain preserves complete native nonempty entailment" `Quick
+         (with_total (valid_list_domain_entailment true));
+       Alcotest.test_case "valid list domain keeps native singleton counterexample rejected" `Quick
+         (with_total (valid_list_domain_entailment false))]
+   | _ -> [])
