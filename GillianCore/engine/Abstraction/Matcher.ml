@@ -899,19 +899,23 @@ module Make (State : SState.S) :
             (* Delayed pure production may retain false until the final
                admissibility check. Reject a proved-false explicit-unfold arm
                before a later core producer can lose its impossible state.
-               Optional substitution must not invent missing witnesses. *)
+               Optional substitution must not invent missing witnesses; an
+               exact held negation also proves this arm infeasible. *)
             let proved_false =
               match asrt with
               | Asrt.Pure formula when track_infeasible -> (
                   match subst_in_expr_opt intermediate_state subst formula with
-                  | Some reduced -> Expr.equal reduced Expr.false_
+                  | Some reduced ->
+                      Expr.equal reduced Expr.false_
+                      || PFS.mem (State.get_pfs intermediate_state.state)
+                           (Expr.negate reduced)
                   | None -> false)
               | _ -> false
             in
             if proved_false then
               Res_list.error_with
                 (StateErr.EInfeasibleUnfold
-                   "explicit unfold pure formula reduces to false")
+                   "explicit unfold pure formula is proved false")
             else try produce_assertion intermediate_state subst asrt with
             | err when track_infeasible -> raise err
             | e ->

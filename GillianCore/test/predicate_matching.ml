@@ -2995,6 +2995,23 @@ let unfold_policy_prunes_before_core () =
   expect "the checked policy and caller PFS remain unchanged" before
     (Engine.PFS.to_list (UnfoldState.get_pfs initial.state))
 
+let unfold_related_policy_is_live () =
+  let ps = Expr.LVar "#unfold_related_policy" in
+  let nonpositive = Expr.BinOp (ps, FLessThanEqual, Expr.num 0.) in
+  let negative = Expr.BinOp (ps, FLessThan, Expr.num 0.) in
+  let initial = unfold_empty () in
+  ignore (UnfoldState.assume_t initial.state ps Type.NumberType);
+  ignore (UnfoldState.assume_a ~production:true initial.state [nonpositive]);
+  let results = UnfoldMatcher.produce ~track_infeasible:true initial
+      (ReturnSubst.init [ps, ps])
+      [Asrt.Pure (Expr.UnOp (Not, negative)); Asrt.CorePred ("StageCell", [ps], [])] in
+  Alcotest.(check int) "a merely related bound does not skip core production" 1 !unfold_core_calls;
+  match results with
+  | [Ok state] ->
+      expect "the live zero-boundary policy keeps its exact heap" [[ps]]
+        (UnfoldState.get_heap state.UnfoldMatcher.state)
+  | _ -> Alcotest.fail "ps <= 0 does not contradict !(ps < 0)"
+
 let unfold_symbolic_and_errors () =
   let variable = Expr.LVar "#unfold_symbolic" in
   let formula = Expr.BinOp (variable, ILessThan, Expr.int 0) in
@@ -3270,4 +3287,5 @@ let tests =
       ("untracked and partial unfold production stay unchanged", with_tracked_unfold unfold_untracked_unchanged);
       ("tracked optional preflight preserves uncovered return production", with_tracked_unfold unfold_uncovered_return);
       ("tracked false pure never waives assertion domain checks", with_tracked_unfold unfold_domain_stays_first);
+      ("tracked unfold does not prune a merely related numeric fact", with_tracked_unfold unfold_related_policy_is_live);
     ]
