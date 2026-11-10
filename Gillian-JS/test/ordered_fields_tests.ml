@@ -1685,6 +1685,114 @@ let normalized_descriptor_false_prefix_setter () =
     (not (Gillian.Logic.FOSolver.check_satisfiability ~matching:true
       (Expr.true_ :: Gillian.Symbolic.Pure_context.to_list context.pfs) context.gamma))
 
+let defined_reference_data_presence () =
+  let context = pc () in
+  Gillian.Symbolic.Pure_context.extend context.pfs Expr.false_;
+  let descriptor value = Expr.EList
+      [ukey "d";value;Expr.true_;Expr.true_;Expr.true_] in
+  let unowned = Expr.ALoc "#defined_value_without_heap_ownership" in
+  check "an abstract-location leaf is defined without resolving or owning it"
+    (not (old_value_presence context (descriptor unowned))
+     && Legacy.ordered_values_present context.pfs context.gamma [descriptor unowned]);
+  List.iter (fun typ ->
+    let typed = pc () in
+    Gillian.Symbolic.Pure_context.extend typed.pfs Expr.false_;
+    Gillian.Symbolic.Type_env.update typed.gamma "#defined_data_leaf" typ;
+    let before = Gillian.Symbolic.Type_env.to_list typed.gamma
+    and facts = Gillian.Symbolic.Pure_context.to_list typed.pfs in
+    let value = descriptor (Expr.LVar "#defined_data_leaf") in
+    check "an existing non-Nono type supports a nested data value"
+      (not (old_value_presence typed value)
+       && Legacy.ordered_values_present typed.pfs typed.gamma [value]);
+    check "data presence neither infers types nor changes pure facts"
+      (Gillian.Symbolic.Type_env.to_list typed.gamma = before
+       && Gillian.Symbolic.Pure_context.to_list typed.pfs = facts))
+    [Type.ObjectType;Type.ListType;Type.NumberType;Type.IntType;
+     Type.BooleanType;Type.UndefinedType;Type.NullType;Type.EmptyType;
+     Type.StringType;Type.Utf16Type;Type.TypeType;Type.SetType]
+
+let defined_reference_data_fallback () =
+  let context = pc () in
+  Gillian.Symbolic.Pure_context.extend context.pfs Expr.false_;
+  Gillian.Symbolic.Type_env.update context.gamma "#absent_data_leaf" Type.NoneType;
+  Gillian.Symbolic.Type_env.update context.gamma "#known_data_leaf" Type.ObjectType;
+  Gillian.Symbolic.Type_env.update context.gamma "program_data_leaf" Type.ObjectType;
+  let list e = Expr.EList [ukey "d";e;Expr.true_;Expr.true_;Expr.true_] in
+  let unknown = Expr.LVar "#untyped_data_leaf" in
+  let before = Gillian.Symbolic.Type_env.to_list context.gamma
+  and facts = Gillian.Symbolic.Pure_context.to_list context.pfs in
+  let excluded = [unknown;Expr.LVar "#absent_data_leaf";Expr.PVar "program_data_leaf";
+    Expr.NOp (LstCat,[Expr.EList [];Expr.EList []]);
+    Expr.BinOp (Expr.EList [],LstNth,Expr.int (-1));
+    Expr.Lit (Literal.Constant Constant.Random);
+    Expr.Lit (Literal.Constant Constant.UTCTime);
+    Expr.Lit (Literal.Constant Constant.LocalTime)] in
+  let unchanged = List.map list excluded @
+    [Expr.EList [Expr.EList [unknown]];
+     Expr.EList [Expr.ALoc "#defined_sibling";unknown];
+     Expr.LVar "#known_data_leaf";Expr.ALoc "#direct_reference_keeps_fallback"] in
+  List.iter (fun value ->
+    let expected = old_value_presence context value in
+    check "excluded and direct-reference values keep the required old entailment"
+      (not expected
+       && Legacy.ordered_values_present context.pfs context.gamma [value] = expected)) unchanged;
+  check "failed eligibility neither installs a type nor changes a pure fact"
+    (Gillian.Symbolic.Type_env.to_list context.gamma = before
+     && Gillian.Symbolic.Pure_context.to_list context.pfs = facts);
+  let live = pc () in
+  Gillian.Symbolic.Type_env.update live.gamma "#known_data_leaf" Type.ObjectType;
+  let partial = Expr.BinOp (Expr.EList [],LstNth,Expr.int (-1)) in
+  let value = Expr.EList [Expr.LVar "#known_data_leaf";partial] in
+  let result run = try Ok (run ()) with
+    Gillian.Logic.Reduction.ReductionException (term,message) -> Error (term,message) in
+  let old = result (fun () -> old_value_presence live value) in
+  check "a typed sibling cannot hide the original partial-expression error"
+    (Result.is_error old
+     && result (fun () -> Legacy.ordered_values_present live.pfs live.gamma [value]) = old)
+
+let reference_descriptor_false_prefix_setter () =
+  List.iter (fun typed_reference ->
+    let context = pc () in
+    Gillian.Symbolic.Pure_context.extend context.pfs Expr.false_;
+    let items = if typed_reference then (
+      Gillian.Symbolic.Type_env.update context.gamma "#copied_items" Type.ObjectType;
+      Expr.LVar "#copied_items") else Expr.ALoc "#copied_items_value" in
+    let descriptor value = Expr.EList
+        [ukey "d";value;Expr.true_;Expr.true_;Expr.true_] in
+    let values = Expr.EList [descriptor items;descriptor (ukey "array")] in
+    let expected = [descriptor items;descriptor (ukey "array")] in
+    check "the authentic two-field descriptor shape reaches the presence gate"
+      (Legacy.ordered_list context.pfs context.gamma values = Some expected);
+    check "the old false-prefix entailment cannot supply this data-list fact"
+      (not (old_value_presence context (descriptor items)));
+    let original = Heap.init () in
+    Heap.set original loc_name Fields.empty None (Some metadata);
+    let frame = "#reference_data_frame" in
+    Heap.set original frame (Fields.add (ukey "kept") (Expr.int 7) Fields.empty)
+      (Some (Expr.ESet [ukey "kept"])) (Some metadata);
+    let before = snapshot original
+    and framed = Heap.get original frame
+    and facts = Gillian.Symbolic.Pure_context.to_list context.pfs
+    and gamma = Gillian.Symbolic.Type_env.to_list context.gamma in
+    let keys = ukeys ["items";"type"] in
+    let stored = produce ~context original keys values in
+    check "the exact reference, descriptors, key domain and metadata survive"
+      (match Heap.get stored loc_name with
+       | Some ((fields,Some domain),Some md) ->
+           Fields.field_names fields = [ukey "items";ukey "type"]
+           && Fields.get (ukey "items") fields = Some (descriptor items)
+           && Fields.get (ukey "type") fields = Some (descriptor (ukey "array"))
+           && domain = Expr.ESet [ukey "items";ukey "type"] && md = metadata
+       | _ -> false);
+    check "constructor production preserves source, frame, PFS and existing types"
+      (snapshot original = before && Heap.get stored frame = framed
+       && Gillian.Symbolic.Pure_context.to_list context.pfs = facts
+       && Gillian.Symbolic.Type_env.to_list context.gamma = gamma);
+    check "defined reference leaves do not certify a false prefix satisfiable"
+      (not (Gillian.Logic.FOSolver.check_satisfiability ~matching:true
+        (Expr.true_ :: Gillian.Symbolic.Pure_context.to_list context.pfs) context.gamma)))
+    [false;true]
+
 let () =
   Alcotest.run "Ordered fields"
     [
@@ -1775,5 +1883,8 @@ let () =
             ("literal data descriptor keeps whole-field ownership", literal_descriptor_roundtrip);
             ("normalized literal-list presence stays structural", normalized_literal_list_presence);
             ("normalized descriptor setter preserves false prefix", normalized_descriptor_false_prefix_setter);
+            ("defined reference data uses only existing types", defined_reference_data_presence);
+            ("unknown and partial data leaves retain required entailment", defined_reference_data_fallback);
+            ("typed-reference descriptors preserve whole-field ownership", reference_descriptor_false_prefix_setter);
           ] );
     ]

@@ -544,12 +544,18 @@ module M = struct
     collect Containers.SS.empty [] keys
 
   let ordered_values_present pfs gamma values =
-    let rec closed_literal_tree = function
+    let rec defined_data_tree = function
       | Expr.Lit (Literal.Constant _) -> false
       | Expr.Lit (Literal.LList literals) ->
-          List.for_all (fun literal -> closed_literal_tree (Expr.Lit literal)) literals
-      | Expr.Lit _ -> true
-      | Expr.EList children -> List.for_all closed_literal_tree children
+          List.for_all (fun literal -> defined_data_tree (Expr.Lit literal)) literals
+      | Expr.Lit _ | Expr.ALoc _ -> true
+      | Expr.LVar name -> (
+          (* Read an existing type only: do not infer it, resolve a location or
+             claim that the referenced heap object is owned. *)
+          match Type_env.get gamma name with
+          | None | Some Type.NoneType -> false
+          | Some _ -> true)
+      | Expr.EList children -> List.for_all defined_data_tree children
       | _ -> false
     in
     List.for_all
@@ -557,9 +563,11 @@ module M = struct
       (* Literal list and Nono are distinct constructors. This proves presence
          only, never pure-state satisfiability; final/UNKNOWN guards still apply. *)
       | Expr.Lit (Literal.LList _) -> true
-      (* ordered_list normalizes nested literal lists to EList. Admit only its
-         static literal trees, leaving constants and all expressions to entailment. *)
-      | (Expr.EList _ as value) when closed_literal_tree value -> true
+      (* A normalized data list is not Nono when all leaves are static values,
+         abstract locations or already-typed non-Nono logical variables. This
+         proves no ownership or prefix satisfiability. Other expressions retain
+         the required entailment/error/UNKNOWN path. *)
+      | (Expr.EList _ as value) when defined_data_tree value -> true
       | value ->
         FOSolver.check_entailment Containers.SS.empty pfs
           [ Expr.UnOp (Not, Expr.BinOp (value, Equal, Lit Nono)) ]
