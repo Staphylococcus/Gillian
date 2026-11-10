@@ -4013,7 +4013,9 @@ let definedness_exception_source_priority () =
       ~expected_files:["Reduction.ml";"FOSolver.ml";"Totality.ml"] output
     else Alcotest.(check string) "OFF records no real solver stack" "" output)
 
-let definedness_exception_sstate_fallback () =
+let definedness_exception_sstate_totality () =
+  (* The hook rethrows the saved SState error while Totality evaluates a proof
+     condition: retain the original throw and the real current Totality frame. *)
   let backtrace = Printexc.backtrace_status () in
   Printexc.record_backtrace true;
   Fun.protect ~finally:(fun () -> Printexc.record_backtrace backtrace) (fun () ->
@@ -4026,7 +4028,8 @@ let definedness_exception_sstate_fallback () =
           (definedness_scalar_atom (Expr.LVar "#successMapEntrySlot0") (Expr.LVar "#successMapCurrentSlot0"))
           (Failure "preserve the real saved SState exception") |> require_definedness_error) in
       if Sys.getenv_opt "GILLIAN_DEFINEDNESS_MATCH_EXCEPTION" = Some "1"
-      then definedness_exception_record ~expected_class:None ~expected_files:["SState.ml"] output
+      then definedness_exception_record ~expected_class:None
+        ~expected_files:["SState.ml";"Totality.ml"] output
       else Alcotest.(check string) "OFF keeps saved source stacks silent" "" output))
 
 let tests = tests @
@@ -4034,5 +4037,5 @@ let tests = tests @
       (with_total_return definedness_scalar_filter_and_class);
    Alcotest.test_case "definedness source selection keeps real FOSolver and Totality frames" `Quick
       (with_total_return definedness_exception_source_priority);
-   Alcotest.test_case "definedness source selection deduplicates throw and SState fallback" `Quick
-      (with_total_return definedness_exception_sstate_fallback)]
+   Alcotest.test_case "definedness source selection keeps distinct saved SState and active Totality frames" `Quick
+      (with_total_return definedness_exception_sstate_totality)]
