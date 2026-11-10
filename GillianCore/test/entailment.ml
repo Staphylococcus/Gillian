@@ -21617,3 +21617,41 @@ let tests = tests @
    | Some _,None -> [Alcotest.test_case "list bounds fallback preserves excluded-mode errors" `Quick
        list_bounds_fallback_excluded_modes]
    | _ -> [])
+
+(* Native encoding diagnostic only: these caller-chosen types do not identify
+   the Gamma of any runtime matching branch or establish a proof. *)
+let undefined_equality_native_encoding () =
+  let query label fs gamma expected =
+    let before = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    Fun.protect
+      ~finally:(fun () -> native_equality_control_retained label fs gamma before types)
+      (fun () ->
+        Printf.printf "UNDEFINED_EQUALITY_NATIVE label=%s expected=%s\n%!" label
+          (match expected with `Sat -> "sat" | `Unsat -> "unsat" | `Encoding_error _ -> "simple-wrap-error");
+        match expected with
+        | `Sat -> Alcotest.(check bool) (label ^ " has an actual required native SAT model") true
+            (Option.is_some (Smt.exec_sat fs gamma))
+        | `Unsat -> Alcotest.(check bool) (label ^ " is actually required native UNSAT") true
+            (Option.is_none (Smt.exec_sat fs gamma))
+        | `Encoding_error message ->
+            match Smt.exec_sat fs gamma with
+            | exception Smt.SMT_error actual when String.equal actual message -> ()
+            | _ -> Alcotest.fail (label ^ " must retain the exact simple-wrap encoding error"))
+  in
+  List.iter (fun (label,typ,expected) ->
+    let name = "#undefined_equality_native_" ^ label in
+    let gamma = Hashtbl.create 1 in
+    Option.iter (Hashtbl.add gamma name) typ;
+    query label (Expr.Set.singleton (bin Equal (Expr.LVar name) (Expr.Lit Undefined))) gamma expected)
+    ["untyped",None,`Sat;
+     "undefined",Some Type.UndefinedType,`Encoding_error "Cannot simple-wrap value of type Undefined";
+     "object",Some Type.ObjectType,`Unsat; "list",Some Type.ListType,`Unsat;
+     "null",Some Type.NullType,`Encoding_error "Cannot simple-wrap value of type Null"];
+  query "false-control" (Expr.Set.singleton Expr.false_) (Hashtbl.create 1) `Unsat;
+  Printf.printf "UNDEFINED_EQUALITY_DIAGNOSTIC=sat:1,unsat:3,simple-wrap-errors:2\n%!"
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [Alcotest.test_case "undefined equality retains native typed encoding distinctions" `Quick
+       (with_total undefined_equality_native_encoding)]
+   | _ -> [])
