@@ -19,6 +19,94 @@ let true_goal_false_excerpt e =
 
 (** **************** * SATISFIABILITY * * **************** **)
 
+let save_true_goal_false_input path ~matching ~existentials ~left ~right ~gamma =
+  let created = ref false and stage = ref "path" in
+  let note status bytes =
+    try prerr_endline (Printf.sprintf "\nTRUE_GOAL_FALSE_INPUT status=%s bytes=%d" status bytes)
+    with _ -> () in
+  let exception Limit in
+  try
+    let directory = Filename.dirname path in
+    let stat = Unix.lstat directory in
+    if Filename.is_relative path || Unix.realpath directory <> directory
+       || stat.Unix.st_kind <> Unix.S_DIR || stat.st_perm land 0o777 <> 0o700
+       || stat.st_uid <> Unix.geteuid () then invalid_arg "private input directory";
+    let mounts = open_in "/proc/self/mountinfo" in
+    let tmpfs = Fun.protect ~finally:(fun () -> close_in mounts) (fun () ->
+      let rec find () = match input_line mounts with
+        | line ->
+            let fields = String.split_on_char ' ' line in
+            let mounted = List.length fields > 6 && List.nth fields 4 = directory in
+            let rec filesystem = function
+              | "-" :: kind :: _ -> kind = "tmpfs" | _ :: rest -> filesystem rest | [] -> false in
+            (mounted && filesystem fields) || find ()
+        | exception End_of_file -> false in
+      find ()) in
+    if not tmpfs then invalid_arg "input requires a direct tmpfs mount";
+    stage := "encode";
+    let nodes = ref 65536 and characters = ref 65536 in
+    let spend budget amount = if amount > !budget then raise Limit else budget := !budget - amount in
+    let visitor = object
+      inherit [_] Visitors.iter as super
+      method! visit_expr () e = spend nodes 1; super#visit_expr () e
+      method! visit_literal () literal =
+        spend nodes 1;
+        (match literal with
+        | Literal.Utf16String value -> spend characters (String.length (Utils.Utf16.to_canonical value))
+        | Literal.Int value ->
+            if Z.numbits value > 262144 then raise Limit;
+            spend characters (String.length (Z.to_string value))
+        | _ -> ());
+        super#visit_literal () literal
+      method! visit_string : 'env. 'env -> string -> unit =
+        fun _ value -> spend characters (String.length value)
+    end in
+    let rec floats encode = function
+      | `Float value when encode ->
+          `Assoc ["float64-bits", `String (Printf.sprintf "%016Lx" (Int64.bits_of_float value))]
+      | `Assoc ["float64-bits", `String bits] when not encode ->
+          `Float (Int64.float_of_bits (Int64.of_string ("0x" ^ bits)))
+      | `List values -> `List (List.map (floats encode) values)
+      | `Assoc fields -> `Assoc (List.map (fun (key, value) -> key, floats encode value) fields)
+      | value -> value in
+    let expression e =
+      visitor#visit_expr () e;
+      let json = floats true (Expr.to_yojson e) in
+      (match Expr.of_yojson (floats false json) with
+      | Ok decoded when Expr.equal decoded e -> ()
+      | _ -> invalid_arg "expression roundtrip");
+      json in
+    let types = Type_env.to_list gamma in
+    let document = `Assoc [
+      "format", `String "gillian-entailment-input-v1";
+      "matching", `Bool matching; "total", `Bool !Config.Verification.total;
+      "under", `Bool !Config.under_approximation;
+      "existentials", `List (List.map (fun name ->
+        spend characters (String.length name); `String name) (SS.elements existentials));
+      "left", `List (List.map expression (PFS.to_list left));
+      "right", `List (List.map expression right);
+      "gamma", `List (List.map (fun (name, typ) ->
+        spend characters (String.length name);
+        (match typ with Type.DatatypeType name -> spend characters (String.length name) | _ -> ());
+        let json = Type.to_yojson typ in
+        (match Type.of_yojson json with Ok decoded when Type.equal decoded typ -> ()
+         | _ -> invalid_arg "type roundtrip");
+        `List [`String name; json]) types)] in
+    let payload = Yojson.Safe.to_string document in
+    if String.length payload > 65536 then raise Limit;
+    stage := "roundtrip";
+    if Yojson.Safe.from_string payload <> document then invalid_arg "input roundtrip";
+    stage := "open";
+    let channel = open_out_gen [Open_wronly; Open_creat; Open_excl; Open_binary] 0o600 path in
+    created := true;
+    stage := "write";
+    Fun.protect ~finally:(fun () -> close_out channel)
+      (fun () -> output_string channel payload; flush channel);
+    note "saved" (String.length payload)
+  with error ->
+    if !created then (try Sys.remove path with _ -> ());
+    note (match error with Limit -> "oversize" | _ -> !stage) 0
+
 let get_axioms (fs : Expr.Set.t) (_ : Type_env.t) : Expr.Set.t =
   Expr.Set.fold
     (fun (pf : Expr.t) (result : Expr.Set.t) ->
@@ -1110,6 +1198,11 @@ let check_entailment_simplified
     then Some (PFS.mem left_fs Expr.false_, ref None)
     else None
   in
+  let save_original_input = match false_diagnostic with
+    | None -> None
+    | Some _ -> Option.map (fun path () ->
+        save_true_goal_false_input path ~matching ~existentials ~left:left_fs ~right:right_fs ~gamma)
+        (Sys.getenv_opt "GILLIAN_TRUE_GOAL_FALSE_INPUT") in
   let on_false = Option.map (fun (_, first) reason pair ->
     if Option.is_none !first then (
       let length = min 256 (String.length reason) in
@@ -1181,6 +1274,7 @@ let check_entailment_simplified
 
   (* If left side is false, return false *)
   if List.mem Expr.false_ (left_fs @ right_fs) then (
+    Option.iter (fun save -> try save () with _ -> ()) save_original_input;
     (match false_diagnostic with
     | None -> ()
     | Some (entry_has_false, first) ->

@@ -21714,3 +21714,204 @@ let tests = tests @
    | Some _,None -> [Alcotest.test_case "singleton variables preserve native identity scoping and model lifting" `Quick
        (with_total singleton_variable_native_controls)]
    | _ -> [])
+
+(* One private RAM input, not a query archive. Decoding never supplies missing
+   runtime declarations or guesses a type. Fresh replay has cold caches. *)
+let read_true_goal_false_input path =
+  let reject () = invalid_arg "invalid private entailment input" in
+  let directory = Filename.dirname path in
+  let parent = Unix.lstat directory and file = Unix.lstat path in
+  if Filename.is_relative path || Unix.realpath directory <> directory
+     || parent.Unix.st_kind <> Unix.S_DIR || parent.st_perm land 0o777 <> 0o700
+     || parent.st_uid <> Unix.geteuid () || file.Unix.st_kind <> Unix.S_REG
+     || file.st_perm land 0o777 <> 0o600 || file.st_uid <> Unix.geteuid ()
+     || file.st_nlink <> 1 || file.st_size < 1 || file.st_size > 65536 then reject ();
+  let channel = open_in_bin path in
+  let identity (stat : Unix.stats) =
+    (stat.st_dev,stat.st_ino,stat.st_kind,stat.st_perm,stat.st_nlink,
+     stat.st_uid,stat.st_gid,stat.st_size,stat.st_mtime,stat.st_ctime) in
+  let json = Fun.protect ~finally:(fun () -> close_in channel) (fun () ->
+    let current = Unix.fstat (Unix.descr_of_in_channel channel) in
+    if identity current <> identity file then reject ();
+    let text = really_input_string channel file.st_size in
+    if identity (Unix.fstat (Unix.descr_of_in_channel channel)) <> identity file then reject ();
+    Yojson.Safe.from_string text) in
+  let fields = match json with `Assoc fields -> fields | _ -> reject () in
+  let keys = ["format";"matching";"total";"under";"existentials";"left";"right";"gamma"] in
+  if List.sort String.compare (List.map fst fields) <> List.sort String.compare keys then reject ();
+  let field name = List.assoc name fields in
+  let boolean name = match field name with `Bool value -> value | _ -> reject () in
+  let string = function `String value -> value | _ -> reject () in
+  let list = function `List values -> values | _ -> reject () in
+  if field "format" <> `String "gillian-entailment-input-v1" then reject ();
+  let rec floats = function
+    | `Assoc ["float64-bits", `String bits] ->
+        if String.length bits <> 16 || not (String.for_all (function
+          | '0'..'9' | 'a'..'f' -> true | _ -> false) bits) then reject ();
+        `Float (Int64.float_of_bits (Int64.of_string ("0x" ^ bits)))
+    | `Float _ -> reject ()
+    | `List values -> `List (List.map floats values)
+    | `Assoc fields -> `Assoc (List.map (fun (key,value) -> key,floats value) fields)
+    | value -> value in
+  let typ json = match Type.of_yojson json with Ok value -> value | Error _ -> reject () in
+  let expression json = match Expr.of_yojson (floats json) with
+    | Ok value -> value | Error _ -> reject () in
+  let exists = List.map string (list (field "existentials")) in
+  if List.length exists <> List.length (List.sort_uniq String.compare exists) then reject ();
+  let gamma = Gamma.init () in
+  List.iter (function
+    | `List [name;value] -> let name = string name in
+        if Gamma.mem gamma name then reject ();
+        Gamma.update gamma name (typ value)
+    | _ -> reject ()) (list (field "gamma"));
+  (boolean "matching", boolean "total", boolean "under",
+   Utils.Containers.SS.of_list exists,
+   List.map expression (list (field "left")), List.map expression (list (field "right")), gamma)
+
+let replay_true_goal_false_input path () =
+  let matching,total,under,existentials,facts,right,gamma = read_true_goal_false_input path in
+  if not total || under || not (Utils.Containers.SS.is_empty existentials)
+     || not (List.equal Expr.equal right [Expr.true_]) then
+    invalid_arg "input is outside the selected true-goal failure";
+  let largest = ref (-1) in
+  let name value =
+    if String.starts_with ~prefix:"#lvar_" value then
+      match int_of_string_opt (String.sub value 6 (String.length value - 6)) with
+      | Some index when index >= 0 ->
+          if index > 1000000 then invalid_arg "replay fresh-name reservation is too large";
+          largest := max !largest index
+      | _ -> () in
+  let builtin_type = function Type.DatatypeType _ ->
+    invalid_arg "replay requires unavailable runtime datatype declarations" | _ -> () in
+  let visitor = object
+    inherit [_] Visitors.iter as super
+    method! visit_LVar () value = name value
+    method! visit_PVar () value = name value
+    method! visit_ALoc () value = name value
+    method! visit_literal () literal =
+      (match literal with Literal.Type value -> builtin_type value | _ -> ());
+      super#visit_literal () literal
+    method! visit_expr () expression =
+      (match expression with
+      | Expr.ConstructorApp _ | Expr.FuncApp _ | Expr.Cases _ ->
+          invalid_arg "replay requires unavailable runtime expression declarations"
+      | Expr.Exists (binders,_) | Expr.ForAll (binders,_) ->
+          List.iter (fun (value,typ) -> name value; Option.iter builtin_type typ) binders
+      | _ -> ());
+      super#visit_expr () expression
+  end in
+  List.iter (visitor#visit_expr ()) (facts @ right);
+  List.iter (fun (value,typ) -> name value; builtin_type typ) (Gamma.to_list gamma);
+  (* Do not reset the allocator or rename captured variables. Reserve all
+     captured allocated names, including quantified and unused Gamma names. *)
+  let rec reserve () =
+    let allocated = LVar.alloc () in
+    if int_of_string (String.sub allocated 6 (String.length allocated - 6)) <= !largest then reserve () in
+  reserve ();
+  let pfs = Engine.PFS.of_list facts in
+  let types = nonblank_counter_types (Gamma.as_hashtbl gamma) in
+  let saved_total = !Config.Verification.total and saved_under = !Config.under_approximation in
+  Fun.protect ~finally:(fun () ->
+    Config.Verification.total := saved_total; Config.under_approximation := saved_under;
+    Alcotest.(check bool) "replay preserves complete caller fact order and float bits" true
+      (List.equal Expr.equal facts (Engine.PFS.to_list pfs));
+    Alcotest.(check bool) "replay preserves every caller Gamma binding" true
+      (types = nonblank_counter_types (Gamma.as_hashtbl gamma))) (fun () ->
+    Config.Verification.total := total; Config.under_approximation := under;
+    Smt.clear_query_caches (); Gillian.Logic.Simplifications.clear_cache ();
+    let stage = ref "native-original-premises" in
+    try
+      Printf.printf "TRUE_GOAL_FALSE_REPLAY stage=%s cache=cold proof=false\n%!" !stage;
+      let sat = Option.is_some (Smt.exec_sat ~caller_kind:"diagnostic-original-entailment-premises"
+        (Expr.Set.of_list facts) (Gamma.as_hashtbl (Gamma.copy gamma))) in
+      Printf.printf "TRUE_GOAL_FALSE_REPLAY nativePremises=%s\n%!" (if sat then "sat" else "unsat");
+      stage := "public-entailment";
+      let answer = Solver.check_entailment ~matching existentials pfs right gamma in
+      Printf.printf "TRUE_GOAL_FALSE_REPLAY public=%b capturedFalse=%b satPremiseCounterexample=%b proof=false\n%!"
+        answer (not answer) (sat && not answer);
+      Alcotest.(check bool) "actual public call reproduces the captured false result" false answer
+    with error ->
+      Printf.eprintf "\nTRUE_GOAL_FALSE_REPLAY stage=%s errorClass=%s proof=false\n%!"
+        !stage (Printexc.exn_slot_name error);
+      raise error)
+
+let true_goal_false_capture_controls () =
+  if Sys.getenv_opt "GILLIAN_TRUE_GOAL_FALSE_DIAGNOSTIC" <> Some "1" then
+    invalid_arg "capture controls require the existing diagnostic flag";
+  let directory = Sys.getenv "GILLIAN_TRUE_GOAL_FALSE_TEST_DIR" in
+  let path = Filename.concat directory "entailment-control.json" in
+  if Sys.file_exists path then invalid_arg "control path must start absent";
+  let key = "GILLIAN_TRUE_GOAL_FALSE_INPUT" in
+  let previous = Sys.getenv_opt key in
+  let saved_under = !Config.under_approximation and saved_total = !Config.Verification.total in
+  let read () = let channel = open_in_bin path in
+    Fun.protect ~finally:(fun () -> close_in channel)
+      (fun () -> really_input_string channel (in_channel_length channel)) in
+  Fun.protect ~finally:(fun () ->
+    Unix.putenv key (Option.value ~default:"" previous);
+    Config.under_approximation := saved_under; Config.Verification.total := saved_total;
+    if Sys.file_exists path then Sys.remove path) (fun () ->
+    Unix.putenv key path; Config.Verification.total := true; Config.under_approximation := false;
+    let bits = [0L;Int64.min_int;0x7ff8000000000001L;0xfff8000000000042L] in
+    let numbers = List.map (fun bits -> Expr.num (Int64.float_of_bits bits)) bits in
+    let facts = [Expr.false_; bin ValueEqual (Expr.EList numbers) (Expr.EList numbers); Expr.true_] in
+    let gamma = Gamma.init () in
+    Gamma.update gamma "#capture_unused" Type.NumberType;
+    Gamma.update gamma "#capture_ordered" Type.ListType;
+    let pfs = Engine.PFS.of_list facts and types = Gamma.to_list gamma in
+    let run ?(matching=true) ?(exists=Utils.Containers.SS.empty) right =
+      Fun.protect ~finally:(fun () ->
+        Alcotest.(check bool) "capture preserves original ordered caller facts" true
+          (List.equal Expr.equal facts (Engine.PFS.to_list pfs));
+        Alcotest.(check bool) "capture preserves unused Gamma bindings" true (types = Gamma.to_list gamma))
+        (fun () -> Alcotest.(check bool) "observation preserves false-premise rejection" false
+          (Solver.check_entailment ~matching exists pfs right gamma)) in
+    run [Expr.true_];
+    let original = read () in
+    let matching,total,under,exists,left,right,decoded = read_true_goal_false_input path in
+    Alcotest.(check bool) "complete selected input roundtrips without losing order or Gamma" true
+      (matching && total && not under && Utils.Containers.SS.is_empty exists
+       && List.equal Expr.equal facts left && List.equal Expr.equal right [Expr.true_]
+       && List.sort compare types = List.sort compare (Gamma.to_list decoded));
+    let actual_bits = match left with
+      | [_;Expr.BinOp (Expr.EList values,ValueEqual,_);_] ->
+          List.map (function Expr.Lit (Num value) -> Int64.bits_of_float value
+            | _ -> Alcotest.fail "missing captured numeric literal") values
+      | _ -> Alcotest.fail "changed original fact topology" in
+    Alcotest.(check bool) "raw positive/negative zero and both NaN payloads survive" true (bits = actual_bits);
+    run [Expr.true_];
+    Alcotest.(check string) "exclusive capture cannot replace an existing input" original (read ());
+    Sys.remove path;
+    let rejected label run = run (); Alcotest.(check bool) label false (Sys.file_exists path) in
+    rejected "other right side cannot capture" (fun () -> run [Expr.false_]);
+    rejected "partial-mode false result cannot capture" (fun () ->
+      Config.Verification.total := false; run [Expr.true_]; Config.Verification.total := true);
+    rejected "under-approximation cannot capture" (fun () ->
+      Config.under_approximation := true; run [Expr.true_]; Config.under_approximation := false);
+    rejected "existential caller cannot capture" (fun () ->
+      run ~exists:(Utils.Containers.SS.singleton "#capture_exists") [Expr.true_]);
+    let huge = Expr.Lit (Literal.String (String.make 65537 'x')) in
+    let large = Engine.PFS.of_list [Expr.false_;bin ValueEqual huge huge] in
+    Alcotest.(check bool) "oversized input keeps the original false result" false
+      (Solver.check_entailment Utils.Containers.SS.empty large [Expr.true_] (Gamma.init ()));
+    Alcotest.(check bool) "oversized input never creates a truncated file" false (Sys.file_exists path);
+    (* Reject duplicate bindings rather than changing Hashtbl lookup semantics. *)
+    let json = match Yojson.Safe.from_string original with `Assoc fields -> `Assoc
+      (List.map (fun (key,value) -> key,if key="gamma" then match value with
+        | `List (first::rest) -> `List (first::first::rest) | _ -> value else value) fields)
+      | _ -> Alcotest.fail "missing input object" in
+    let channel = open_out_gen [Open_wronly;Open_creat;Open_excl;Open_binary] 0o600 path in
+    Fun.protect ~finally:(fun () -> close_out channel)
+      (fun () -> output_string channel (Yojson.Safe.to_string json));
+    Alcotest.(check bool) "decoder refuses duplicate Gamma names" true
+      (try ignore (read_true_goal_false_input path); false with Invalid_argument _ -> true);
+    Printf.printf "TRUE_GOAL_FALSE_CAPTURE_CONTROLS=complete proof=false\n%!")
+
+let tests = tests @
+  (if Sys.getenv_opt "GILLIAN_TRUE_GOAL_FALSE_CAPTURE_TEST" = Some "1" then
+    [Alcotest.test_case "private exact entailment input codec write and selected gates" `Quick
+      true_goal_false_capture_controls] else []) @
+  (match Sys.getenv_opt "GILLIAN_TRUE_GOAL_FALSE_REPLAY", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some path,None -> [Alcotest.test_case "replay exact captured true-goal false input with native premise oracle" `Quick
+       (replay_true_goal_false_input path)]
+   | _ -> [])
