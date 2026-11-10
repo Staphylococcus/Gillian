@@ -1557,12 +1557,19 @@ let rejection_diagnostic_effects () = with_rejection_diagnostic (fun () ->
       (Expr.BinOp (Expr.LVar "#diagnostic_count",Equal,Expr.int 7));
     context in
   let sequence = sequence_context () in
+  let opaque = sequence_make sequence in
+  check "the collision fixture really holds opaque OrderedFields"
+    (Heap.get_ordered opaque loc_name = Some (sequence_keys,sequence_values));
+  check "the collision fixture forbids a raw-field observation"
+    (try ignore (Heap.get opaque loc_name); false
+     with Gillian.Utils.Gillian_result.Exc.Gillian_error (OperationError text) ->
+       text = "Unsupported ordered fields: operation requires exposed cells.");
   let cases = [
     Heap.init (), alias_context (), keys [], Expr.EList [Expr.num 1.];
     Heap.init (), pc (), keys ["10";"2"], values;
     Heap.init (), pc (), keys ["a"], Expr.EList [Expr.Lit Literal.Nono];
     make (), pc (), keys ["z";"a"], values;
-    sequence_make sequence, sequence, sequence_keys, sequence_values] in
+    opaque, sequence, sequence_keys, sequence_values] in
   let unsat = pc () in
   Gillian.Symbolic.Pure_context.extend unsat.pfs Expr.false_;
   List.iter (fun (heap, context, ks, vs) ->

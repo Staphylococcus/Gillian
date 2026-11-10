@@ -873,16 +873,19 @@ module M = struct
           | None -> Unobserved, None, None, None
           | Some (name, fresh) ->
               let root = if fresh then Fresh else match loc with
-                | ALoc own when own = name -> Direct_aloc
-                | Lit (Loc own) when own = name -> Direct_loc
-                | ALoc _ -> Aloc_alias | Lit (Loc _) -> Loc_alias
-                | LVar _ -> Lvar_alias | _ -> Other_alias in
+                | Expr.ALoc own when own = name -> Direct_aloc
+                | Expr.Lit (Literal.Loc own) when own = name -> Direct_loc
+                | Expr.ALoc _ -> Aloc_alias | Expr.Lit (Literal.Loc _) -> Loc_alias
+                | Expr.LVar _ -> Lvar_alias | _ -> Other_alias in
               let ordered = Option.is_some (SHeap.get_ordered heap name) in
-              let fields, domain = match SHeap.get heap name with
-                | None -> false, false
+              (* Raw fields are intentionally inaccessible under an opaque
+                 OrderedFields owner. Observation must not request exposure. *)
+              let fields, domain = if ordered then None, None else
+                match SHeap.get heap name with
+                | None -> Some false, Some false
                 | Some ((fields, domain), _) ->
-                    not (SFVL.is_empty fields), Option.is_some domain in
-              root, Some ordered, Some fields, Some domain in
+                    Some (not (SFVL.is_empty fields)), Some (Option.is_some domain) in
+              root, Some ordered, fields, domain in
         L.normal (fun m -> m "%s"
           (message reason root occupied ordered fields domain sat)))
   end
