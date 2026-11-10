@@ -413,7 +413,7 @@ let proof_domain_details () =
   let condition = Expr.BinOp (Expr.true_, Impl, typ index Type.NumberType) in
   let events = ref [] in
   let gamma = Gamma.init () in
-  let evaluate e =
+  let evaluate gamma e =
     events := "evaluate" :: !events;
     Alcotest.(check bool) "evaluate the original required condition" true (Expr.equal condition e);
     Reduction.reduce_lexpr ~gamma e
@@ -426,7 +426,7 @@ let proof_domain_details () =
   in
   Gamma.update gamma "#domain_index" Type.UndefinedType;
   let message = proof_domain_failure (fun () ->
-    Totality.check_proof_expression ~context:"Matched assertion" ~evaluate ~assertion expression) in
+    Totality.check_proof_expression ~context:"Matched assertion" ~evaluate:(evaluate gamma) ~assertion expression) in
   Alcotest.(check (list string)) "one evaluation then one assertion on failure"
     ["evaluate"; "assertion"] (List.rev !events);
   Alcotest.(check string) "report original and already evaluated conditions"
@@ -434,14 +434,15 @@ let proof_domain_details () =
      "; required condition: " ^ Fmt.str "%a" Expr.pp condition ^
      "; evaluated condition: false") message;
   events := [];
-  Gamma.update gamma "#domain_index" Type.NumberType;
-  Totality.check_proof_expression ~context:"Matched assertion" ~evaluate ~assertion expression;
+  let valid_gamma = Gamma.init () in
+  Gamma.update valid_gamma "#domain_index" Type.NumberType;
+  Totality.check_proof_expression ~context:"Matched assertion" ~evaluate:(evaluate valid_gamma) ~assertion expression;
   Alcotest.(check (list string)) "successful domain uses the same callbacks"
     ["evaluate"; "assertion"] (List.rev !events);
   List.iter (fun raise_at ->
     events := [];
     let evaluate e = if raise_at = "evaluate" then
-        (events := "evaluate" :: !events; raise Required_unknown) else evaluate e in
+        (events := "evaluate" :: !events; raise Required_unknown) else evaluate valid_gamma e in
     let assertion e = if raise_at = "assertion" then
         (events := "assertion" :: !events; raise Required_unknown) else assertion e in
     Alcotest.check_raises "required callback exception escapes unchanged" Required_unknown
