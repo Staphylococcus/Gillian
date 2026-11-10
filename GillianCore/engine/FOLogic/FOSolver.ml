@@ -1188,13 +1188,13 @@ let check_entailment_simplified
       let goal_subst, _ =
         Simplifications.simplify_pfs_and_gamma formulae gamma_left
       in
-      (* Shortcut selectors must use the goal in the simplified conjunction.
-         This only updates selection metadata: every sufficient query still
-         consists of retained facts and requires native UNSAT; the complete
-         fallback below is unchanged. *)
+      (* Keep the substituted goal as shortcut-selection metadata only.
+         Refuting a domain can substitute an empty list into this expression;
+         reducing it separately can throw before the complete query reaches SMT.
+         Every sufficient query still requires native UNSAT, and the complete
+         formulae and fallback below remain unchanged. *)
       let right_f =
         SESubst.subst_in_expr goal_subst ~partial:true right_f
-        |> Reduction.reduce_lexpr ~matching ~gamma:gamma_left
       in
       let formulae = Expr.Set.of_list (PFS.to_list formulae) in
       let focused =
