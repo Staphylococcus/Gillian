@@ -3818,3 +3818,135 @@ let tests =
       ("procedure type cut preserves required errors beside conflicts", with_tracked_unfold procedure_unfold_type_cut_preserves_required_errors);
       ("procedure type cut preserves all-empty lemma and partial behavior", with_tracked_unfold procedure_unfold_type_cut_scope_and_all_empty);
     ]
+
+(* Real matching catch, with no solver or synthetic proof result: the evaluator
+   throws before a definedness request can query the state. No public test API. *)
+let definedness_match_error = ref None
+module DefinednessExceptionState = struct
+  include ReturnState
+  let eval_expr state expression =
+    Option.iter raise !definedness_match_error;
+    ReturnState.eval_expr state expression
+end
+module DefinednessExceptionMatcher = Engine.Matcher.Make (DefinednessExceptionState)
+
+let captured_definedness_exception ?(printer_fails = false) action =
+  let formatter = Fmt.stdout in
+  Format.pp_print_flush formatter ();
+  let previous = Format.pp_get_formatter_out_functions formatter () in
+  let output = Buffer.create 128 and writes = ref 0 in
+  let functions = { previous with
+    out_string = (fun text offset length ->
+      incr writes;
+      if printer_fails then failwith "diagnostic printer failure";
+      Buffer.add_substring output text offset length);
+    out_flush = (fun () -> ());
+    out_newline = (fun () -> Buffer.add_char output '\n') } in
+  Format.pp_set_formatter_out_functions formatter functions;
+  Fun.protect
+    ~finally:(fun () -> Format.pp_set_formatter_out_functions formatter previous)
+    (fun () ->
+      let value = action () in
+      Format.pp_print_flush formatter ();
+      (value, Buffer.contents output, !writes))
+
+let definedness_exception_atom entry before =
+  let nth expression = Expr.BinOp (expression, LstNth, Expr.int 0) in
+  Asrt.definedness ~fact:true (Expr.BinOp (
+    BinOp (nth entry, Equal, Expr.Lit Undefined), Or,
+    BinOp (nth before, ValueEqual, nth entry)))
+
+let run_definedness_exception atom error =
+  let initial = return_state () in
+  let state : DefinednessExceptionMatcher.t = {
+    state = initial.state; preds = initial.preds; wands = initial.wands;
+    pred_defs = initial.pred_defs } in
+  let before = (Preds.to_list state.preds,
+    Engine.PFS.to_list (ReturnState.get_pfs state.state),
+    Engine.Type_env.to_list (ReturnState.get_typ_env state.state)) in
+  let old = !definedness_match_error in
+  definedness_match_error := Some error;
+  Fun.protect ~finally:(fun () -> definedness_match_error := old) (fun () ->
+    let tuple = Expr.EList [Expr.Lit Undefined] in
+    let subst = ReturnSubst.init [Expr.PVar "entryCopied", tuple;
+      Expr.PVar "successMapBefore", tuple] in
+    let result = DefinednessExceptionMatcher.match_ state subst
+        (Engine.MP.of_step_list [atom, []]) Engine.Matcher.Invariant in
+    expect "diagnostic matching never changes caller predicates PFS or Gamma" before
+      (Preds.to_list state.preds,
+       Engine.PFS.to_list (ReturnState.get_pfs state.state),
+       Engine.Type_env.to_list (ReturnState.get_typ_env state.state));
+    result)
+
+let require_definedness_error = function
+  | [Error (Engine.StateErr.EOther _)] -> ()
+  | _ -> Alcotest.fail "ordinary evaluator exception must retain the original matching Error"
+
+let definedness_exception_record output =
+  let lines = String.split_on_char '\n' output |> List.filter ((<>) "") in
+  let prefix = "DEFINEDNESS_MATCH_EXCEPTION " in
+  match lines with
+  | [line] when String.starts_with ~prefix line ->
+      Alcotest.(check bool) "complete record stays below2KiB" true (String.length line <= 2048);
+      let json = Yojson.Safe.from_string
+          (String.sub line (String.length prefix) (String.length line - String.length prefix)) in
+      let open Yojson.Safe.Util in
+      Alcotest.(check string) "class excludes the exception payload" "Failure"
+        (json |> member "exceptionClass" |> to_string);
+      Alcotest.(check bool) "case remains unavailable" false
+        (json |> member "exactCaseIDAvailable" |> to_bool);
+      Alcotest.(check bool) "observation grants no proof credit" false
+        (json |> member "proofCredit" |> to_bool);
+      Alcotest.(check bool) "at most three source locations" true
+        (List.length (json |> member "sourceFrames" |> to_list) <= 3)
+  | _ -> Alcotest.fail "expected exactly one bounded exception-class record"
+
+let definedness_exception_filter_and_first () =
+  let entry = Expr.PVar "entryCopied" and before = Expr.PVar "successMapBefore" in
+  let old_backtrace = Printexc.backtrace_status () in
+  Printexc.record_backtrace true;
+  Fun.protect ~finally:(fun () -> Printexc.record_backtrace old_backtrace) (fun () ->
+    let _, output, _ = captured_definedness_exception (fun () ->
+      List.iter (fun atom -> run_definedness_exception atom (Failure "filtered")
+        |> require_definedness_error)
+        [definedness_exception_atom entry (Expr.PVar "other");
+         definedness_exception_atom (Expr.LVar "entryCopied") (Expr.LVar "successMapBefore")];
+      List.iter (fun message ->
+        run_definedness_exception (definedness_exception_atom entry before) (Failure message)
+        |> require_definedness_error) [String.make 65536 '\255'; "second private message"])
+    in
+    if Sys.getenv_opt "GILLIAN_DEFINEDNESS_MATCH_EXCEPTION" = Some "1"
+    then definedness_exception_record output
+    else Alcotest.(check string) "OFF leaves stdout exact" "" output)
+
+let definedness_exception_printer_isolation () =
+  let _, _, writes = captured_definedness_exception ~printer_fails:true (fun () ->
+    run_definedness_exception
+      (definedness_exception_atom (Expr.PVar "entryCopied") (Expr.PVar "successMapBefore"))
+      (Failure "original evaluator failure") |> require_definedness_error) in
+  Alcotest.(check bool) "only ON attempts diagnostic formatting"
+    (Sys.getenv_opt "GILLIAN_DEFINEDNESS_MATCH_EXCEPTION" = Some "1") (writes > 0)
+
+let definedness_exception_required_errors () =
+  let atom = definedness_exception_atom (Expr.PVar "entryCopied") (Expr.PVar "successMapBefore") in
+  let _, output, _ = captured_definedness_exception (fun () ->
+    List.iter (fun error ->
+      match run_definedness_exception atom error with
+      | _ -> Alcotest.fail "required operation/internal error must escape the catch"
+      | exception actual ->
+          Alcotest.(check bool) "required error object is unchanged" true (actual == error))
+      [PredicateCallbackResult.Exc.analysis_failure "required SMT unknown";
+       PredicateCallbackResult.Exc.internal_error "required internal error"];
+    run_definedness_exception atom (Failure "first actual ordinary exception")
+      |> require_definedness_error) in
+  if Sys.getenv_opt "GILLIAN_DEFINEDNESS_MATCH_EXCEPTION" = Some "1"
+  then definedness_exception_record output
+  else Alcotest.(check string) "OFF keeps required-error bypass silent" "" output
+
+let tests = tests @
+  [Alcotest.test_case "definedness exception observation filters caps and emits first only" `Quick
+      (with_total_return definedness_exception_filter_and_first);
+   Alcotest.test_case "definedness exception printer failure preserves original matching error" `Quick
+      (with_total_return definedness_exception_printer_isolation);
+   Alcotest.test_case "definedness exception observation never catches required errors" `Quick
+      (with_total_return definedness_exception_required_errors)]

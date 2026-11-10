@@ -69,6 +69,46 @@ module Unclassified_unfold_diagnostic = struct
       with _ -> ())
 end
 
+module Definedness_match_exception = struct
+  let enabled = Sys.getenv_opt "GILLIAN_DEFINEDNESS_MATCH_EXCEPTION" = Some "1"
+  let attempted = ref false
+
+  let emit atom error =
+    if enabled && not !attempted then
+      try
+        match Asrt.as_definedness atom with
+        | Some (_, expression)
+          when let variables = Expr.pvars expression in
+            Containers.SS.mem "entryCopied" variables
+            && Containers.SS.mem "successMapBefore" variables ->
+            attempted := true;
+            let backtrace = Printexc.get_raw_backtrace () in
+            let safe = Unclassified_unfold_diagnostic.safe in
+            let frames = match Printexc.backtrace_slots backtrace with
+              | None -> []
+              | Some slots ->
+                  let rec take index remaining =
+                    if remaining = 0 || index = Array.length slots then []
+                    else match Printexc.Slot.location slots.(index) with
+                      | None -> take (index + 1) remaining
+                      | Some location ->
+                          `String (Printf.sprintf "%s:%d:%d-%d"
+                            (safe (Filename.basename location.filename))
+                            location.line_number location.start_char location.end_char)
+                          :: take (index + 1) (remaining - 1)
+                  in take 0 3
+            in
+            (* Class and source locations only: never invoke an exception
+               printer, render operands, or inspect an execution state. *)
+            let text = "DEFINEDNESS_MATCH_EXCEPTION " ^ Yojson.Safe.to_string
+              (`Assoc ["exceptionClass", `String (safe (Printexc.exn_slot_name error));
+                "sourceFrames", `List frames; "exactCaseIDAvailable", `Bool false;
+                "proofCredit", `Bool false]) in
+            if String.length text < 2048 then Logging.print_to_all text
+        | _ -> ()
+      with _ -> ()
+end
+
 module type S = sig
   type err_t
   type state_t
@@ -2050,6 +2090,7 @@ module Make (State : SState.S) :
       | Gillian_result.Exc.Gillian_internal_error _ ) as err
       when !Config.Verification.total -> raise err
     | err ->
+        Definedness_match_exception.emit (fst step) err;
         let () =
           L.verbose (fun m ->
               m
