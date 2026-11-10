@@ -2827,8 +2827,24 @@ let ordinary_concrete_summary_unfolds () =
 let unfold_core_calls = ref 0
 module UnfoldMemory = struct
   type init_data = unit
-  type err_t = unit [@@deriving yojson, show]
-  type t = Expr.t list list [@@deriving yojson]
+  type err_t = unit
+  type t = Expr.t list list
+  let err_t_to_yojson () = `Null
+  let err_t_of_yojson = function `Null -> Ok () | _ -> Error "Expected unit error"
+  let pp_err_t fmt () = Fmt.string fmt "()"
+  let show_err_t () = "()"
+  let to_yojson heap = `List (List.map
+      (fun values -> `List (List.map Expr.to_yojson values)) heap)
+  let decode_list decode = function
+    | `List values ->
+        let rec loop = function
+          | [] -> Ok []
+          | value :: rest -> (match decode value with
+              | Error error -> Error error
+              | Ok value -> Result.map (fun rest -> value :: rest) (loop rest)) in
+        loop values
+    | _ -> Error "Expected an unfold-fixture list"
+  let of_yojson json = decode_list (decode_list Expr.of_yojson) json
   let init () = []
   let get_init_data _ = ()
   let clear _ = []
