@@ -21585,3 +21585,35 @@ let tests = tests @
        Alcotest.test_case "valid list domain keeps native singleton counterexample rejected" `Quick
          (with_total (valid_list_domain_entailment false))]
    | _ -> [])
+
+(* A real malformed reduction fixture tests fallback scope only, not a proof of
+   any partial value. The three excluded callers must keep their original error. *)
+let list_bounds_fallback_excluded_modes () =
+  let total = !Config.Verification.total and under = !Config.under_approximation in
+  Fun.protect ~finally:(fun () -> Config.Verification.total := total;
+    Config.under_approximation := under) (fun () ->
+    List.iter (fun (label, total_mode, under_mode, existentials) ->
+      Config.Verification.total := total_mode;
+      Config.under_approximation := under_mode;
+      let bad = bin Equal (bin LstNth (Expr.EList []) (Expr.int 0)) (Expr.Lit Undefined) in
+      let pfs = Engine.PFS.of_list [bad] and gamma = Gamma.init () in
+      let facts = Engine.PFS.to_list pfs and types = Gamma.to_list gamma in
+      let propagated = try
+        ignore (Solver.check_entailment existentials pfs [Expr.false_] gamma); false
+        with Engine.Reduction.ReductionException (_, message) ->
+          String.equal message "get_nth_of_list: index 0 out of bounds." in
+      Alcotest.(check bool) (label ^ " retains the actual bounds error") true propagated;
+      Alcotest.(check bool) (label ^ " preserves original premises") true
+        (List.equal Expr.equal facts (Engine.PFS.to_list pfs));
+      Alcotest.(check bool) (label ^ " preserves original Gamma") true
+        (types = Gamma.to_list gamma))
+      ["legacy partial mode", false, false, Utils.Containers.SS.empty;
+       "under approximation", true, true, Utils.Containers.SS.empty;
+       "existential caller", true, false, Utils.Containers.SS.singleton "#excluded"];
+    Printf.printf "LIST_BOUNDS_FALLBACK_MODE_GUARDS=3\n%!" )
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [Alcotest.test_case "list bounds fallback preserves excluded-mode errors" `Quick
+       list_bounds_fallback_excluded_modes]
+   | _ -> [])

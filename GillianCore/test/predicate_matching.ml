@@ -4000,7 +4000,9 @@ let with_definedness_eval_hook hook action =
 let definedness_exception_source_priority () =
   (* Deliberately malformed diagnostic fixture, not a valid-domain proof:
      real public entailment throws before SMT and supplies actual source slots. *)
-  let bad = Expr.BinOp (BinOp (Expr.EList [], LstNth, Expr.int 0), Equal, Expr.Lit Undefined) in
+  (* Use a non-list reduction error, outside the list-bounds counterquery
+     fallback: this fixture tests observation, never a partial-value proof. *)
+  let bad = Expr.BinOp (BinOp (Expr.Lit Null, LstNth, Expr.int 0), Equal, Expr.Lit Undefined) in
   let hook () = ignore (Engine.FOSolver.check_entailment Utils.Containers.SS.empty
     (Engine.PFS.of_list [bad]) [Expr.false_] (Engine.Type_env.init ())) in
   with_definedness_eval_hook hook (fun () ->

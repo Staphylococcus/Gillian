@@ -1749,12 +1749,15 @@ let check_entailment ?(matching = false) existentials left_fs right_fs gamma =
     else
     try check_entailment_simplified ~matching existentials left_fs right_fs gamma
     with
-    | Reduction.ReductionException (_, "Invalid List Expression")
+    | Reduction.ReductionException (_, message)
       when !Config.Verification.total
            && not !Config.under_approximation
-           && SS.is_empty existentials ->
+           && SS.is_empty existentials
+           && (String.equal message "Invalid List Expression"
+               || (String.starts_with ~prefix:"get_nth_of_list: index " message
+                   && String.ends_with ~suffix:" out of bounds." message)) ->
         (* Refuting a list domain can temporarily substitute an empty list into
-           an already-defined head/tail fact. Eager reduction cannot evaluate that
+           an already-defined head/tail or indexed fact. Reduction cannot evaluate that
            inconsistent alternative. Submit the original complete counterquery;
            do not discard the fact, assume a domain, or interpret the exception
            as UNSAT. Required SMT unknown still propagates from check_sat. *)
