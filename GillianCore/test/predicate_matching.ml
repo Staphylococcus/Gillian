@@ -3361,6 +3361,8 @@ let procedure_final_fixture cores =
 
 let procedure_unfold_final_siblings () =
   let prog,state,command,selector = procedure_final_fixture ["CorrelatedFinal"] in
+  let state : ProcedureUnfold.t = { state with state =
+    UnfoldState.set_store state.state (ReturnStore.init ["saved_selector",selector]) } in
   let results = ProcedureUnfold.evaluate_slcmd prog command state in
   require_procedure_heap "the live branch keeps its exact correlated owned heap"
     results [[Expr.int 0;Expr.int 7]];
@@ -3368,6 +3370,11 @@ let procedure_unfold_final_siblings () =
   Alcotest.(check int) "only the contradictory produced branch is certified" 1 !unfold_final_unsat;
   match results with
   | [Ok state] ->
+      (* PState applies the Matcher substitution; query the actual retained
+         program value, not the eliminated free logical variable's old name. *)
+      let selector = match ReturnStore.get (UnfoldState.get_store state.state) "saved_selector" with
+        | Some value -> value
+        | None -> Alcotest.fail "the caller's stored selector must survive" in
       Alcotest.(check bool) "the live branch retains the same selector" true
         (UnfoldState.assert_a state.state
           [Expr.BinOp (selector,Equal,Expr.int 0)]);
