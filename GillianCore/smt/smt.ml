@@ -1929,9 +1929,15 @@ let rec encode_logical_expression
 
   match le with
   | Lit lit -> encode_lit lit
-  | LVar var ->
+  | LVar var -> (
+      match Hashtbl.find_opt gamma var with
+      | Some UndefinedType -> encode_lit Undefined
+      | Some NullType -> encode_lit Null
+      | Some EmptyType -> encode_lit Empty
+      | Some NoneType -> encode_lit Nono
+      | binding ->
       let kind, typ =
-        match Hashtbl.find_opt gamma var with
+        match binding with
         | Some typ -> (Native typ, native_sort_of_type typ)
         | None ->
             if SS.mem var list_elem_vars then (
@@ -1941,7 +1947,7 @@ let rec encode_logical_expression
               require_definition def_gil_ext_literal;
               (Extended_wrapped, t_gil_ext_literal))
       in
-      make_const ~typ kind var
+      make_const ~typ kind var)
   | ALoc var -> native_const ObjectType var
   | PVar _ -> exceptf "HORROR: Program variable in pure formula"
   | UnOp (ToInt32Op, (BinOp (_, Utf16CodeUnit, _) as unit)) ->

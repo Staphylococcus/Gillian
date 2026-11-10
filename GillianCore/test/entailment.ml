@@ -21627,31 +21627,90 @@ let undefined_equality_native_encoding () =
       ~finally:(fun () -> native_equality_control_retained label fs gamma before types)
       (fun () ->
         Printf.printf "UNDEFINED_EQUALITY_NATIVE label=%s expected=%s\n%!" label
-          (match expected with `Sat -> "sat" | `Unsat -> "unsat" | `Encoding_error _ -> "simple-wrap-error");
-        match expected with
-        | `Sat -> Alcotest.(check bool) (label ^ " has an actual required native SAT model") true
-            (Option.is_some (Smt.exec_sat fs gamma))
-        | `Unsat -> Alcotest.(check bool) (label ^ " is actually required native UNSAT") true
-            (Option.is_none (Smt.exec_sat fs gamma))
-        | `Encoding_error message ->
-            match Smt.exec_sat fs gamma with
-            | exception Smt.SMT_error actual when String.equal actual message -> ()
-            | _ -> Alcotest.fail (label ^ " must retain the exact simple-wrap encoding error"))
+          (if expected then "sat" else "unsat");
+        Alcotest.(check bool) (label ^ " has the actual required native answer") expected
+          (Option.is_some (Smt.exec_sat fs gamma)))
   in
   List.iter (fun (label,typ,expected) ->
     let name = "#undefined_equality_native_" ^ label in
     let gamma = Hashtbl.create 1 in
     Option.iter (Hashtbl.add gamma name) typ;
     query label (Expr.Set.singleton (bin Equal (Expr.LVar name) (Expr.Lit Undefined))) gamma expected)
-    ["untyped",None,`Sat;
-     "undefined",Some Type.UndefinedType,`Encoding_error "Cannot simple-wrap value of type Undefined";
-     "object",Some Type.ObjectType,`Unsat; "list",Some Type.ListType,`Unsat;
-     "null",Some Type.NullType,`Encoding_error "Cannot simple-wrap value of type Null"];
-  query "false-control" (Expr.Set.singleton Expr.false_) (Hashtbl.create 1) `Unsat;
-  Printf.printf "UNDEFINED_EQUALITY_DIAGNOSTIC=sat:1,unsat:3,simple-wrap-errors:2\n%!"
+    ["untyped",None,true; "undefined",Some Type.UndefinedType,true;
+     "object",Some Type.ObjectType,false; "list",Some Type.ListType,false;
+     "null",Some Type.NullType,false];
+  query "false-control" (Expr.Set.singleton Expr.false_) (Hashtbl.create 1) false;
+  Printf.printf "UNDEFINED_EQUALITY_DIAGNOSTIC=sat:2,unsat:4,simple-wrap-errors:0\n%!"
 
 let tests = tests @
   (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
    | Some _,None -> [Alcotest.test_case "undefined equality retains native typed encoding distinctions" `Quick
        (with_total undefined_equality_native_encoding)]
+   | _ -> [])
+
+let singleton_variable_native_controls () =
+  let run label facts gamma check =
+    let fs = Expr.Set.of_list facts in
+    let before = Expr.Set.elements fs and types = nonblank_counter_types gamma in
+    Fun.protect
+      ~finally:(fun () -> native_equality_control_retained label fs gamma before types)
+      (fun () -> check (Smt.exec_sat fs gamma))
+  in
+  let expect label facts gamma sat = run label facts gamma (fun model ->
+    Alcotest.(check bool) (label ^ " actual required native answer") sat (Option.is_some model)) in
+  let gamma name typ = let g = Hashtbl.create 1 in Hashtbl.add g name typ; g in
+  let singletons = ["undefined",Type.UndefinedType,Literal.Undefined;
+    "null",Type.NullType,Literal.Null; "empty",Type.EmptyType,Literal.Empty;
+    "none",Type.NoneType,Literal.Nono] in
+  List.iter (fun (label,typ,literal) ->
+    let name = "#singleton_native_" ^ label in
+    let equal = bin Equal (Expr.LVar name) (Expr.Lit literal) and g = gamma name typ in
+    expect (label ^ "-own") [equal] g true;
+    expect (label ^ "-negated-own") [not_ equal] g false) singletons;
+  let name = "#singleton_distinct" in
+  expect "distinct-singletons" [bin Equal (Expr.LVar name) (Expr.Lit Null)]
+    (gamma name Type.UndefinedType) false;
+  let g = Hashtbl.create 4 in
+  let variables = List.map (fun (label,typ,_) ->
+    let name = "#singleton_list_" ^ label in Hashtbl.add g name typ; Expr.LVar name) singletons in
+  let nested = bin Equal (Expr.EList [Expr.EList variables])
+    (Expr.EList [Expr.EList (List.map (fun (_,_,literal) -> Expr.Lit literal) singletons)]) in
+  expect "nested-singletons" [nested] g true;
+  expect "nested-singletons-negated" [not_ nested] g false;
+  let name = "#singleton_shadow" in
+  let variable = Expr.LVar name and g = gamma name Type.UndefinedType in
+  expect "typed-number-shadow" [Expr.Exists ([name,Some Type.NumberType],
+    bin Equal variable (Expr.num 7.))] g true;
+  expect "untyped-shadow" [Expr.Exists ([name,None],bin Equal variable (Expr.Lit Null))] g true;
+  expect "untyped-universal-counterexample" [Expr.ForAll ([name,None],
+    bin Equal variable (Expr.Lit Undefined))] g false;
+  expect "typed-singleton-shadow" [Expr.ForAll ([name,Some Type.UndefinedType],
+    bin Equal variable (Expr.Lit Undefined))] (gamma name Type.NumberType) true;
+  let name = "#singleton_model_number" and singleton = "#singleton_model_undefined" in
+  let g = gamma name Type.NumberType in Hashtbl.add g singleton Type.UndefinedType;
+  run "ordinary-model-with-singleton"
+    [bin Equal (Expr.LVar singleton) (Expr.Lit Undefined); bin Equal (Expr.LVar name) (Expr.num 7.)] g
+    (function None -> Alcotest.fail "ordinary variable must retain its native model"
+    | Some model ->
+        let lifted = Hashtbl.create 1 in
+        Smt.lift_model model g (Hashtbl.add lifted) (Expr.Set.singleton (Expr.LVar name));
+        Alcotest.(check bool) "ordinary Number model still lifts beside a singleton" true
+          (Hashtbl.find_opt lifted name = Some (Expr.num 7.)));
+  let rejects label facts g message =
+    match run label facts g Fun.id with
+    | exception Smt.SMT_error actual when String.equal actual message -> ()
+    | _ -> Alcotest.fail (label ^ " must retain its exact ordinary encoding error") in
+  let name = "#singleton_unchanged_set" in
+  rejects "unchanged-set" [bin Equal (Expr.LVar name) (Expr.Lit Undefined)]
+    (gamma name Type.SetType) "Cannot simple-wrap value of type Set";
+  let left = "#singleton_unchanged_int" and right = "#singleton_unchanged_list" in
+  let g = gamma left Type.IntType in Hashtbl.add g right Type.ListType;
+  rejects "unchanged-native-types" [bin Equal (Expr.LVar left) (Expr.LVar right)] g
+    "incompatible equality, type error!";
+  Printf.printf "SINGLETON_VARIABLE_ENCODING=complete\n%!"
+
+let tests = tests @
+  (match Sys.getenv_opt "GILLIAN_NATIVE_SMT_CONTEXT_DIR", Sys.getenv_opt "SMT_TIMEOUT" with
+   | Some _,None -> [Alcotest.test_case "singleton variables preserve native identity scoping and model lifting" `Quick
+       (with_total singleton_variable_native_controls)]
    | _ -> [])
